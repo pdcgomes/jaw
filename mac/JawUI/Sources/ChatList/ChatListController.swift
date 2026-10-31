@@ -456,7 +456,7 @@ final class ChatCell: NSView {
         let quiet: [NSAttributedString.Key: Any] = [.font: TextStyle.callout.nsFont, .foregroundColor: roles.secondary.nsColor,
                                                     .paragraphStyle: truncating]
         let out = NSMutableAttributedString()
-        let typing = quiet.merging([.foregroundColor: roles.online.nsColor]) { $1 }
+        let typing = quiet.merging([.foregroundColor: (isSelected ? roles.selectedOnline : roles.online).nsColor]) { $1 }
         if let said = TypingWords.line(typists, group: chat.kind.isGroup, in: lineRect(chat, roles).width,
                                        width: { NSAttributedString(string: $0, attributes: typing).size().width })
         {

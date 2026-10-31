@@ -17,6 +17,18 @@ import Testing
     }
 }
 
+@Test func `typing reads where the chat list and the conversation draw it, a selected row's on the selection, dark and light`() {
+    for roles in [Catalog.jaw.dark, Catalog.jaw.light] {
+        for ground in [roles.ground, roles.surface] {
+            #expect(roles.online.contrast(with: ground) >= 3, "online on \(ground), dark \(roles.isDark), the settings design's band")
+        }
+        let selected = roles.selectedOnline
+        #expect(selected.contrast(with: roles.selection) >= 4.5, "a selected row's typing on its selection, dark \(roles.isDark)")
+        #expect(selected.g > selected.r && selected.g > selected.b, "still green, dark \(roles.isDark)")
+    }
+    #expect(Catalog.jaw.dark.selectedOnline == Catalog.jaw.dark.online, "Tokyo Night's green reads on its selection as it is")
+}
+
 @Test func `a colour over another is what the eye sees`() {
     let half = RGBA(r: 1, g: 1, b: 1, a: 0.5).over(RGBA(r: 0, g: 0, b: 0))
     #expect(abs(half.r - 0.5) < 1e-9 && half.a == 1)

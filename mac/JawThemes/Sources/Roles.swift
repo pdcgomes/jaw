@@ -26,6 +26,8 @@ public struct Roles: Sendable, Hashable {
     public var mention: RGBA
     /// Online, typing.
     public var online: RGBA
+    /// Online and typing on the selected row, as `online` reads too faintly on some selections.
+    public var selectedOnline: RGBA
     /// Failed, destructive.
     public var failed: RGBA
     /// Group senders' names, by the index jawd gives each member.
@@ -82,6 +84,7 @@ public enum Catalog {
             yours: blue.opacity(0.18).over(bg),
             mention: orange,
             online: green,
+            selectedOnline: green,
             failed: red,
             senders: [red, yellow, blue, purple, cyan, green, orange, teal],
         )
@@ -107,6 +110,9 @@ public enum Catalog {
             yours: blue.opacity(0.12).over(bg),
             mention: orange,
             online: green,
+            // Its green reads at 2.9:1 on its selection; taken 40% toward Tokyo Night's ground, as its
+            // text is, a selected row's typing reads at 4.8:1 there and stays green.
+            selectedOnline: green.mixed(with: RGBA(0x1A1B26), 0.4),
             failed: red,
             senders: [red, yellow, blue, purple, cyan, green, orange, teal],
         )

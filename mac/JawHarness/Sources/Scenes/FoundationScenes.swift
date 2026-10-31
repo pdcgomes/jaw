@@ -31,7 +31,7 @@ private struct RolesScene: View {
             ("ground", roles.ground), ("surface", roles.surface), ("selection", roles.selection), ("text", roles.text),
             ("secondary", roles.secondary), ("tertiary", roles.tertiary), ("separator", roles.separator),
             ("accent", roles.accent), ("yours", roles.yours), ("mention", roles.mention), ("online", roles.online),
-            ("failed", roles.failed),
+            ("selected online", roles.selectedOnline), ("failed", roles.failed),
         ]
     }
 

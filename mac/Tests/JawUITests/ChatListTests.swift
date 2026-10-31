@@ -30,6 +30,18 @@ import Testing
             "your read message and its ticks back once nobody is")
 }
 
+@MainActor @Test func `a selected row says who's typing in the selection's green, which reads on it`() {
+    let light = Catalog.jaw.light
+    let cell = ChatCell(frame: NSRect(x: 0, y: 0, width: 300, height: 56))
+    cell.show(Samples.group, typists: [Typist(id: "person:7", name: "Rui")], roles: light, open: false, inCommunity: false, avatar: nil)
+    func colour() -> NSColor? {
+        cell.line(Samples.group, light).attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
+    #expect(colour() == light.online.nsColor)
+    cell.isSelected = true
+    #expect(colour() == light.selectedOnline.nsColor && light.selectedOnline != light.online, "a darker green on the selection")
+}
+
 @MainActor @Test func `a busy group's row cuts its names short at 300 points, and always says typing`() throws {
     let roles = Catalog.jaw.dark
     let list = ChatListController(folder: "all", roles: roles)
