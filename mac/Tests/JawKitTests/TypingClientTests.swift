@@ -43,6 +43,19 @@ final class Count: Sendable {
     }
 }
 
+/// The watches a fake hasn't answered yet, their request ids by chat, kept across its calls.
+final class Unanswered: Sendable {
+    let ids = Mutex<[String: UInt64]>([:])
+
+    func hold(_ chat: String, _ id: UInt64) {
+        ids.withLock { $0[chat] = id }
+    }
+
+    func id(_ chat: String) -> UInt64? {
+        ids.withLock { $0[chat] }
+    }
+}
+
 let anaTyping = Typist(id: "person:2", name: "Ana")
 let ruiRecording = Typist(id: "person:3", name: "Rui", state: .recording)
 let zeTyping = Typist(id: "person:4", name: "Zé")
@@ -141,5 +154,69 @@ let zeTyping = Typist(id: "person:4", name: "Zé")
         fake.send(#"{"method":"resync","params":{"watch":"w1"}}"#)
         let resynced = await drain(jawd) { typing($0) != nil }
         #expect(typing(resynced) == [:], "and so does the answer to watching again after a resync")
+    }
+
+    @Test func `a chat list's move whose answer takes out a chat someone's typing in forgets them`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            switch method {
+            case "chats.watch":
+                return [chatList(id, ["ana", "rui"], typing: #"{"ana":[\#(typist("person:2", "Ana"))]}"#)]
+            case "watch.move":
+                let ze = FakeJawd.chat("ze", v: 4, sort: "0~1", name: "ze")
+                return [#"{"id":\#(id),"result":{"watch":"w1","seq":11,"total":3,"rows":[\#(ze)],"remove":["ana"],"#
+                    + #""typing":{"ze":[\#(typist("person:4", "Zé"))]}}}"#]
+            default:
+                return ordinary(method, params, id)
+            }
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let list = jawd.watchChats("all", .top(60))
+        let first = await drain(jawd) { typing($0) != nil }
+        #expect(typing(first) == ["ana": [anaTyping]])
+
+        jawd.move(list, .around("rui", before: 1, after: 1))
+        let moved = await drain(jawd) { all in !requests(fake, "watch.move").isEmpty && typing(all) != nil }
+        #expect(typing(moved) == ["ze": [zeTyping]], "Ana's chat left the list with the move, and her typing with it; Zé's came in")
+    }
+
+    @Test func `conversations let go while their watches are in flight forget their typing at once, and their answer or failure changes nothing`() async throws {
+        let held = Unanswered()
+        let fake = try FakeJawd { method, params, id in
+            switch method {
+            case "chats.watch":
+                return [chatList(id, ["ana"], typing: "{}")]
+            case "messages.watch":
+                held.hold(params["chat"]?.string ?? "", id)
+                return []
+            default:
+                return ordinary(method, params, id)
+            }
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = jawd.watchChats("all", .top(60))
+        let ze = jawd.watchMessages("ze", .newest(80)), rui = jawd.watchMessages("rui", .newest(80))
+        #expect(await eventually { held.id("ze") != nil && held.id("rui") != nil }, "both watched, neither answered")
+        fake.send(typingPush("ze", typist("person:4", "Zé")))
+        fake.send(typingPush("rui", typist("person:3", "Rui", "recording")))
+        let both = await drain(jawd) { typing($0) == ["ze": [zeTyping], "rui": [ruiRecording]] }
+        #expect(typing(both) == ["ze": [zeTyping], "rui": [ruiRecording]], "a conversation shows its chat while its watch is in flight")
+
+        jawd.unwatch(ze)
+        jawd.unwatch(rui)
+        let letGo = await drain(jawd) { typing($0) != nil }
+        #expect(typing(letGo) == [:], "forgotten as they're let go, before either is answered")
+
+        let zeID = try #require(held.id("ze")), ruiID = try #require(held.id("rui"))
+        fake.send(conversation(zeID, typing: #"{"ze":[\#(typist("person:4", "Zé"))]}"#))
+        fake.send(#"{"id":\#(ruiID),"error":{"code":3,"message":"jawd has no chat rui"}}"#)
+        fake.send(typingPush("ze", typist("person:4", "Zé")))
+        #expect(await eventually { requests(fake, "unwatch").map { $0["watch"]?.string } == ["w2"] }, "the answer's watch let go of")
+        let after = await drain(jawd, seconds: 0.5) { _ in false }
+        #expect(typing(after) == nil, "the answer's typing, and a push for its chat, change nothing")
+        #expect(!after.contains { if case .windowFailed = $0 { true } else { false } }, "nor is the failure said")
     }
 }
