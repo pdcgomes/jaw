@@ -326,9 +326,14 @@ async fn a_community_and_its_groups_are_one_row_of_a_window_and_a_window_around_
 #[tokio::test(flavor = "multi_thread")]
 async fn a_community_a_window_hasnt_open_is_one_row_summing_up_the_same_and_opening_it_brings_its_groups() {
     let bed = Bed::new(brisk());
-    bairro(&bed).await;
+    let family = bairro(&bed).await;
+    // Xadrez read and newer than Bairro's unread groups, so a closed Bairro in Unread summing up
+    // every group would sit at it and show its message.
+    bed.apply(vec![said(XADREZ, "x2", AT + 35)]).await;
+    bed.apply(vec![read_up_to(XADREZ, "x2")]).await;
     let mut watcher = bed.watcher(64);
-    for folder in ["all", "unread", "groups", "communities", "archived"] {
+    let mentions = smart(&mut watcher, "Mentions me").await;
+    for folder in ["all", "unread", "groups", "communities", "archived", family.as_str(), mentions.as_str()] {
         let open = Held::top(&mut watcher, folder).await;
         let shut = json!({"folder": folder, "around": "top", "after": 50, "open": []});
         let mut closed = Held::watch(&mut watcher, shut).await;
