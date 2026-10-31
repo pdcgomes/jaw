@@ -343,8 +343,8 @@ EOF
 
 **Files:**
 - Create: `mac/JawKit/Sources/Client/Build.swift`, `mac/scripts/built-from`
-- Modify: `mac/scripts/bundle` (its header comment at 7-10, after line 43, line 49 and the last line, 62)
-- Test: `mac/Tests/JawKitTests/BuildTests.swift`
+- Modify: `mac/scripts/bundle` (its header comment at 7-10, after line 43, line 49 and the last line, 62), `Makefile` (`mac-test`)
+- Test: `mac/Tests/JawKitTests/BuildTests.swift`, `mac/scripts/test-built-from`
 
 **Interfaces:**
 - Produces, in JawKit: `public struct Build: Equatable, Sendable`, with `from: String?` (`"main"`, `"release"`, `"branch"`, `"changed"` or nil), `at: String?`, `public init(from:at:)`, `public init(info: [String: Any])` (reading `JawBuiltFrom` and `JawBuiltAt`), `public var startsOnAccounts: Bool` and `public var refusal: String`.
@@ -440,26 +440,53 @@ Create `mac/scripts/built-from`, then run `chmod +x mac/scripts/built-from`:
 # (JawBuiltFrom and JawBuiltAt): on two lines, main, release, branch or changed, then the commit, tag
 # or branch, for what the app says. Only a Jaw from origin/main or a release's tag on it starts a jawd
 # on an account's folder, since a branch's jawd could move jaw.db to a version main's can't open. A
-# tag counts only on origin/main, since every worktree shares the tags; "changed" is a tree with
-# uncommitted changes to what jawd and jaw-engine are built from, which the app's own sources, the
-# docs and the READMEs aren't; and a tree outside git says branch. It only reads: git takes none of
+# tag counts only on origin/main, since every worktree shares the tags, and origin/main only where
+# origin is the project's own repository, as Cargo.toml names it, since a clone of a local checkout
+# has that checkout's main for it; "changed" is a tree with uncommitted changes to what jawd and
+# jaw-engine are built from, Cargo's, rustup's and go's settings beside them and the Makefile
+# included, which the app's own sources, the docs and the READMEs aren't; and a tree outside git says
+# branch. So that neither git's settings nor a name in the repository steers it to main, it reads
+# origin/main by its whole ref, which a branch or tag called origin/main can't stand in for; counts
+# as a change every untracked file but those the repository's own .gitignore files leave out,
+# whatever status.showUntrackedFiles or an ignore file of your own says, and every file git is told
+# to assume unchanged or skip; reads the checkout from its top, whatever folder of it it's given; and
+# stops when git can't read the tree, so make mac records nothing. It only reads: git takes none of
 # its optional locks.
 #
 #   mac/scripts/built-from [<checkout>]        # this script's own checkout by default
 set -eu
 export GIT_OPTIONAL_LOCKS=0
+host=github.com
+name=pdcgomes/jaw
+inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work Makefile"
 cd "${1:-$(dirname "$0")/../..}"
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
     printf 'branch\na tree outside git, which says nothing of where it came from\n'
     exit 0
 fi
+top=$(git rev-parse --show-toplevel)
+cd "$top"
 commit=$(git rev-parse --short HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
-if [ -n "$(git status --porcelain -- Cargo.toml Cargo.lock crates engine proto protocol)" ]; then
+changes=$(git status --porcelain --untracked-files=no -- $inputs)
+untracked=$(git ls-files --others --exclude-per-directory=.gitignore -- $inputs)
+tracked=$(git ls-files -v -- $inputs)
+unwatched=$(printf '%s\n' "$tracked" | sed -n '/^[^H]/p')
+origin=$(git remote get-url origin 2> /dev/null) || origin=
+case ${origin%.git} in
+"https://$host/$name" | "git@$host:$name" | "ssh://git@$host/$name") ours=true ;;
+*) ours=false ;;
+esac
+main=$(git show-ref --verify --hash refs/remotes/origin/main 2> /dev/null) || main=
+if [ -n "$changes$untracked" ]; then
     printf 'changed\n%s, with uncommitted changes to what jawd is built from\n' "$place"
-elif ! git merge-base --is-ancestor HEAD origin/main 2> /dev/null; then
+elif [ -n "$unwatched" ]; then
+    printf 'changed\n%s, with files jawd is built from whose changes git is told to ignore\n' "$place"
+elif ! $ours; then
+    printf "branch\n%s, in a checkout whose origin isn't %s\n" "$place" "$host/$name"
+elif [ -z "$main" ] || ! git merge-base --is-ancestor HEAD "$main" 2> /dev/null; then
     printf 'branch\n%s, not on origin/main\n' "$place"
 elif tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2> /dev/null); then
     printf 'release\n%s\n' "$tag"
@@ -514,7 +541,7 @@ followed by `git status --short` listing only this task's three new files. A new
 
 - [ ] **Step 7: The bundle records it**
 
-In `mac/scripts/bundle`, make four changes.
+In `mac/scripts/bundle`, make five changes.
 
 The header comment's lines 7 to 10 become the lines below, which also say what an ad hoc bundle does: main's says it "runs here only", but under the hardened runtime it doesn't open, as the build Mac's crash report of 29 October shows for a Release Jaw signed ad hoc (the Decisions).
 
@@ -528,10 +555,22 @@ The header comment's lines 7 to 10 become the lines below, which also say what a
 # library validation refuses an app signed ad hoc its own frameworks.
 ```
 
-After line 43, the `JawdVersion` line that ends `"$app/Contents/Info.plist"`, add:
+After line 16, `app="$out/Jaw.app"`, before the builds, add:
 
 ```sh
 built="$(mac/scripts/built-from)"
+# The helpers are copied from this checkout's target, whatever target-dir a setting of Cargo's names.
+export CARGO_TARGET_DIR="$repo/target"
+```
+
+After line 43, the `JawdVersion` line that ends `"$app/Contents/Info.plist"`, add:
+
+```sh
+again="$(mac/scripts/built-from)"
+if [ "$again" != "$built" ]; then
+    echo "==> the checkout changed while make mac built it: run it again" >&2
+    exit 1
+fi
 from="$(echo "$built" | sed -n 1p)"
 at="$(echo "$built" | sed -n 2p)"
 plutil -replace JawBuiltFrom -string "$from" "$app/Contents/Info.plist"
@@ -561,6 +600,8 @@ git commit -F- <<'EOF'
 make mac records where a Jaw was built from in its Info.plist, JawBuiltFrom and JawBuiltAt, from mac/scripts/built-from, which reads git and takes none of its locks: main when HEAD is on origin/main, release when it's also at a tag like v0.1.0, branch otherwise, a tag on a commit off origin/main and a tree outside git included, and changed when the tree has uncommitted changes to what jawd and jaw-engine are built from, the app's own sources, the docs and the READMEs not counting; JawKit's Build reads it, and only a Jaw from origin/main or a release's tag on it is to start a jawd on an account's folder, where a branch's jawd could move jaw.db to a version main's can't open, the others saying what they were built from and how to start one, and the bundle says a Jaw it signs ad hoc won't open, since under the hardened runtime library validation refuses it its own frameworks; tests: Build reads the keys, starts only from main or a release and says why not, and built-from said branch here, changed with a new file under crates, branch with one under mac, main for the Mac builder's checkout, branch outside git, and in a throwaway repository branch for a tag off origin/main and release for one on it
 EOF
 ```
+
+**Amended while it was built.** Its review (30 October) found the lines above short of the Decision's "It holds with nobody remembering anything": built-from said main for a jawd that wasn't main's in cases they left open. Three of its git calls could be steered by the repository. Git takes a branch or tag called origin/main before the remote's ref, and every worktree shares the refs. `git status --porcelain` hid untracked files under `status.showUntrackedFiles=no`, though Go compiles every `.go` file in a package and Cargo runs a new `build.rs` by itself. And a `git status` that failed inside `[ -n "$(…)" ]` counted as a clean tree, since a failure there doesn't stop `set -e`. The bundle read the tree minutes after it compiled jawd from it, so a `git stash`, a checkout or a fast-forwarding pull meanwhile recorded main for a jawd built from a branch or a changed tree. A clone of a local checkout, as this project's audits make (`git clone <worktree> /tmp/jaw-audits/…`), has that checkout's main for its origin/main. A folder inside the checkout, given as the argument, made the paths it looks at relative to that folder. Cargo reads `.cargo/config.toml` and `rust-toolchain(.toml)` beside the sources, go reads a `go.work` above `engine/`, and the Makefile's engine target builds jaw-engine, none of them among the six paths; and the bundle copied `target/release/jawd` whether or not cargo had built there, as with `CARGO_TARGET_DIR` or a `target-dir` it builds elsewhere. As 2318da86 fixed it, built-from reads origin/main by its whole ref with `git show-ref --verify`, which takes the name exactly, since even `refs/remotes/origin/main` falls back to a tag called `refs/remotes/origin/main` when the remote's ref is missing. It counts as changes every untracked file `git ls-files --others` finds but those the repository's own .gitignore files leave out, so neither a `status.*` setting nor an ignore file of your own, `.git/info/exclude` or `core.excludesFile`, hides one, and every file git is told to assume unchanged or skip, which `git status` passes over (`changed` and `<branch> at <hash>, with files jawd is built from whose changes git is told to ignore`). It keeps each git call that reads the tree on a line of its own, so one that fails stops it, and `make mac` with it, before anything is recorded. It counts origin/main only where origin, as git fetches it (`git remote get-url`, which follows `url.<base>.insteadOf`), is the project's own repository, `github.com/pdcgomes/jaw` as Cargo.toml names it, in its https or ssh form, with or without `.git`, and otherwise says `branch` and `<branch> at <hash>, in a checkout whose origin isn't github.com/pdcgomes/jaw`. It reads the checkout from its top (`git rev-parse --show-toplevel`), and counts `.cargo`, `rust-toolchain`, `rust-toolchain.toml`, `go.work` and the `Makefile` with the six paths. The bundle takes the record before the builds and checks, before it writes the keys, that built-from still says the same, stopping with "the checkout changed while make mac built it: run it again" when it doesn't, and has cargo build into the checkout's own `target` (`CARGO_TARGET_DIR`), where it copies the helpers from. `mac/scripts/test-built-from`, which `make mac-test` runs before the build Mac's suites, tries 46 cases on throwaway repositories under one `mktemp -d` folder removed on every way out, git kept inside it by `GIT_CEILING_DIRECTORIES` with its own locations unset, and git's global and system settings left out: the review's (a branch or a tag called origin/main, `status.showUntrackedFiles=no`, an index git can't read, a clone of a local checkout, a folder inside the checkout, a new `.cargo/config.toml`, `rust-toolchain`, `rust-toolchain.toml` or `go.work`, and a changed Makefile), the fixes' own (a tag called `refs/remotes/origin/main` with no origin/main, an origin `url.insteadOf` sends to a local checkout, no origin, `.git/info/exclude`, an ignore file of your own, and files git is told to assume unchanged or skip), and the ordinary ones of Step 6 and the review, with the project's origin. Task 2's first built-from said main in 17 of them, and this one passes all 46. Step 6's try-out holds but for its throwaway repository, which has no origin, so both its lines there now say `branch` and that its origin isn't the project's. `BuildTests.swift` also expects `"Main"` and `""` to start nothing and `Build(info: ["JawBuiltFrom": true]).from` to be nil, which a `Build` that refused only `branch` and `changed` and read any value as a word passed, and fails with 3 issues. Steps 5 and 7 show the code as it now is.
 
 ---
 
