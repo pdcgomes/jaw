@@ -93,17 +93,59 @@ func album(_ n: Int) -> MessageRow {
     #expect(MessageLayout.Builder.albumLine(album(5).album) == "Album · 4 photos and 1 video")
 }
 
-@MainActor @Test func `a cell asks for its pictures once, and lets them go when it's reused`() async {
-    let pictures = MessagePictures(files: .memory(["a.768.jpg": jpeg(768, 576), "a.256.jpg": jpeg(256, 192), "a.jpg": jpeg(96, 72)]))
-    let cell = MessageView(frame: CGRect(x: 0, y: 0, width: 640, height: 300))
+/// The photo's pictures, behind four slow decodes that keep every worker busy, so what a cell asks
+/// for waits, and letting it go can drop it before it starts.
+@MainActor
+func busyPictures() -> MessagePictures {
+    var files = ["a.768.jpg": jpeg(768, 576), "a.256.jpg": jpeg(256, 192), "a.jpg": jpeg(96, 72)]
+    let noise = noisy(2400, 1800)
+    for i in 0 ..< PictureQueue.most {
+        files["n\(i)"] = noise
+    }
+    let pictures = MessagePictures(files: .memory(files))
+    let busy = pictures.token()
+    for i in 0 ..< PictureQueue.most {
+        pictures.queue.ask(key("n\(i)", 2400, 1800), for: busy) { _ in }
+    }
+    return pictures
+}
+
+/// A cell in its row in a window of its own, as the transcript's are; the window is kept until the
+/// test ends, as a cell leaving its window lets go of its pictures too.
+@MainActor
+func shownCell(_ pictures: MessagePictures) -> (MessageView, NSTableRowView, NSWindow) {
+    let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 640, height: 300), styleMask: .borderless, backing: .buffered, defer: true)
+    let row = NSTableRowView(frame: CGRect(x: 0, y: 0, width: 640, height: 300))
+    let cell = MessageView(frame: row.bounds)
     cell.pictures = pictures
+    window.contentView?.addSubview(row)
+    row.addSubview(cell)
+    return (cell, row, window)
+}
+
+@MainActor @Test func `a cell asks for its pictures once, and lets them go when it's reused or its row leaves the transcript`() async {
     let l = laid(photo(4032, 3024))
+    let pictures = busyPictures()
+    let (cell, _, window) = shownCell(pictures)
     cell.laid = l
     cell.laid = l
+    #expect(pictures.queue.counts.asked == PictureQueue.most + 2, "its thumbnail and its preview, asked once each")
     cell.prepareForReuse()
-    _ = await eventually { !pictures.queue.busy }
-    let counts = pictures.queue.counts
-    #expect(counts.decoded + counts.dropped == 2, "its thumbnail and its preview, asked once each: \(counts)")
+    #expect(await eventually(seconds: 20) { !pictures.queue.busy })
+    #expect(pictures.queue.counts.dropped == 2 && pictures.queue.counts.decoded == PictureQueue.most,
+            "let go before they started, so never decoded nor handed over: \(pictures.queue.counts)")
+
+    let more = busyPictures()
+    let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(10))
+    c.pictures = more
+    let (gone, row, other) = shownCell(more)
+    gone.laid = l
+    #expect(more.queue.counts.asked == PictureQueue.most + 2)
+    c.tableView(c.table, didRemove: row, forRow: 0)
+    #expect(await eventually(seconds: 20) { !more.queue.busy })
+    #expect(more.queue.counts.dropped == 2 && more.queue.counts.decoded == PictureQueue.most,
+            "its row out of the transcript, what it asked for is let go: \(more.queue.counts)")
+    #expect(gone.window === other && cell.window === window, "each still in its window, so neither let go by leaving it")
 }
 
 @MainActor @Test func `a preview decoded before the cell first draws is just there, and one coming after its thumbnail fades in`() async {

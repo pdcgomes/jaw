@@ -47,6 +47,8 @@ public final class PictureQueue: Sendable {
 
     /// What it has done since it was made, for the tests and the bench.
     public struct Counts: Sendable, Hashable {
+        /// Asked for, each cell's ask counted, whether or not another's had asked for the same.
+        public var asked = 0
         public var decoded = 0
         public var failed = 0
         /// Asked for, then let go of by everyone before it started.
@@ -96,13 +98,17 @@ public final class PictureQueue: Sendable {
     /// Asks for `key` for `token`; `done` runs on the main thread once it's decoded, or found unreadable.
     public func ask(_ key: PictureKey, for token: PictureToken, done: @escaping Done) {
         if case .here = mode {
-            let files = state.withLock { $0.files }
+            let files = state.withLock { s in
+                s.counts.asked += 1
+                return s.files
+            }
             finish(key, Decode.picture(key, from: files), started: false)
             MainActor.assumeIsolated { done(key) }
             return
         }
         let asked = state.withLock { s -> Bool in
             guard !s.failed.contains(key) else { return false }
+            s.counts.asked += 1
             if s.jobs[key] == nil {
                 s.jobs[key] = Job()
                 s.waiting.append(key)
