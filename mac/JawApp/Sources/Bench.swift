@@ -355,7 +355,7 @@ enum Bench {
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-        finish(["snapshot": 1, "panes": Double(model.panes.count)])
+        finish(["snapshot": 1, "panes": Double(model.panes.count), "typing": Double(model.typing.count)])
     }
 
     static func opens(_ model: AppModel, _ chats: [ChatRow], _ times: [Double]) {
