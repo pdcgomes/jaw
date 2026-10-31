@@ -92,12 +92,18 @@ public struct ContactCardsView: View {
     public init(contact: Contact, from: String, roles: Roles, message: @escaping (String, String) -> Void,
                 done: @escaping () -> Void)
     {
+        self.init(contact: contact, from: from, roles: roles, sheet: ContactCardsSheet(cards: contact.cards), message: message, done: done)
+    }
+
+    init(contact: Contact, from: String, roles: Roles, sheet: ContactCardsSheet, message: @escaping (String, String) -> Void,
+         done: @escaping () -> Void)
+    {
         self.contact = contact
         self.from = from
         self.roles = roles
         self.message = message
         self.done = done
-        _sheet = State(initialValue: ContactCardsSheet(cards: contact.cards))
+        _sheet = State(initialValue: sheet)
     }
 
     public var body: some View {
@@ -107,13 +113,14 @@ public struct ContactCardsView: View {
                 Text(from).textStyle(.callout).tone(.secondary, roles)
             }
             if contact.cards.count > Self.unscrolled {
+                // Lazily, so a message of 256 cards lays out only the ones in sight.
                 ScrollViewReader { proxy in
-                    ScrollView { rows }
+                    ScrollView { LazyVStack(spacing: Space.xs) { rows } }
                         .onChange(of: sheet.selected) { proxy.scrollTo(sheet.selected) }
                 }
                 .frame(height: 400)
             } else {
-                rows
+                VStack(spacing: Space.xs) { rows }
             }
             HStack {
                 Text("↑↓ choose · ↩ message · esc closes").textStyle(.caption).tone(.tertiary, roles)
@@ -146,13 +153,11 @@ public struct ContactCardsView: View {
     static let unscrolled = 6
 
     var rows: some View {
-        VStack(spacing: Space.xs) {
-            ForEach(Array(contact.cards.enumerated()), id: \.offset) { i, card in
-                CardRow(card: card, roles: roles, selected: i == sheet.selected, message: message)
-                    .id(i)
-                    .contentShape(Rectangle())
-                    .onTapGesture { sheet.choose(i) }
-            }
+        ForEach(contact.cards.indices, id: \.self) { i in
+            CardRow(card: contact.cards[i], roles: roles, selected: i == sheet.selected, message: message)
+                .id(i)
+                .contentShape(Rectangle())
+                .onTapGesture { sheet.choose(i) }
         }
     }
 }

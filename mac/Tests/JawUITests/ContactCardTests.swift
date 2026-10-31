@@ -4,6 +4,7 @@ import CoreText
 @testable import JawKit
 import JawThemes
 @testable import JawUI
+import SwiftUI
 import Testing
 
 /// A contact card in its message: its picture, name and numbers, Message or View All across its
@@ -245,6 +246,62 @@ func fastest(_ run: () -> Void) -> Duration {
     sheet.choose(1)
     #expect(sheet.returned()?.phone == "+351 917 777 777", "Sofia's number, which isn't on WhatsApp")
     #expect(ContactCardsSheet(cards: [ContactCard(name: "Escola")]).returned() == nil, "a card without a number messages no one")
+}
+
+/// A message of `n` cards, each with `numbers` numbers.
+func cards(_ n: Int, numbers: Int) -> Contact {
+    Contact(name: "\(n) contacts", cards: (0 ..< n).map { i in
+        ContactCard(name: "Card \(i)", phones: (0 ..< numbers).map { ContactCard.Phone(number: String(format: "+351 91%03d %04d", i, $0)) })
+    })
+}
+
+/// The sheet of `contact`'s cards in a window off the screen, and how long it took to lay out.
+@MainActor
+func sheetShown(_ contact: Contact, sheet: ContactCardsSheet? = nil) -> (took: Duration, window: NSWindow, host: NSView) {
+    let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 440, height: 600), styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.animationBehavior = .none
+    window.orderFront(nil)
+    let view = ContactCardsView(contact: contact, from: "From Rui", roles: Catalog.jaw.roles(dark: true),
+                                sheet: sheet ?? ContactCardsSheet(cards: contact.cards), message: { _, _ in }, done: {})
+    var host = NSView()
+    let took = ContinuousClock().measure {
+        host = NSHostingView(rootView: view)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+    }
+    return (took, window, host)
+}
+
+@MainActor
+func scrollViews(in view: NSView) -> [NSScrollView] {
+    if let scroll = view as? NSScrollView { return [scroll] }
+    return view.subviews.flatMap { scrollViews(in: $0) }
+}
+
+@MainActor @Test func `the sheet of a message of many cards lays out only those in sight, and still scrolls to the one chosen`() async throws {
+    func laid(_ n: Int) -> Duration {
+        (0 ..< 3).map { _ in
+            let shown = sheetShown(cards(n, numbers: 16))
+            shown.window.close()
+            return shown.took
+        }.min()!
+    }
+    _ = laid(8)
+    let (few, many) = (laid(8), laid(256))
+    #expect(many < few * 3, "256 cards of 16 numbers laid out in \(many), and 8 in \(few)")
+
+    let contact = cards(256, numbers: 1)
+    let sheet = ContactCardsSheet(cards: contact.cards)
+    let shown = sheetShown(contact, sheet: sheet)
+    defer { shown.window.close() }
+    let scroll = try #require(scrollViews(in: shown.host).first, "the sheet's scroll view")
+    let top = scroll.documentVisibleRect.minY
+    sheet.choose(200)
+    try await Task.sleep(for: .milliseconds(500))
+    shown.host.layoutSubtreeIfNeeded()
+    #expect(scroll.documentVisibleRect.minY > top + 200 * 40, "card 200 scrolled to: from \(top) to \(scroll.documentVisibleRect.minY)")
 }
 
 @Test func `every contact card draws as its reference, in both looks, dark and light`() throws {
