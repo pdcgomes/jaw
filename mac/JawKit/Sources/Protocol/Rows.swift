@@ -450,9 +450,11 @@ public struct LinkPreview: Decodable, Sendable, Hashable {
         self.preview = preview
     }
 
-    /// Where it goes, as its card says it: the URL's host without `www.`, or the URL when it has none.
+    /// Where it goes, as its card says it: the URL's host in its own letters rather than percent
+    /// escapes, in lower case and without `www.`, or the URL when it has none.
     public var host: String {
-        guard let host = URL(string: url)?.host(), !host.isEmpty else { return url }
+        guard let encoded = URL(string: url)?.host(), !encoded.isEmpty else { return url }
+        let host = (encoded.removingPercentEncoding ?? encoded).lowercased()
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 }

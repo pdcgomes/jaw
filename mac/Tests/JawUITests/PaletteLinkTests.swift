@@ -19,7 +19,7 @@ let linksFound = """
          "link":{"url":"https://climb.pt/sintra","host":"climb.pt","title":"Sintra: the routes","description":"Granite slabs above the sea"}}},
  {"kind":"link","score":0,"text":[{"t":"text","s":"https://www.ipma.pt/pt/otempo/"}],
   "row":{"id":"3EB0C431F2A9B8E7D6~1","kind":"link","message":"3EB0C431F2A9B8E7D6","chat":"351912345678@s.whatsapp.net",
-         "chat_name":"Ana Ribeiro","mine":true,"at":1792145000000,"link":{"url":"https://www.ipma.pt/pt/otempo/","host":"ipma.pt"}}}
+         "chat_name":"Ana Ribeiro","mine":true,"at":1792145000000,"link":{"url":"https://www.ipma.pt/pt/otempo/","host":"www.ipma.pt"}}}
 ],"counts":{"chat":1,"link":2}}
 """
 
@@ -62,6 +62,7 @@ let linksFound = """
     #expect(rui.chatName == "Lisbon Climbing" && rui.from?.name == "Rui" && !rui.mine && rui.at == 1_792_145_060_000)
     #expect(rui.link.host == "climb.pt" && rui.link.title == "Sintra: the routes" && rui.link.description == "Granite slabs above the sea")
     #expect(yours.mine && yours.from == nil && yours.link.title == nil && yours.link.url == "https://www.ipma.pt/pt/otempo/")
+    #expect(yours.link.host == "www.ipma.pt", "jawd's host, as find's rows keep it, www. and all")
 }
 
 @MainActor @Test func `the palette lists the links found, Enter opens one, and ⌘G goes to its message`() throws {

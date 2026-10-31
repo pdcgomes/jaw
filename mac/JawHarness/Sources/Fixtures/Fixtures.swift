@@ -35,10 +35,10 @@ enum Fixtures {
       "row":{"id":"3EB0A1B2C3D4E5F6~0","kind":"link","message":"3EB0A1B2C3D4E5F6","chat":"120363012345678901@g.us","chat_name":"Lisbon Climbing",
              "from":{"id":"person:7","name":"Rui","colour":2},"mine":false,"at":\(Samples.now - 3_600_000),
              "link":{"url":"https://climb.pt/sintra","host":"climb.pt","title":"Sintra: the routes","description":"Granite slabs above the sea"}}},
-     {"kind":"link","score":0,"text":[{"t":"text","s":"Previsão para "},{"t":"mark","s":"Sintra"},{"t":"text","s":" · IPMA · ipma.pt"}],
+     {"kind":"link","score":0,"text":[{"t":"text","s":"Previsão para "},{"t":"mark","s":"Sintra"},{"t":"text","s":" · IPMA · www.ipma.pt"}],
       "row":{"id":"3EB0C431F2A9B8E7D6~0","kind":"link","message":"3EB0C431F2A9B8E7D6","chat":"351912345678@s.whatsapp.net",
              "chat_name":"Ana Ribeiro","mine":true,"at":\(Samples.now - 86_400_000),
-             "link":{"url":"https://www.ipma.pt/pt/otempo/","host":"ipma.pt","title":"Previsão para Sintra · IPMA"}}}
+             "link":{"url":"https://www.ipma.pt/pt/otempo/","host":"www.ipma.pt","title":"Previsão para Sintra · IPMA"}}}
     ],"counts":{"chat":1,"link":2}}
     """, from: "Fixtures.foundLinks")
 

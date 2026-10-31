@@ -170,6 +170,10 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     let history = try row(#""kind":"text","spans":[],"link":{"url":"https://climb.pt/sintra","title":"Sintra"}"#)
     #expect(history.link?.preview == nil && history.link?.host == "climb.pt", "history's previews come without their thumbnail")
     #expect(LinkPreview(url: "not a link").host == "not a link")
+    #expect(LinkPreview(url: "https://müller.de/x").host == "müller.de", "its own letters, not percent escapes")
+    #expect(LinkPreview(url: "https://WWW.Example.COM/Path").host == "example.com", "in lower case, its www. dropped then")
+    #expect(LinkPreview(url: "https://ana@www.climb.pt:8443/sintra").host == "climb.pt", "without who or the port")
+    #expect(LinkPreview(url: "https://wwwx.pt/").host == "wwwx.pt" && LinkPreview(url: "https://www2.ipma.pt/").host == "www2.ipma.pt")
 
     let voted = try row("""
     "kind":"poll","spans":[{"t":"text","s":"Which day?"}],"poll":{"question":"Which day?","max":2,"voters":4,
