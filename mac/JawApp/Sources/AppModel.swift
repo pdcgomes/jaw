@@ -56,7 +56,7 @@ final class AppModel {
     /// What the launch bench waits for: the first frame with the chat list's rows.
     var firstRows: (() -> Void)?
     /// A file asked to be looked at or opened before it was here, to be once it is.
-    var pending: (row: String, item: Int?, act: MediaOffer.Act, offers: [MediaOffer], at: Int)?
+    var pending: PendingOpen?
     /// Saves asked of jawd, by ticket: the message, whether to show the copy in the Finder once it's
     /// made, and the drag's promise to keep.
     var saving: [String: (message: String, reveal: Bool, done: (@Sendable ((any Error)?) -> Void)?)] = [:]
@@ -235,7 +235,7 @@ final class AppModel {
         case let .looked(chat, found):
             lookedUp(chat, found)
         case let .notFetched(message, why):
-            if pending?.offers[pending!.at].message == message { pending = nil }
+            if pending?.message == message { pending = nil }
             say("not downloaded: \(why)", warn: true)
         case let .saved(ticket, message, path, why):
             savedAnswer(ticket, message, path, why)
@@ -837,8 +837,8 @@ extension AppModel: ConversationHost {
         if focusedChat != c.chat.id { focus(c.chat.id) }
     }
 
-    func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
-        file(act, offers, at: at)
+    func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of row: MessageRow) {
+        file(act, offers, at: at, of: row)
     }
 
     func conversation(_: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting? {
@@ -870,13 +870,13 @@ extension AppModel: ChatListHost {
 /// A message's files: looked at with Quick Look, opened in their apps, saved into Downloads and asked
 /// for, each from a clone of jawd's file, never jawd's own (`Opened`).
 extension AppModel {
-    func file(_ act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
+    func file(_ act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of row: MessageRow) {
         let offer = offers[at]
         switch act {
         case .look, .open, .openWith:
             guard offer.isHere else {
                 if offer.media.state != .downloading, offer.media.state != .waitingForPhone { jawd.fetch(chat: offer.chat, message: offer.message) }
-                pending = (rowID(offer, in: offers), offer.item, act, offers, at)
+                pending = PendingOpen(act, offer, of: row)
                 return say(offer.waitingWords)
             }
             pending = nil
@@ -895,18 +895,9 @@ extension AppModel {
         case .fetch:
             jawd.fetch(chat: offer.chat, message: offer.message)
         case .stop:
-            if pending.map({ $0.offers[$0.at].message == offer.message }) ?? false { pending = nil }
+            if pending?.message == offer.message { pending = nil }
             jawd.cancel(chat: offer.chat, message: offer.message)
         }
-    }
-
-    /// The row an offer is of: the album's, for one of its items.
-    func rowID(_ offer: MediaOffer, in _: [MediaOffer]) -> String {
-        guard offer.item != nil else { return offer.message }
-        for c in panes.values {
-            if let row = c.window.list.first(where: { $0.album?.items.contains { $0.id == offer.message } == true }) { return row.id }
-        }
-        return offer.message
     }
 
     /// The files here among `offers`, cloned off the main thread, then looked at, from the one asked
@@ -943,16 +934,20 @@ extension AppModel {
     }
 
     /// Rows that came while a file waited to be looked at or opened: once it's here it is, and once
-    /// it can't come it isn't, its card saying why.
+    /// it can't come it isn't, its card saying why (`PendingOpen`).
     func cameFor(_ rows: [MessageRow]) {
-        guard let p = pending, let row = rows.first(where: { $0.id == p.row }) else { return }
-        let offers = MediaOffer.all(row)
-        guard let offer = offers.first(where: { $0.message == p.offers[p.at].message }) else { return }
-        if offer.isHere {
-            pending = nil
-            hand(p.act, offers, at: offers.firstIndex(of: offer) ?? 0)
-        } else if [.expired, .gone].contains(offer.media.state) || offer.media.state == .remote && offer.media.error != nil {
-            pending = nil
+        guard let p = pending else { return }
+        for row in rows {
+            switch p.next(row) {
+            case .wait:
+                continue
+            case let .open(offers, at):
+                pending = nil
+                hand(p.act, offers, at: at)
+            case .stop:
+                pending = nil
+            }
+            return
         }
     }
 

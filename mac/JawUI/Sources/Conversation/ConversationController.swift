@@ -27,15 +27,15 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, vote message: String, options: [String])
     /// Whether what's on screen counts as read now: the app active and the window key.
     func conversationIsRead(_ c: ConversationController) -> Bool
-    /// A message's files: looked at, an album's from the one at `at`; opened, saved, asked for or
-    /// stopped, the one at `at`.
-    func conversation(_ c: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int)
+    /// A message's files, of `row`: looked at, an album's from the one at `at`; opened, saved, asked
+    /// for or stopped, the one at `at`.
+    func conversation(_ c: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of row: MessageRow)
     /// What a file drags out as: its clone once it's here, a promise kept by saving it before.
     func conversation(_ c: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting?
 }
 
 public extension ConversationHost {
-    func conversation(_: ConversationController, media _: MediaOffer.Act, _: [MediaOffer], at _: Int) {}
+    func conversation(_: ConversationController, media _: MediaOffer.Act, _: [MediaOffer], at _: Int, of _: MessageRow) {}
 
     func conversation(_: ConversationController, dragging _: MediaOffer) -> NSPasteboardWriting? {
         nil
@@ -741,7 +741,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             return say(m.viewOnce ? "it's view-once: open it on your phone" : "there's no file in this one")
         }
         let at = item.flatMap { i in offers.firstIndex { $0.item == i } } ?? 0
-        host?.conversation(self, media: act, offers, at: at)
+        host?.conversation(self, media: act, offers, at: at, of: m)
     }
 
     /// Does `act` with the selected message's file, for the menus and the palette.

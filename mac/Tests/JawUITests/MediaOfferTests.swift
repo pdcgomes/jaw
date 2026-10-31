@@ -100,9 +100,54 @@ final class FileHost: ConversationHost {
     func conversation(_: ConversationController, vote _: String, options _: [String]) {}
     func conversationIsRead(_: ConversationController) -> Bool { false }
 
-    func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
+    func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of _: MessageRow) {
         acts.append((act, offers.map(\.message), at))
     }
+}
+
+/// `row` at version `v`, its file (or its album's item `item`'s) in `state`, with `error`, and here
+/// once it has `path`.
+func asked(_ row: MessageRow, v: UInt64, _ state: MediaState, error: String? = nil, path: String? = nil, item: Int? = nil) -> MessageRow {
+    var r = row
+    r.v = v
+    func change(_ media: inout Media?) {
+        media?.state = state
+        media?.error = error
+        media?.path = path
+    }
+    if let item { change(&r.album!.items[item].media) } else { change(&r.media) }
+    return r
+}
+
+@Test func `a file looked at before it's here opens once it comes, and stops waiting only when jawd gives up after it was asked for`() throws {
+    // Expired, with jawd's words: asked again, jawd clears them and leaves it expired until its job runs.
+    let expired = state("D5")
+    let offer = try #require(MediaOffer.of(expired))
+    let pending = PendingOpen(.look, offer, of: expired)
+    let v = expired.v
+    #expect(pending.next(asked(expired, v: v, .expired, error: expired.media?.error)) == .wait, "a row from before the ask, still in flight")
+    #expect(pending.next(asked(expired, v: v + 1, .expired)) == .wait, "asked again: its words gone, still expired")
+    #expect(pending.next(asked(expired, v: v + 2, .waitingForPhone)) == .wait)
+    #expect(pending.next(asked(expired, v: v + 3, .downloading)) == .wait)
+    let here = asked(expired, v: v + 4, .local, path: "media/files/wall.jpg")
+    #expect(pending.next(here) == .open(MediaOffer.all(here), at: 0))
+    #expect(pending.next(asked(expired, v: v + 2, .expired, error: "your phone didn't answer")) == .stop, "given up on again")
+    #expect(pending.next(asked(expired, v: v + 1, .gone, error: "your phone no longer has this file")) == .stop)
+    #expect(pending.next(asked(expired, v: v + 1, .remote, error: "the download failed")) == .stop)
+    #expect(pending.next(state("D1")) == .wait, "another message's row")
+    var deleted = asked(expired, v: v + 1, .expired)
+    deleted.deleted = true
+    #expect(pending.next(deleted) == .stop, "nothing to open any more")
+
+    // An album's item, by its own message, in its album's row.
+    let album = state("D10")
+    let tile = try #require(MediaOffer.of(album, item: 3))
+    let waiting = PendingOpen(.open, tile, of: album)
+    #expect(waiting.row == "D10" && waiting.message == "t3")
+    #expect(waiting.next(asked(album, v: album.v + 1, .expired, item: 3)) == .wait)
+    let came = asked(album, v: album.v + 2, .local, path: "media/files/rope.jpg", item: 3)
+    #expect(waiting.next(came) == .open(MediaOffer.all(came), at: 3))
+    #expect(waiting.next(asked(album, v: album.v + 2, .gone, error: "gone", item: 3)) == .stop)
 }
 
 /// A pane of the download states' samples, once their rows are in its table.
