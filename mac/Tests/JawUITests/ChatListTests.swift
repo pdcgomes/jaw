@@ -1,9 +1,50 @@
 import AppKit
+@testable import JawKit
 @testable import JawThemes
 @testable import JawUI
 import Testing
 
-/// The chat list's rows: a badge's count or @ sits in its middle, at 1x as at 2x.
+/// The chat list's rows: a badge's count or @ sits in its middle, at 1x as at 2x; and who's typing
+/// says so on a row's second line, redrawing only the rows it changes.
+
+@MainActor @Test func `a row says who's typing in the online colour in place of its draft or newest message, with no ticks`() {
+    let roles = Catalog.jaw.dark
+    let cell = ChatCell()
+    func line(_ chat: ChatRow, _ typists: [Typist]) -> NSAttributedString {
+        cell.show(chat, typists: typists, roles: roles, open: false, inCommunity: false, avatar: nil)
+        return cell.line(chat, roles)
+    }
+    let said = line(Samples.group, [Typist(id: "person:7", name: "Rui", state: .recording)])
+    #expect(said.string == "Rui recording…")
+    #expect(said.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == roles.online.nsColor, "in the online colour")
+    #expect(cell.accessibilityLabel() == "Lisbon Climbing, 3 unread, mentions you, Rui recording…", "VoiceOver hears who")
+    #expect(line(Samples.group, []).string == "Rui: Saturday at 9?", "the newest message back once nobody's typing")
+
+    let ana = [Typist(id: "person:12", name: "Ana")]
+    var direct = Samples.direct
+    #expect(line(direct, ana).string == "typing…", "in the draft's place, naming nobody in a one-to-one chat")
+    direct.draft = nil
+    _ = line(direct, ana)
+    #expect(cell.ticks(direct, roles) == nil, "no ticks while someone's typing")
+    #expect(line(direct, []).string.hasSuffix("yes, the one at the lake") && cell.ticks(direct, roles)?.0 == 2,
+            "your read message and its ticks back once nobody is")
+}
+
+@MainActor @Test func `a change of who's typing redraws only the rows whose typing it changes`() {
+    let list = ChatListController(folder: "all", roles: Catalog.jaw.dark)
+    list.view.frame = NSRect(x: 0, y: 0, width: 300, height: 260)
+    list.apply(Update(seq: 1, upsert: Samples.chats, total: UInt64(Samples.chats.count)))
+    let rows = list.all.map(\.id)
+    let rui = [Typist(id: "person:7", name: "Rui")], ana = [Typist(id: "person:12", name: "Ana")]
+    list.typing = [Samples.group.id: rui]
+    let was = list.typing
+    list.typing = [Samples.group.id: rui, Samples.direct.id: ana]
+    #expect(list.rows(changedFrom: was) == IndexSet(integer: rows.firstIndex(of: Samples.direct.id)!), "Ana's row alone")
+    #expect(list.rows(changedFrom: list.typing).isEmpty, "none when nothing changed")
+    #expect(list.rows(changedFrom: [:]) == IndexSet([Samples.direct.id, Samples.group.id].map { rows.firstIndex(of: $0)! }))
+    let cell = list.table.view(atColumn: 0, row: rows.firstIndex(of: Samples.direct.id)!, makeIfNecessary: true) as? ChatCell
+    #expect(cell?.typists == ana, "and that row shows it")
+}
 
 /// Where a row's badge and the ink of its text fall, in points from the row's top-left, the badge
 /// drawn by itself at `scale` in black, so its text, white in the light look, is told from it.

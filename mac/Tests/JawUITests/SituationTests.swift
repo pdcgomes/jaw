@@ -1,5 +1,6 @@
 import Foundation
 @testable import JawKit
+import JawThemes
 @testable import JawUI
 import Testing
 
@@ -45,24 +46,37 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
     #expect(situation(.banned, until: Samples.now).stateLine?.text == "temporarily banned until \(Format.until(Samples.now))")
 }
 
-@Test func `the focused chat's line says it's typing or muted, and what was said while it lasts`() {
+@Test func `the focused chat's line says who's typing and whether it's muted, and what was said while it lasts`() {
     let now = Date(timeIntervalSince1970: 1_000_000)
     var s = situation()
+    let ana = [Typist(id: "person:12", name: "Ana")]
     #expect(s.chatLine(focused: nil, now: now) == nil)
-    #expect(s.chatLine(focused: Samples.group, now: now) == "someone's typing…", "a group says someone")
+    #expect(s.chatLine(focused: Samples.group, now: now) == nil, "nobody typing in a chat that isn't muted says nothing")
+    #expect(s.chatLine(focused: Samples.group, typing: [Typist(id: "person:7", name: "Rui")], now: now)
+        == Situation.ChatLine(typing: "Rui typing…"), "a group names who")
     var direct = Samples.direct
-    direct.typing = ["person:4"]
-    #expect(s.chatLine(focused: direct, now: now) == "typing…")
+    #expect(s.chatLine(focused: direct, typing: ana, now: now) == Situation.ChatLine(typing: "typing…"))
+    #expect(s.chatLine(focused: direct, typing: [Typist(id: "person:12", name: "Ana", state: .recording)], now: now)
+        == Situation.ChatLine(typing: "recording…"))
     direct.mutedUntil = -1
-    #expect(s.chatLine(focused: direct, now: now) == "typing… · muted")
-    direct.typing = []
-    #expect(s.chatLine(focused: direct, now: now) == "muted")
+    #expect(s.chatLine(focused: direct, typing: ana, now: now) == Situation.ChatLine(typing: "typing…", rest: "muted"))
+    #expect(s.chatLine(focused: direct, now: now) == Situation.ChatLine(rest: "muted"))
     s.said = Situation.Said("not sent: no connection", until: now.addingTimeInterval(4), warn: true)
-    #expect(s.chatLine(focused: direct, now: now) == "not sent: no connection", "what was said comes first while it lasts")
-    #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(5)) == "muted", "and goes once it's over")
-    #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(4)) == "muted", "from the moment it ends")
+    #expect(s.chatLine(focused: direct, typing: ana, now: now) == Situation.ChatLine(rest: "not sent: no connection"),
+            "what was said comes first while it lasts, in typing's place too")
+    #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(5)) == Situation.ChatLine(rest: "muted"), "and goes once it's over")
+    #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(4)) == Situation.ChatLine(rest: "muted"), "from the moment it ends")
     #expect(Situation(said: Situation.Said("nothing unread", until: now.addingTimeInterval(4))).chatLine(focused: nil, now: now)
-        == "nothing unread", "what was said shows with no chat focused")
+        == Situation.ChatLine(rest: "nothing unread"), "what was said shows with no chat focused")
+}
+
+@MainActor @Test func `the status line draws who's typing in the online colour, and the rest quieter`() {
+    let roles = Catalog.jaw.dark
+    let both = StatusLine.chatParts(typing: "Rui typing…", chat: "muted", roles: roles)
+    #expect(both.map(\.text) == ["Rui typing…", " · muted"] && both.map(\.colour) == [roles.online, roles.secondary])
+    #expect(StatusLine.chatParts(typing: nil, chat: "muted", roles: roles).map(\.text) == ["muted"])
+    #expect(StatusLine.chatParts(typing: "typing…", chat: nil, roles: roles).map(\.colour) == [roles.online])
+    #expect(StatusLine.chatParts(typing: nil, chat: nil, roles: roles).isEmpty)
 }
 
 @Test func `the panes' place shows what jawd's situation calls for`() {

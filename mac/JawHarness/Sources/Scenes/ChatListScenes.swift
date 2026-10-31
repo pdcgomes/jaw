@@ -20,7 +20,7 @@ private struct ChatListScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Four chats at 300 points",
-            note: "Ana Ribeiro pinned and open, with \"Draft:\" in the accent before your draft, \"see you\"; Lisbon Climbing with 3 unread, a mention and someone typing; Mãe muted, with 1 unread; Climbing Portugal, a community. A name is bold only when it has unread messages, the times line up on the right, and nothing is cut off.",
+            note: "Ana Ribeiro pinned and open, with \"Draft:\" in the accent before your draft, \"see you\"; Lisbon Climbing with 3 unread and a mention, \"Rui typing…\" in the online colour in place of its newest message; Mãe muted, with 1 unread; Climbing Portugal, a community. A name is bold only when it has unread messages, the times line up on the right, and nothing is cut off.",
             roles: roles,
         ) {
             ControllerSpecimen {
@@ -28,6 +28,7 @@ private struct ChatListScene: View {
                 _ = list.view
                 let rows = Samples.chats
                 list.apply(Update(seq: 1, upsert: rows, total: UInt64(rows.count)))
+                list.typing = Samples.typing
                 list.select(Samples.direct.id)
                 return list
             }

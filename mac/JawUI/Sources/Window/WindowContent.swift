@@ -156,18 +156,18 @@ public final class WindowContent: NSViewController {
         (animated && !Motion.reduced() ? item.animator() : item).isCollapsed = collapsed
     }
 
-    /// Shows what jawd's situation says: the status line, from the situation, the chats and the focused
-    /// chat, the chats that need you leaving out those a pane shows; and in the panes' place the state
-    /// it calls for, linking, or `panes`.
-    public func show(_ situation: Situation, chats: [ChatRow], focused: ChatRow?, panes: Panes?, roles: Roles, now: Date,
-                     actions: Actions)
+    /// Shows what jawd's situation says: the status line, from the situation, the chats, who's typing
+    /// in them and the focused chat, the chats that need you leaving out those a pane shows; and in
+    /// the panes' place the state it calls for, linking, or `panes`.
+    public func show(_ situation: Situation, chats: [ChatRow], typing: Typists = [:], focused: ChatRow?, panes: Panes?, roles: Roles,
+                     now: Date, actions: Actions)
     {
         let state = situation.stateLine
         let shown = Set(panes.map { p in p.grid.slots.filter { p.views[$0.id] != nil }.compactMap(\.chat) } ?? [])
-        bar.status.rootView = StatusLine(state: state?.text, warn: state?.warn ?? false,
-                                         chat: situation.chatLine(focused: focused, now: now),
-                                         needs: Situation.needs(chats, shown: shown), roles: roles, open: actions.open,
-                                         glance: actions.glance)
+        let line = situation.chatLine(focused: focused, typing: focused.flatMap { typing[$0.id] } ?? [], now: now)
+        bar.status.rootView = StatusLine(state: state?.text, warn: state?.warn ?? false, typing: line?.typing, chat: line?.rest,
+                                         needs: Situation.needs(chats, shown: shown), typingIn: Set(typing.keys), roles: roles,
+                                         open: actions.open, glance: actions.glance)
         switch situation.stateView(hasChats: !chats.isEmpty, hasPanes: panes != nil) {
         case let .linking(step, loggedOut)?:
             detail.showLinking(step: step, loggedOut: loggedOut, roles: roles, start: actions.linkStart, cancel: actions.linkCancel)

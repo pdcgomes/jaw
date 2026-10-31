@@ -13,7 +13,6 @@ public enum Samples {
     public static let group = ChatRow(
         id: "120363012345678901@g.us", v: 40, sort: "0~1792144500000~4", kind: .group, name: "Lisbon Climbing",
         last: Last(from: "Rui", mine: false, summary: "Saturday at 9?", at: now - 60000), unread: 3, mentions: 1,
-        typing: ["person:7"],
     )
 
     public static let direct = ChatRow(

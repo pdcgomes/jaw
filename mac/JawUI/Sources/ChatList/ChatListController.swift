@@ -25,6 +25,15 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
 
     /// The root jawd's paths are relative to, for avatars.
     public var root: String?
+    /// Who's typing in the chats jawd's windows show, as it last said; a change redraws only the
+    /// rows whose typing it changes.
+    public var typing: Typists = [:] {
+        didSet {
+            let changed = rows(changedFrom: oldValue)
+            if isViewLoaded, !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: [0]) }
+        }
+    }
+
     let table = ChatTable()
     let scroll = NSScrollView()
     var shown: [ChatRow] = []
@@ -128,6 +137,11 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
 
     public func row(_ id: String) -> ChatRow? {
         chats.get(id)
+    }
+
+    /// The rows shown whose chat's typing differs from what `old` said.
+    func rows(changedFrom old: Typists) -> IndexSet {
+        IndexSet(shown.indices.filter { old[shown[$0].id] != typing[shown[$0].id] })
     }
 
     public var all: [ChatRow] {
@@ -255,8 +269,8 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
             return c
         }()
         let chat = shown[row]
-        cell.show(chat, roles: roles, open: open.contains(chat.id), inCommunity: chat.community != nil && chats.get(chat.community!) != nil,
-                  avatar: avatars.image(chat.avatar, root: root))
+        cell.show(chat, typists: typing[chat.id] ?? [], roles: roles, open: open.contains(chat.id),
+                  inCommunity: chat.community != nil && chats.get(chat.community!) != nil, avatar: avatars.image(chat.avatar, root: root))
         cell.isSelected = chat.id == selected
         return cell
     }
@@ -308,6 +322,8 @@ struct AvatarCache {
 /// pinned, and your last message's ticks.
 final class ChatCell: NSView {
     var chat: ChatRow?
+    /// Who's typing in the chat, oldest first.
+    var typists: [Typist] = []
     var roles: Roles?
     var open = false
     var inCommunity = false
@@ -324,8 +340,9 @@ final class ChatCell: NSView {
         true
     }
 
-    func show(_ chat: ChatRow, roles: Roles, open: Bool, inCommunity: Bool, avatar: NSImage?) {
+    func show(_ chat: ChatRow, typists: [Typist], roles: Roles, open: Bool, inCommunity: Bool, avatar: NSImage?) {
         self.chat = chat
+        self.typists = typists
         self.roles = roles
         self.open = open
         self.inCommunity = inCommunity
@@ -335,7 +352,11 @@ final class ChatCell: NSView {
         var label = chat.name
         if chat.unread > 0 { label += ", \(chat.unread) unread" }
         if chat.mentions > 0 { label += ", mentions you" }
-        if let last = chat.last { label += ", \(last.from.map { "\($0): " } ?? "")\(last.summary)" }
+        if let typing = TypingWords.line(typists, group: chat.kind.isGroup) {
+            label += ", \(typing)"
+        } else if let last = chat.last {
+            label += ", \(last.from.map { "\($0): " } ?? "")\(last.summary)"
+        }
         setAccessibilityLabel(label)
         needsDisplay = true
     }
@@ -391,11 +412,16 @@ final class ChatCell: NSView {
             badgeRight -= badge("@", right: badgeRight, fill: roles.mention, roles) + 4
         }
         line(chat, roles).draw(in: NSRect(x: x, y: 30, width: max(badgeRight - x - 4, 10), height: 17))
-        if chat.typing.isEmpty, chat.draft?.isEmpty ?? true, let last = chat.last, last.mine, let (count, colour) = Ticks.of(last.status, roles),
-           let ctx = NSGraphicsContext.current?.cgContext
-        {
+        if let (count, colour) = ticks(chat, roles), let ctx = NSGraphicsContext.current?.cgContext {
             Ticks.draw(count, x: x, baseline: 43, size: 12, colour: colour.cgColor, in: ctx)
         }
+    }
+
+    /// Your last message's ticks, on the second line while it shows that message rather than who's
+    /// typing or the draft.
+    func ticks(_ chat: ChatRow, _ roles: Roles) -> (Int, RGBA)? {
+        guard typists.isEmpty, chat.draft?.isEmpty ?? true, let last = chat.last, last.mine else { return nil }
+        return Ticks.of(last.status, roles)
     }
 
     var truncating: NSParagraphStyle {
@@ -409,8 +435,8 @@ final class ChatCell: NSView {
         let quiet: [NSAttributedString.Key: Any] = [.font: TextStyle.callout.nsFont, .foregroundColor: roles.secondary.nsColor,
                                                     .paragraphStyle: truncating]
         let out = NSMutableAttributedString()
-        if !chat.typing.isEmpty {
-            out.append(NSAttributedString(string: "typing…", attributes: quiet.merging([.foregroundColor: roles.online.nsColor]) { $1 }))
+        if let typing = TypingWords.line(typists, group: chat.kind.isGroup) {
+            out.append(NSAttributedString(string: typing, attributes: quiet.merging([.foregroundColor: roles.online.nsColor]) { $1 }))
             return out
         }
         if let draft = chat.draft, !draft.isEmpty {

@@ -24,8 +24,6 @@ public struct ChatRow: WindowRow, Decodable, Hashable {
     public var archived: Bool
     public var markedUnread: Bool
     public var draft: String?
-    /// Who's typing or recording now, by person `id`.
-    public var typing: [String]
     /// For a group in a community, the community's `id`.
     public var community: String?
     /// For a community, its groups' unread total.
@@ -52,14 +50,12 @@ public struct ChatRow: WindowRow, Decodable, Hashable {
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         markedUnread = try c.decodeIfPresent(Bool.self, forKey: .markedUnread) ?? false
         draft = try c.decodeIfPresent(String.self, forKey: .draft)
-        typing = (try? c.decodeIfPresent([String].self, forKey: .typing)) ?? []
         community = try c.decodeIfPresent(String.self, forKey: .community)
         childrenUnread = try c.decodeIfPresent(Int.self, forKey: .childrenUnread)
     }
 
     public init(id: String, v: UInt64, sort: String, kind: ChatKind = .direct, name: String, last: Last? = nil,
-                unread: Int = 0, mentions: Int = 0, pinned: Bool = false, draft: String? = nil,
-                typing: [String] = [], community: String? = nil)
+                unread: Int = 0, mentions: Int = 0, pinned: Bool = false, draft: String? = nil, community: String? = nil)
     {
         self.id = id
         self.v = v
@@ -75,13 +71,12 @@ public struct ChatRow: WindowRow, Decodable, Hashable {
         archived = false
         markedUnread = false
         self.draft = draft
-        self.typing = typing
         self.community = community
         childrenUnread = nil
     }
 
     enum Keys: String, CodingKey {
-        case id, v, sort, kind, name, avatar, last, unread, mentions, pinned, archived, draft, typing, community
+        case id, v, sort, kind, name, avatar, last, unread, mentions, pinned, archived, draft, community
         case mutedUntil = "muted_until"
         case markedUnread = "marked_unread"
         case childrenUnread = "children_unread"

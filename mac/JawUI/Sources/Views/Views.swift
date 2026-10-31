@@ -162,22 +162,37 @@ public struct StateView: View {
 public struct StatusLine: View {
     public var state: String?
     public var warn: Bool
+    /// Who's typing in the focused chat, drawn in the online colour before the rest of `chat`.
+    public var typing: String?
     public var chat: String?
     public var needs: [ChatRow]
+    /// The chats someone's typing in, for the dot before a person named on the right.
+    public var typingIn: Set<String>
     public var roles: Roles
     public var open: (ChatRow) -> Void
     public var glance: () -> Void
 
-    public init(state: String?, warn: Bool, chat: String?, needs: [ChatRow] = [], roles: Roles,
-                open: @escaping (ChatRow) -> Void = { _ in }, glance: @escaping () -> Void = {})
+    public init(state: String?, warn: Bool, typing: String? = nil, chat: String?, needs: [ChatRow] = [], typingIn: Set<String> = [],
+                roles: Roles, open: @escaping (ChatRow) -> Void = { _ in }, glance: @escaping () -> Void = {})
     {
         self.state = state
         self.warn = warn
+        self.typing = typing
         self.chat = chat
         self.needs = needs
+        self.typingIn = typingIn
         self.roles = roles
         self.open = open
         self.glance = glance
+    }
+
+    /// How the focused chat is, as it's drawn: who's typing in the online colour, then the rest,
+    /// quieter.
+    static func chatParts(typing: String?, chat: String?, roles: Roles) -> [(text: String, colour: RGBA)] {
+        var parts: [(text: String, colour: RGBA)] = []
+        if let typing { parts.append((typing, roles.online)) }
+        if let chat { parts.append(((typing == nil ? "" : " · ") + chat, roles.secondary)) }
+        return parts
     }
 
     public var body: some View {
@@ -185,8 +200,13 @@ public struct StatusLine: View {
             if let state {
                 Text(state).foregroundStyle((warn ? roles.mention : roles.accent).color)
             }
-            if let chat {
-                Text(chat).foregroundStyle(roles.secondary.color)
+            let parts = Self.chatParts(typing: typing, chat: chat, roles: roles)
+            if !parts.isEmpty {
+                Text(parts.reduce(into: AttributedString()) { line, part in
+                    var said = AttributedString(part.text)
+                    said.foregroundColor = part.colour.color
+                    line.append(said)
+                })
             }
             Spacer(minLength: 12)
             ViewThatFits(in: .horizontal) {
@@ -220,7 +240,7 @@ public struct StatusLine: View {
                         Text("@ \(c.name)").foregroundStyle(roles.mention.color).bold()
                     } else {
                         HStack(spacing: 4) {
-                            if !c.typing.isEmpty { Circle().fill(roles.online.color).frame(width: 6, height: 6) }
+                            if typingIn.contains(c.id) { Circle().fill(roles.online.color).frame(width: 6, height: 6) }
                             Text("\(c.name) · \(c.unread)").foregroundStyle(roles.text.color)
                         }
                     }

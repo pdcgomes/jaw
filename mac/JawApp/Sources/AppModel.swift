@@ -186,6 +186,7 @@ final class AppModel {
             for (chat, c) in panes where was[chat] != now[chat] {
                 c.typing = now[chat] ?? []
             }
+            window?.chatList.typing = now
         case let .sent(key, _, _):
             sending[key] = nil
         case let .unsent(chat, key, text, why):

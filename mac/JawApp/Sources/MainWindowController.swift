@@ -103,8 +103,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - What it shows
 
     func refresh() {
-        content.show(model.situation, chats: chatList.all, focused: model.conversation?.chat, panes: panesShown, roles: model.roles,
-                     now: Date(), actions: WindowContent.Actions(
+        content.show(model.situation, chats: chatList.all, typing: model.typing, focused: model.conversation?.chat, panes: panesShown,
+                     roles: model.roles, now: Date(), actions: WindowContent.Actions(
                          open: { [weak model] c in model?.open(c, opened: true) },
                          glance: { [weak self] in self?.showGlance() },
                          linkStart: { [weak model] phone in model?.jawd.linkStart(phone: phone) },

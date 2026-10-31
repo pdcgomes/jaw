@@ -5,7 +5,8 @@ import JawThemes
 import Testing
 
 /// Who's typing as it's drawn, compared with reference pictures: a pane's header naming them and the
-/// bubble after the newest message, in bubbles and lines, dark and light.
+/// bubble after the newest message, in bubbles and lines, dark and light; and the chat list's rows
+/// saying who, dark and light, which are the same in either look.
 
 /// `view` drawn at 2x, as the harness draws its pictures whatever the screen's scale, over `ground`,
 /// which views drawn into a picture leave out.
@@ -50,6 +51,25 @@ func asOfSamples(_ body: () async throws -> Void) async rethrows {
                     try compare(try picture(c.view, on: layout.style.roles.ground), "typing-pane-\(look.rawValue)-\(dark ? "dark" : "light")")
                 }
             }
+        }
+    }
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `the chat list's rows say who's typing in the online colour, dark and light`() async throws {
+    try await asOfSamples {
+        for dark in [true, false] {
+            let roles = Catalog.jaw.roles(dark: dark)
+            let list = ChatListController(folder: "all", roles: roles)
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 260), styleMask: [.borderless], backing: .buffered,
+                             defer: true)
+            w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            w.contentView = list.view
+            list.apply(Update(seq: 1, upsert: Samples.chats, total: UInt64(Samples.chats.count)))
+            list.typing = [Samples.direct.id: [Typist(id: "person:12", name: "Ana")], Samples.group.id: [ruiRecording]]
+            list.select(Samples.direct.id)
+            list.view.layoutSubtreeIfNeeded()
+            list.scroll.verticalScroller?.isHidden = true
+            try compare(try picture(list.view, on: roles.surface), "typing-list-\(dark ? "dark" : "light")")
         }
     }
 }

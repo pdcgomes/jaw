@@ -53,11 +53,11 @@ private struct StatesScene: View {
             }
             SpecimenGroup(
                 title: "The status line",
-                note: "jawd's state on the left, in the accent, or in the mention colour when it warns, and how the focused chat is beside it, quieter.",
+                note: "jawd's state on the left, in the accent, or in the mention colour when it warns, and how the focused chat is beside it: who's typing in the online colour, \"Rui typing…\", then \"muted\", quieter.",
                 roles: roles,
             ) {
                 VStack(spacing: Space.m) {
-                    StatusLine(state: "catching up 1,204 of 5,000", warn: false, chat: "someone's typing…", roles: roles)
+                    StatusLine(state: "catching up 1,204 of 5,000", warn: false, typing: "Rui typing…", chat: "muted", roles: roles)
                         .frame(height: 30)
                     StatusLine(state: "phone offline: photos and older history wait for it", warn: true, chat: nil, roles: roles)
                         .frame(height: 30)

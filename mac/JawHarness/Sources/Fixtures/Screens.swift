@@ -80,6 +80,7 @@ struct Screen {
         content.view.wantsLayer = true
         content.view.layer?.backgroundColor = roles.ground.cgColor
         list.apply(Update(seq: 1, upsert: chats, total: UInt64(chats.count)))
+        list.typing = typing
         let spec = LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures)
         let layouts = Layouts()
         var views: [Int: NSView] = [:]
@@ -105,7 +106,7 @@ struct Screen {
         }
         content.bar.restyle(roles)
         content.bar.show(layout: layout, edited: false)
-        content.show(situation, chats: chats, focused: open.first,
+        content.show(situation, chats: chats, typing: typing, focused: open.first,
                      panes: grid.map { WindowContent.Panes(grid: $0, views: views, focused: 1, box: box, look: PaneLook(outline: roles.accent)) },
                      roles: roles, now: Date(timeIntervalSince1970: Double(Samples.now) / 1000), actions: WindowContent.Actions())
         content.fold(chatOpen: !open.isEmpty, animated: false)

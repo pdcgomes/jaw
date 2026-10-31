@@ -151,7 +151,7 @@ private struct ConnectionScene: View {
         VStack(alignment: .leading, spacing: 0) {
             ScreenBand(
                 title: "Catching up",
-                note: "Lisbon Climbing, selected in the chat list, opens at its first unread, as a chat with unread messages does: the \"3 new\" line under its header, then Rui's contact card, Ana's link, your voice message and Inês's album, the top of Rui's typing bubble at the pane's foot, and the box under the pane. The status line says \"catching up 1,204 of 5,000\" in the accent, then \"someone's typing…\", quieter; nothing needs you elsewhere, so its right is empty. A picture can't hold the sidebar's selection material or the header's blur: the selected folder is a black pill (in light it hides All), what's under the header shows through it, and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
+                note: "Lisbon Climbing, selected in the chat list, opens at its first unread, as a chat with unread messages does: the \"3 new\" line under its header, then Rui's contact card, Ana's link, your voice message and Inês's album, the top of Rui's typing bubble at the pane's foot, and the box under the pane. The status line says \"catching up 1,204 of 5,000\" in the accent, then \"Rui typing…\" in the online colour; nothing needs you elsewhere, so its right is empty. A picture can't hold the sidebar's selection material or the header's blur: the selected folder is a black pill (in light it hides All), what's under the header shows through it, and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
                 screen: screen(Connection(state: .catchingUp, done: 1204, total: 5000)), conditions: conditions,
             )
             ScreenBand(
@@ -234,7 +234,7 @@ private struct OneChatScene: View {
     var body: some View {
         ScreenBand(
             title: "Lisbon Climbing open",
-            note: "Lisbon Climbing, selected and open: its header says \"Rui typing...\" in the online colour, the three dots still; then come \"3 new\", Rui's card, Ana's link, your voice message, Inês's album and Rui's typing at the foot. In lines, the poll's end sits above \"3 new\", names head their messages, times are on the right and yours start a third of the way across. The box names the chat; the status line says \"someone's typing…\", its right empty, as the one chat that needs you is open: the glance band with Ana's chat open shows it filled. A picture can't hold the sidebar's selection (a black pill), the header's blur (what's under it shows through) or a key window's buttons.",
+            note: "Lisbon Climbing, selected and open: its header says \"Rui typing...\" in the online colour, the three dots still; then come \"3 new\", Rui's card, Ana's link, your voice message, Inês's album and Rui's typing at the foot. In lines, the poll's end sits above \"3 new\", names head their messages, times are on the right and yours start a third of the way across. The box names the chat; the chat list and the status line say \"Rui typing…\" in the online colour, the status line's right empty, as the one chat that needs you is open: the glance band with Ana's chat open shows it filled. A picture can't hold the sidebar's selection (a black pill), the header's blur (what's under it shows through) or a key window's buttons.",
             screen: Screen(open: [Samples.group]), conditions: conditions,
         )
     }
@@ -295,7 +295,7 @@ private struct FoldedScene: View {
             )
             ScreenBand(
                 title: "At 520 by 420 points, the least the window takes",
-                note: "At the top left, the sidebar's glyph sits on the pane's avatar, the app's fault, as at 720. Both are folded, and the chat opens at its first unread: Rui's card and Ana's link under the \"3 new\" line, then your voice message under \"1 new ↓\", the pill counting Inês's album below. The box and the bar fit the width, with Unsaved Panes, the split button, \"someone's typing…\", Find and New Chat.",
+                note: "At the top left, the sidebar's glyph sits on the pane's avatar, the app's fault, as at 720. Both are folded, and the chat opens at its first unread: Rui's card and Ana's link under the \"3 new\" line, then your voice message under \"1 new ↓\", the pill counting Inês's album below. The box and the bar fit the width, with Unsaved Panes, the split button, \"Rui typing…\", Find and New Chat.",
                 screen: Screen(open: [Samples.group], width: 520, height: 420), conditions: conditions,
             )
         }

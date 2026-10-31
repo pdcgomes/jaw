@@ -69,15 +69,25 @@ public struct Situation: Equatable, Sendable {
         }
     }
 
-    /// How the focused chat is, without its name, which its box and header already say; or what was
-    /// said, while it lasts.
-    public func chatLine(focused chat: ChatRow?, now: Date) -> String? {
-        if let said, said.until > now { return said.text }
+    /// The status line's word on the focused chat: who's typing there, which it draws in the online
+    /// colour, and the rest, quieter.
+    public struct ChatLine: Equatable, Sendable {
+        public var typing: String?
+        public var rest: String?
+
+        public init(typing: String? = nil, rest: String? = nil) {
+            self.typing = typing
+            self.rest = rest
+        }
+    }
+
+    /// How the focused chat is, without its name, which its box and header already say: who's typing
+    /// in it, `typing`, and whether it's muted; or what was said, while it lasts, in their place.
+    public func chatLine(focused chat: ChatRow?, typing: [Typist] = [], now: Date) -> ChatLine? {
+        if let said, said.until > now { return ChatLine(rest: said.text) }
         guard let chat else { return nil }
-        var parts: [String] = []
-        if !chat.typing.isEmpty { parts.append(chat.kind.isGroup ? "someone's typing…" : "typing…") }
-        if chat.muted { parts.append("muted") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        let line = ChatLine(typing: TypingWords.line(typing, group: chat.kind.isGroup), rest: chat.muted ? "muted" : nil)
+        return line == ChatLine() ? nil : line
     }
 
     /// What fills the panes' place when it isn't chats: jawd starting or out of reach, linking, or
