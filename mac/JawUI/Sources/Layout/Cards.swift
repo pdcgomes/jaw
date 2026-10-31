@@ -84,6 +84,15 @@ extension MessageLayout.Builder {
         }
     }
 
+    /// What VoiceOver says a message is, before its card: that it was deleted, or its kind's line and
+    /// its words. A poll's kind's line has its question and its card the options, so its words, which
+    /// jawd's rows give as the question and the options, a line each, aren't said again.
+    static func said(_ m: MessageRow) -> String {
+        if m.deleted { return "This message was deleted" }
+        if m.kind == .poll, m.poll != nil { return kindLine(m) ?? "" }
+        return (kindLine(m).map { "\($0). " } ?? "") + m.plain
+    }
+
     /// The card's size at most `most` wide.
     func cardSize(most: CGFloat) -> CGSize? {
         guard hasCard else { return nil }

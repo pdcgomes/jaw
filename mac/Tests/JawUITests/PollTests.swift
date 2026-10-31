@@ -74,6 +74,30 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     #expect(MessageLayout.Builder.spoken(samplePoll("P3")) == "choose one: Ramen, 0 votes; Tasca do Chico, 0 votes; Pizza, 0 votes; No votes yet")
 }
 
+@MainActor @Test func `VoiceOver says a poll's question and options once, whatever its words hold`() async throws {
+    var rows = Samples.polls
+    let bring = try #require(rows.firstIndex { $0.id == "P2" })
+    rows[bring].spans = [Span(.text, "What do we bring?\nRope\nQuickdraws\nCrash pads")]
+    let none = try #require(rows.firstIndex { $0.id == "P3" })
+    rows[none].spans = []
+    let (c, window) = await shown(rows, PaneHost())
+    defer { window.close() }
+    func label(_ id: String) throws -> String {
+        let i = try #require(c.rows.firstIndex { $0.id == id })
+        return try #require(try messageView(c, i).accessibilityLabel())
+    }
+    let which = try label("P1")
+    #expect(which.hasPrefix("Inês, Poll · Which day?, choose one: Saturday, 3 votes, yours; Sunday, 1 vote; 4 voted, "), "\(which)")
+    let brought = try label("P2")
+    #expect(brought.hasPrefix("Rui, Poll · What do we bring?, choose any: Rope, 2 votes; Quickdraws, 3 votes; Crash pads, 1 vote; 3 voted, "),
+            "the words as jawd's rows give them, the question and the options a line each: \(brought)")
+    #expect(brought.components(separatedBy: "Quickdraws").count == 2 && brought.components(separatedBy: "bring?").count == 2)
+    #expect(try label("P3").hasPrefix("Ana, Poll · Dinner after?, choose one: Ramen, 0 votes;"), "no words at all")
+    var deleted = samplePoll("P1")
+    deleted.deleted = true
+    #expect(MessageLayout.Builder.said(deleted) == "This message was deleted" && MessageLayout.Builder.spoken(deleted) == nil)
+}
+
 // MARK: - Voting
 
 @Test func `a vote replaces yours in a poll of one, your choice again takes it back, and several toggle within the most`() throws {

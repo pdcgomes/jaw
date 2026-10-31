@@ -443,7 +443,7 @@ public enum MessageLayout {
             case .location: return "Location"
             case .liveLocation: return "Live location"
             case .contact: return "Contact card"
-            case .poll: return "Poll · " + (m.poll?.question ?? "vote on the phone")
+            case .poll: return m.poll.map { "Poll · " + $0.question } ?? "Poll"
             case .event: return "Event"
             case .invite: return invitation(m.invite)
             case .unknown: return "Jaw can't show this yet"

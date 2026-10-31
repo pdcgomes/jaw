@@ -111,9 +111,8 @@ final class MessageView: NSView {
     override func accessibilityLabel() -> String? {
         guard let m = message else { return nil }
         let who = m.mine ? "You" : (m.from?.name ?? "")
-        let what = m.deleted ? "This message was deleted" : (MessageLayout.Builder.kindLine(m).map { "\($0). " } ?? "") + m.plain
         let reactions = m.reactions.map { "\($0.n) \($0.emoji)" }.joined(separator: ", ")
-        return [who, what, MessageLayout.Builder.spoken(m) ?? "", Format.clock(m.at), m.status?.rawValue ?? "", reactions]
+        return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", Format.clock(m.at), m.status?.rawValue ?? "", reactions]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
     }
