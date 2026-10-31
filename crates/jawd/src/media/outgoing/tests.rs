@@ -1226,11 +1226,31 @@ fn a_scene_of_media_out_to_be_killed() {
     });
 }
 
-/// After a kill: nothing half written is left once jawd starts again, and the message goes, once,
-/// with the ID it was given and what its file is.
+/// The partial files in jaw's folders for copies and uploads, by folder and name.
+fn partials(home: &Path) -> Vec<String> {
+    [OUTGOING, UPLOADS]
+        .into_iter()
+        .flat_map(|folder| {
+            std::fs::read_dir(home.join(folder))
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".part"))
+                .map(move |name| format!("{folder}/{name}"))
+        })
+        .collect()
+}
+
+/// After a kill: nothing the kill left half written is there once jawd starts again, and the
+/// message goes, once, with the ID it was given and what its file is.
 async fn after_the_kill(home: &Path, id: &str, made_again: bool) -> Rig {
+    let left = partials(home);
     let rig = Rig::on(home, world()).await;
-    assert!(!partial(home, OUTGOING) && !partial(home, UPLOADS), "a start removes what a kill left half written");
+    // This run's own jobs may be writing partial files already, named for this process, not the one
+    // killed.
+    let still: Vec<String> = partials(home).into_iter().filter(|p| left.contains(p)).collect();
+    assert!(still.is_empty(), "a start removes what a kill left half written: {still:?}");
     rig.until(id, "sent after the restart", sent).await;
     let sends = rig.world.sends();
     assert_eq!(sends.iter().filter(|s| s.id == id).count(), 1, "sent once, with its own ID: {sends:?}");
