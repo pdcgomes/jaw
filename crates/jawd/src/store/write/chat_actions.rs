@@ -1466,6 +1466,19 @@ mod tests {
     }
 
     #[test]
+    fn history_leaves_a_setting_app_state_said_under_the_jid_jaw_keeps_the_chat_by_when_the_blob_names_another() {
+        let db = db();
+        chats(&db, &[ANA]);
+        her_lid_joined(&db);
+        arrives(&db, &["pin_v1", ANA], &pin_value(false, AT), 1);
+        // The conversation as the phone had it at link time, pinned, named by her LID alone.
+        let then =
+            Conversation { id: ANA_LID.into(), pinned: Some(((AT - 60_000) / 1_000) as u32), ..Default::default() };
+        written(&db, &from_history(then));
+        assert_eq!(chat(&db, ANA).0, 0, "app state unpinned it by her number, under which jaw keeps the chat");
+    }
+
+    #[test]
     fn a_patch_carrying_the_time_its_index_already_awaits_is_refused() {
         let db = db();
         chats(&db, &[ANA]);
