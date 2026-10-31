@@ -62,10 +62,10 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 **Done when** JawKit passes on the build Mac with `send-contact`'s jawd, the app builds, and `make check-parity` passes against main's terminal and `send-contact`'s, the ledger's row gone now that the Mac sends `send.contact`.
 
-- [ ] Step 1: Write the tests, and run them to see them fail.
-- [ ] Step 2: `VCard`, `ContactCard`, `CardPicture` and `Contact`'s decoder.
-- [ ] Step 3: `SendContact`, `sendContact` and `.contactUnsent`; the ledger's row out.
-- [ ] Step 4: Run JawKit and build the app on the build Mac; `make check-parity` both ways; commit.
+- [x] Step 1: Write the tests, and run them to see them fail.
+- [x] Step 2: `VCard`, `ContactCard`, `CardPicture` and `Contact`'s decoder.
+- [x] Step 3: `SendContact`, `sendContact` and `.contactUnsent`; the ledger's row out.
+- [x] Step 4: Run JawKit and build the app on the build Mac; `make check-parity` both ways; commit.
 
 ### Task 2: The card in its bubble
 
@@ -78,9 +78,9 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 **Done when** JawUITests and JawHarnessTests pass on the build Mac with the new references looked at, and the scene's pictures have been looked at in both looks.
 
-- [ ] Step 1: Write the tests, and run them to see them fail.
-- [ ] Step 2: The card, its region, VoiceOver.
-- [ ] Step 3: The samples and the scene; run the suites, look at the references, and commit.
+- [x] Step 1: Write the tests, and run them to see them fail.
+- [x] Step 2: The card, its region, VoiceOver.
+- [x] Step 3: The samples and the scene; run the suites, look at the references, and commit.
 
 ### Task 3: Message from a card, and the sheet of several
 
@@ -93,9 +93,9 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 **Done when** JawUITests and JawHarnessTests pass, the app builds, and on `--demo` with `send-contact`'s jawd, `card:` on Ana's dentist's card opens a chat with +351 21 345 6789 and on the climbers' opens the sheet of two.
 
-- [ ] Step 1: Write the tests, and run them to see them fail.
-- [ ] Step 2: The click, Enter, the menu and copy; the host's methods.
-- [ ] Step 3: The sheet, its scene, the app's side and the snapshot step; run the suites and the snapshot, and commit.
+- [x] Step 1: Write the tests, and run them to see them fail.
+- [x] Step 2: The click, Enter, the menu and copy; the host's methods.
+- [x] Step 3: The sheet, its scene, the app's side and the snapshot step; run the suites and the snapshot, and commit.
 
 ### Task 4: A card from the box's + menu
 
@@ -108,10 +108,10 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 **Done when** JawUITests and JawHarnessTests pass, the scene's pictures have been looked at, the app builds, and on `--demo` with `send-contact`'s jawd `contact:Marta Lopes|+351 213 456 789` sends a card that Ana's chat then shows as yours, as jawd's row has it.
 
-- [ ] Step 1: Write the tests, and run them to see them fail.
-- [ ] Step 2: `ContactForm` and its view.
-- [ ] Step 3: The picker, the command, the sheet, the send and the refusal in the app; the project's keys.
-- [ ] Step 4: The scene and the snapshot's steps; run the suites and the snapshot, and commit.
+- [x] Step 1: Write the tests, and run them to see them fail.
+- [x] Step 2: `ContactForm` and its view.
+- [x] Step 3: The picker, the command, the sheet, the send and the refusal in the app; the project's keys.
+- [x] Step 4: The scene and the snapshot's steps; run the suites and the snapshot, and commit.
 
 ### Task 5: The step in the docs, the check, and end to end
 
@@ -119,6 +119,6 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 **Done when** `make check-parity` passes against both terminals, the four suites pass on the build Mac with `send-contact`'s jawd and with main's, `build jaw` succeeds, the snapshot on `--demo` shows the demo's cards in both looks, and, once `send-contact` is on main, the branch is rebased onto it with its fixtures' copies gone.
 
-- [ ] Step 1: The docs.
-- [ ] Step 2: The check, the suites, the build and the snapshots.
+- [x] Step 1: The docs.
+- [x] Step 2: The check, the suites, the build and the snapshots.
 - [ ] Step 3: Commit; rebase onto main once `send-contact` is on it, and run them again.

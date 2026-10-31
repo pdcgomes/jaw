@@ -175,11 +175,12 @@ Since `unknown-kinds` landed on 28 October (7f8fc11), jawd shows most of what it
 
 ### 3.9 Contact cards
 
-Once `send-contact` lands, jawd serves `send.contact` (one card or several, each a name and a vCard 3.0) and shows every card, received or yours, as the protocol's `contact` row: its name and its vCard, holding each card one after another when a message shares several. The terminal sends one from the palette's Send a contact, made from one of jawd's people's name and number, draws each card as its name and numbers, and starts a chat with whoever a card shares on Enter.
+Since `send-contact` landed on 1 November (fb19ae45), jawd serves `send.contact` (one card or several, each a name and a vCard 3.0) and shows every card, received or yours, as the protocol's `contact` row: its name and its vCard, holding each card one after another when a message shares several. The terminal sends one from the palette's Send a contact, made from one of jawd's people's name and number, draws each card as its name and numbers, and starts a chat with whoever a card shares on Enter.
 
-- **The Mac's** is the box design's B3 contact form: the system's contact picker, the card as a vCard from the Contacts framework (CNContactVCardSerialization), and `send.contact`; its cards already draw `contact.name`, and Message and Add to Contacts on a card are Phase 4's.
-- **Needs from jawd:** `send-contact`, built and in audit.
-- **The check:** `send.contact`.
+- **The Mac's, done** ([its plan](2026-10-31-jaw-mac-contact-cards-plan.md)): every card drawn as jawd's row has it, received or yours, one or several, in both looks, from what JawKit read of its vCard once as the row arrived, on the client's reading thread, so nothing on the main thread reads one: its photo or its initials, its name and its numbers, several as their pictures, names and how many. Message on a card starts a chat with its number with `chat.start`, offering each number when it has several, as the terminal's Enter does, and several cards open a sheet of them. The box's Contact… is the box design's B3 contact form, brought forward for contacts alone: the system's contact picker, each card a vCard 3.0 from the Contacts framework (CNContactVCardSerialization) without its photo, counted as jawd counts before Send, `send.contact`, and jawd's refusals in its words, the form opening again as it was.
+- **What waits:** Add to Contacts on a card, the Mac's own, in Phase 4; a card's WhatsApp picture, a follow-up now that 2.2's image queue is on main; and sending jawd's people as cards, as the terminal's palette does, if the owner wants it.
+- **Needs from jawd:** `send-contact`, on main since fb19ae45.
+- **The check:** `send.contact`, which the Mac sends, so the ledger holds nothing for 3.9.
 
 ### 3.10 Communities in the chat list
 
@@ -190,7 +191,7 @@ Since `communities` lands, jawd shows a community as one row wherever its groups
 
 ## Phase 4 · The Mac's own, after the gaps
 
-The rest of Mac-M2 (the viewer, GIFs looping while on screen, videos and video messages playing in place, a document's first page, MapKit's maps, contact cards' Message and Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.
+The rest of Mac-M2 (the viewer, GIFs looping while on screen, videos and video messages playing in place, a document's first page, MapKit's maps, contact cards' Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.
 
 ## P10, a layout book
 
