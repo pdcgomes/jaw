@@ -1512,6 +1512,39 @@ async fn an_hd_copy_whose_message_is_deleted_for_everyone_is_withdrawn_whatever_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_read_withdrawn_goes_once_its_messages_deletion_is_refused_before_its_taken() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    // Your deletion of it for everyone on its way, leaving its HD copy's row, as a deletion done to
+    // the other copy of a merge does, written from outside.
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    let (stopped, go) = rig.sending.pause_next_withdrawal();
+    db.execute(
+        "INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at)
+         SELECT n, ?1, '3EB0DELETING', 'revoke', x'01', 0, 0 FROM messages WHERE id = ?2",
+        [ANA, id.as_str()],
+    )
+    .unwrap();
+    rig.media.inner.sending.changed();
+    tokio::time::timeout(Duration::from_secs(30), stopped.notified()).await.expect("the HD copy read withdrawn");
+    // WhatsApp refuses the deletion, whose row goes, before the writer takes the withdrawal.
+    db.execute("DELETE FROM outbox WHERE id = '3EB0DELETING'", []).unwrap();
+    go.notify_one();
+    rig.world.gate_uploads(false);
+    let went = tokio::time::timeout(Duration::from_secs(30), async {
+        while kinds_sent(&rig).len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    went.await.expect("the HD copy of a message whose deletion was refused goes");
+    let kinds: Vec<&str> = kinds_sent(&rig).iter().map(|(_, kind)| *kind).collect();
+    assert_eq!(kinds, ["message", "hd"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();

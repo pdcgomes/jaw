@@ -430,6 +430,11 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
         if applied.changed > 0 {
             super::actions::withdrawn(&inner, &row.kind);
         }
+        // The writer keeps an HD copy whose message's deletion WhatsApp refused since it was read,
+        // which is read again and goes.
+        if row.kind == "hd" {
+            return Next::After(Box::pin(std::future::ready(())));
+        }
         return Next::Done;
     }
     if row.orphan {

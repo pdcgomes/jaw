@@ -222,7 +222,7 @@ impl Sending {
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing
     /// it: it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
-    fn pause_next_withdrawal(&self) -> (Arc<Notify>, Arc<Notify>) {
+    pub(crate) fn pause_next_withdrawal(&self) -> (Arc<Notify>, Arc<Notify>) {
         let pause = (Arc::default(), Arc::default());
         *self.inner.pausing.lock().expect("the test's pause") = Some(pause.clone());
         pause

@@ -3080,8 +3080,8 @@ SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox WHERE NOT (state
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted), (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL FROM outbox o
-    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted), (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL FROM outbox o at offset 40)
+SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), iif(o.kind = 'hd', coalesce(
+    (a part of a statement, planned with the rest: incomplete input)
 
 -- src/store/write/outbox.rs
 INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING n
@@ -3147,15 +3147,12 @@ SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n
       SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/store/write/outbox.rs
-SELECT m.deleted OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') OR EXISTS (SELECT 1 FROM chat_merges cm JOIN messages g ON g.chat = cm.gone AND g.id = m.id WHERE cm.keep = m.chat AND (g.deleted OR EXISTS (SELECT 1 FROM outbox b WHERE b.target = g.n AND b.kind = 'revoke' AND b.state <> 'failed'))) FROM messages m WHERE m.n = ?1
-    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 1
-      SEARCH a USING INDEX outbox_by_target (target=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH cm USING COVERING INDEX chat_merges_by_keep (keep=?)
-      SEARCH g USING INDEX messages_by_id (chat=? AND id=?)
-      CORRELATED SCALAR SUBQUERY 2
-        SEARCH b USING INDEX outbox_by_target (target=?)
+SELECT
+    (a part of a statement, planned with the rest: incomplete input)
+
+-- src/store/write/outbox.rs
+SELECT coalesce(
+    (a part of a statement, planned with the rest: incomplete input)
 
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1
@@ -3275,11 +3272,8 @@ DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
     SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
-DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted)
-    SEARCH outbox USING INDEX outbox_by_target (target=?)
-    SCALAR SUBQUERY 1
-      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND EXISTS (SELECT 1 FROM messages t WHERE t.n = ?1 AND
+    (a part of a statement, planned with the rest: incomplete input)
 
 -- src/store/write/outbox.rs
 SELECT coalesce(message, iif(kind = 'hd', target, NULL)) FROM outbox WHERE n = ?1

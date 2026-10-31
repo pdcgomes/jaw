@@ -245,14 +245,37 @@ const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unc
 /// What counts toward OUTBOX_MOST: every row but the actions kept for a late receipt.
 const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
     WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))";
+/// Whether message `t` is deleted for everyone, or being, as windows show it: it is, or your
+/// deletion of it for everyone is on its way; or a copy of it merging with it is. NULL when there's
+/// no `t`. While a person's chats merge, a deletion is done to the copy in the chat kept
+/// (`located`), and before the merge was known it may have been done to either, whichever copy a
+/// send of yours names. The chats merging with `t`'s are the one it ends in, its own or the one it's
+/// being merged into, and every chat being merged into that.
+macro_rules! shown_deleted {
+    () => {
+        "(t.deleted
+            OR EXISTS (SELECT 1 FROM outbox ra WHERE ra.target = t.n AND ra.kind = 'revoke' AND ra.state <> 'failed')
+            OR EXISTS (SELECT 1 FROM chat_merges ma JOIN messages ga ON ga.chat = ma.gone AND ga.id = t.id
+                WHERE ma.keep = coalesce((SELECT mx.keep FROM chat_merges mx WHERE mx.gone = t.chat), t.chat)
+                AND (ga.deleted OR EXISTS (SELECT 1 FROM outbox rb WHERE rb.target = ga.n AND rb.kind = 'revoke'
+                    AND rb.state <> 'failed')))
+            OR EXISTS (SELECT 1 FROM chat_merges mk JOIN messages gk ON gk.chat = mk.keep AND gk.id = t.id
+                WHERE mk.gone = t.chat AND (gk.deleted OR EXISTS (SELECT 1 FROM outbox rc WHERE rc.target = gk.n
+                    AND rc.kind = 'revoke' AND rc.state <> 'failed'))))"
+    };
+}
 /// An outbox row as the sender takes it, with, for an action or an HD copy, the state of its
-/// message's own outbox row while that message is still to reach WhatsApp, and whether an action's
+/// message's own outbox row while that message is still to reach WhatsApp; whether an action's
 /// message has been deleted for everyone, which the action keeps once that message is deleted for
-/// you too; for a message with a file, how far its copy has got; and whether it's an HD copy whose
+/// you too, or whether an HD copy's is deleted for everyone, or being, there or in a copy merging
+/// with it; for a message with a file, how far its copy has got; and whether it's an HD copy whose
 /// message is gone.
 const OUTBOXED: &str = concat!(
     "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind,
-        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted),
+        (SELECT w.state FROM outbox w WHERE w.message = o.target),
+        iif(o.kind = 'hd', coalesce(",
+    shown_deleted!(),
+    ", o.target_deleted), coalesce(t.deleted, o.target_deleted)),
         (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL
     FROM outbox o ",
     sent_where!()
@@ -291,15 +314,16 @@ const RETRYABLE: &str =
     "SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke')
     FROM messages m WHERE m.n = ?1";
 /// Whether message ?1 is deleted for everyone, or being: it is, or your deletion of it for everyone
-/// is on its way, as windows show it then; or, while a chat merges into its own, its copy there is,
+/// is on its way, as windows show it then; or, while chats merge, a copy of it merging with it is,
 /// which windows of the chat kept show only once the merge folds it in.
-const SHOWN_DELETED: &str = "SELECT m.deleted
-        OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
-        OR EXISTS (SELECT 1 FROM chat_merges cm JOIN messages g ON g.chat = cm.gone AND g.id = m.id
-            WHERE cm.keep = m.chat AND (g.deleted
-                OR EXISTS (SELECT 1 FROM outbox b WHERE b.target = g.n AND b.kind = 'revoke'
-                    AND b.state <> 'failed')))
-    FROM messages m WHERE m.n = ?1";
+const SHOWN_DELETED: &str = concat!("SELECT ", shown_deleted!(), " FROM messages t WHERE t.n = ?1");
+/// Whether HD copy ?1 is to be withdrawn: its message deleted for everyone, or being, there or in a
+/// copy merging with it.
+const HD_SHOWN_DELETED: &str = concat!(
+    "SELECT coalesce(",
+    shown_deleted!(),
+    ", o.target_deleted) FROM outbox o LEFT JOIN messages t ON t.n = o.target WHERE o.n = ?1"
+);
 /// The actions kept for a late receipt that are past ACTION_KEPT_MS, and how many are kept.
 const PRUNE_KEPT: &str =
     "DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1";
@@ -357,10 +381,14 @@ const ORPHANED_HD: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
 /// The HD copies of message ?1, which never go once it's deleted for everyone, or being, whether or
 /// not the message itself went, or once it's deleted for you.
 const HD_WITHDRAWN: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'";
-/// The HD copies of message ?1 if it's deleted for everyone, as a merge leaves them when it folds a
-/// copy of a message into one deleted already.
-const HD_OF_DELETED: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
-    AND EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted)";
+/// The HD copies of message ?1 if it's deleted for everyone, or being, there or in a copy merging
+/// with it, as a merge leaves them when it folds a copy of a message into one deleted already, or
+/// into one your deletion of is on its way.
+const HD_OF_DELETED: &str = concat!(
+    "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND EXISTS (SELECT 1 FROM messages t WHERE t.n = ?1 AND ",
+    shown_deleted!(),
+    ")"
+);
 /// The message whose retry by hand outbox row ?1 is: its own, or for an HD copy, the one it goes
 /// after.
 const RETRIED: &str = "SELECT coalesce(message, iif(kind = 'hd', target, NULL)) FROM outbox WHERE n = ?1";
@@ -509,13 +537,17 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
 
 /// An action still to send whose message was deleted for everyone goes, as a refused one does, and
 /// windows show its message without it; one that has gone to WhatsApp meanwhile stays. An HD copy
-/// still to send goes too, and shows nothing of its own.
+/// still to send goes too, and shows nothing of its own, if its message is still deleted for
+/// everyone, or being, there or in a copy merging with it: one whose deletion WhatsApp refused
+/// since the sender read it stays, to go.
 fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     if !db.prepare_cached(STILL_QUEUED)?.exists([outbox])? {
         return Ok(false);
     }
     if db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
-        db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+        if db.prepare_cached(HD_SHOWN_DELETED)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
+            db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+        }
         return Ok(false);
     }
     match action(db, outbox)? {
@@ -1109,7 +1141,8 @@ pub(super) fn prune_kept(db: &Connection) -> Result<()> {
 /// it has failed and the message is deleted for everyone, or your deletion of it is kept for a late
 /// receipt; a deletion for you removes it too (`deleted_for_you`). The message's row still shows it
 /// failed. Its HD copies go once it will never reach WhatsApp, or once it's deleted for everyone,
-/// as a merge can leave them on a copy deleted already.
+/// or being, there or in a copy merging with it, as a merge can leave them on a copy deleted
+/// already or being deleted.
 pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(UNRETRYABLE)?.execute([n])?;
     db.prepare_cached(ORPHANED_HD)?.execute([n])?;
@@ -1351,7 +1384,8 @@ pub struct Outboxed {
     /// of that message's own outbox row.
     pub behind: Option<String>,
     /// For an action, whether its message has been deleted for everyone, before it was deleted for
-    /// you if it has been since.
+    /// you if it has been since; for an HD copy, whether its message is deleted for everyone, or
+    /// being, there or in a copy merging with it.
     pub target_deleted: bool,
     /// For a message with a file, how far its copy has got: `preparing`, `uploading`, `ready` or
     /// `failed`.
@@ -1366,7 +1400,7 @@ impl Outboxed {
     /// jaw.db would keep the reaction on the deleted row. Whoever deleted the message, you, your
     /// other devices, history or whoever sent it, and whether or not you've deleted it for you
     /// since, it's withdrawn as a refused one is. So is an HD copy of a message deleted for everyone,
-    /// whatever left its row.
+    /// or being, whatever left its row and whichever copy of the message a merge has it go after.
     pub fn withdrawn(&self) -> bool {
         self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit" | "vote" | "hd")
     }
@@ -1616,12 +1650,12 @@ mod tests {
             (
                 "outboxed by id",
                 &by_id,
-                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 7\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH rc USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 8\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             (
                 "outboxed by n",
                 &by_n,
-                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 7\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH rc USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 8\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("an action", ACT, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("app state", APP_STATE, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
@@ -1663,7 +1697,12 @@ mod tests {
             (
                 "shown deleted",
                 SHOWN_DELETED,
-                "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH cm USING COVERING INDEX chat_merges_by_keep (keep=?)\nSEARCH g USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH b USING INDEX outbox_by_target (target=?)",
+                "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH rc USING INDEX outbox_by_target (target=?)",
+            ),
+            (
+                "an HD copy's message shown deleted",
+                HD_SHOWN_DELETED,
+                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH rc USING INDEX outbox_by_target (target=?)",
             ),
             ("prune kept actions", PRUNE_KEPT, "SCAN outbox\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("kept actions", KEPT, "SCAN outbox"),
@@ -1795,7 +1834,7 @@ mod tests {
             (
                 "HD copies of a message deleted",
                 HD_OF_DELETED,
-                "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 7\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH rc USING INDEX outbox_by_target (target=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("a row's retry", RETRIED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
         ];
@@ -3486,6 +3525,10 @@ mod tests {
             .await
             .unwrap();
         apply(vec![acting(ANA, "m1", "x1", Amendment::Revoke, 2_000)]).await.unwrap();
+        // WhatsApp refuses the message, and the deletion, refused once it may have gone, waits for a
+        // receipt.
+        apply(vec![Change::Outbox(Step::Failed { outbox: 1, error: "406".into(), next_at: None })]).await.unwrap();
+        apply(vec![Change::Outbox(Step::Unconfirmed { outbox: 2, error: "503".into(), until: 0 })]).await.unwrap();
         // An HD copy of it the deletion's own transaction didn't take, as nothing in jaw.db leaves
         // now, written from outside.
         let side = Connection::open(home.path().join("jaw.db")).unwrap();
@@ -3496,20 +3539,18 @@ mod tests {
             [ANA],
         )
         .unwrap();
-        // WhatsApp refuses the message, and the deletion, refused once it may have gone, has no
-        // receipt in its day, so it's kept for a late one and nothing can send the message again.
-        apply(vec![Change::Outbox(Step::Failed { outbox: 1, error: "406".into(), next_at: None })]).await.unwrap();
-        let hd =
-            || on(&store, |db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?));
-        assert_eq!(hd().await, 1, "while the deletion may still go, the message's failed row holds its HD copy");
-        apply(vec![Change::Outbox(Step::Unconfirmed { outbox: 2, error: "503".into(), until: 0 })]).await.unwrap();
+        let h1 = row_of(&store, "h1").await;
+        assert_eq!(withdraws(&store, h1).await, Some(true), "while the deletion may still go, its HD copy doesn't");
+        // No receipt comes in its day, so the deletion is kept for a late one, which no window shows,
+        // and nothing can send the message again.
         apply(vec![Change::Outbox(Step::NoReceipt { outbox: 2, error: "no receipt".into() })]).await.unwrap();
         let failed = on(&store, |db| {
             Ok(db.query_row("SELECT count(*) FROM outbox WHERE message IS NOT NULL", [], |r| r.get(0))?)
         })
         .await;
         assert_eq!(failed, 0, "the message's failed row goes, as nothing can send it again");
-        assert_eq!(hd().await, 0, "and its HD copy, with nothing left to go after, goes with it");
+        let hd = on(&store, |db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?));
+        assert_eq!(hd.await, 0, "and its HD copy, with nothing left to go after, goes with it");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3576,6 +3617,137 @@ mod tests {
         eprintln!("AUDIT-D: the HD row's target, its copy's message and the kept message after the merge: {after:?}");
         assert_eq!(after.0, after.2, "the HD row follows its message");
         assert_eq!(after.1, after.2, "the HD copy's row lost its message in the fold");
+    }
+
+    /// Under her LID, a photo of yours in HD whose message went, its HD copy still on its way; under
+    /// her number, the same message, as history brings it. Says the HD copy's outbox row.
+    async fn hd_under_her_lid_and_the_message_under_her_number(store: &crate::store::Store) -> i64 {
+        use crate::store::{Change, Lane};
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![
+            Change::Remember { key: "me".into(), value: ME_JID.into() },
+            Change::Message(from_ana(ANA_LID, "l1", 1_000)),
+            attaching(ANA_LID, "p1", "h1", 4_000),
+            Change::Message(Message {
+                chat: ANA.into(),
+                live: false,
+                status: Some("delivered"),
+                kind: "image",
+                ..mine("p1", 4_000)
+            }),
+        ])
+        .await
+        .unwrap();
+        let p1 = row_of(store, "p1").await;
+        apply(vec![Change::Outbox(Step::Sent { outbox: p1 })]).await.unwrap();
+        row_of(store, "h1").await
+    }
+
+    /// Her number and her LID found to be one person, which starts the merge of her two chats.
+    async fn one_person(store: &crate::store::Store) {
+        use crate::store::{Change, Lane, Person};
+        let person = Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() });
+        store.apply(Lane::Live, vec![person]).await.unwrap();
+        let merging = on(store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0))?)).await;
+        assert_eq!(merging, 1, "her LID's chat is being merged into her number's");
+    }
+
+    /// The merges going on, done to their end.
+    async fn merged(store: &crate::store::Store) {
+        use crate::store::{Change, Lane};
+        loop {
+            let merging = on(store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0))?)).await;
+            if merging == 0 {
+                return;
+            }
+            store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+    }
+
+    /// Whether the sender, reading outbox row `outbox` now, withdraws it rather than send it; None
+    /// once the row has gone.
+    async fn withdraws(store: &crate::store::Store, outbox: i64) -> Option<bool> {
+        store
+            .reads()
+            .query(crate::work::Priority::Interactive, move |db| Ok(outboxed_by_n(db, outbox)?.map(|r| r.withdrawn())))
+            .await
+            .unwrap()
+    }
+
+    /// The round-two audit's I4: your deletion for everyone is done to the copy under her number,
+    /// and is still on its way when her chats are found to be one and the merge folds the LID's
+    /// copy, whose HD copy is still on its way, into it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_hd_copy_never_goes_once_you_delete_for_everyone_the_copy_a_merge_then_folds_it_into() {
+        use crate::store::{Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let h1 = hd_under_her_lid_and_the_message_under_her_number(&store).await;
+        store.apply(Lane::Live, vec![acting(ANA, "p1", "x1", Amendment::Revoke, 5_000)]).await.unwrap();
+        assert_eq!(hd_left(&store).await, 2, "the copy deleted isn't the one the HD copy goes after");
+        one_person(&store).await;
+        assert_eq!(
+            withdraws(&store, h1).await,
+            Some(true),
+            "once the merge is known, the sender withdraws the HD copy of the copy merging with the one being deleted"
+        );
+        merged(&store).await;
+        let revokes = on(&store, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM outbox a JOIN messages m ON m.n = a.target WHERE a.kind = 'revoke' AND m.id = 'p1'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await;
+        assert_eq!(revokes, 1, "the message kept is the one your deletion is on its way for");
+        assert_eq!(hd_left(&store).await, 0, "and its HD copy, folded into it, is left neither to go nor to retry");
+    }
+
+    /// As the test above, but the merge is known before you delete the message, from either chat:
+    /// the deletion is done to the copy under her number, and the HD copy, still the LID copy's
+    /// until the fold, never goes meanwhile.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_hd_copy_never_goes_once_you_delete_its_message_for_everyone_in_either_chat_of_a_merge() {
+        use crate::store::{Change, Lane, Store};
+        for (n, aimed) in [ANA_LID, ANA].into_iter().enumerate() {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let h1 = hd_under_her_lid_and_the_message_under_her_number(&store).await;
+            one_person(&store).await;
+            assert_eq!(withdraws(&store, h1).await, Some(false), "nothing deletes it yet");
+            store.apply(Lane::Live, vec![acting(aimed, "p1", "x1", Amendment::Revoke, 5_000)]).await.unwrap();
+            assert_eq!(hd_left(&store).await, 2, "aimed at {aimed}, the deletion is done to the copy kept");
+            assert_eq!(withdraws(&store, h1).await, Some(true), "aimed at {aimed}, the sender withdraws the HD copy");
+            store.apply(Lane::Live, vec![Change::Outbox(Step::Withdrawn { outbox: h1 })]).await.unwrap();
+            assert_eq!(hd_left(&store).await, 0, "aimed at {aimed}, the writer takes it as it withdraws it");
+            merged(&store).await;
+            assert_eq!(hd_left(&store).await, 0, "aimed at {aimed} ({n}), nothing of it is back after the fold");
+        }
+    }
+
+    /// The sender reads an HD copy withdrawn, its message's deletion on its way in the other chat of
+    /// a merge, and WhatsApp refuses that deletion before the writer takes the withdrawal: the
+    /// message stands, and so does its HD copy, still to go.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writer_keeps_an_hd_copy_whose_messages_deletion_was_refused_since_the_sender_read_it() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        let h1 = hd_under_her_lid_and_the_message_under_her_number(&store).await;
+        one_person(&store).await;
+        apply(vec![acting(ANA, "p1", "x1", Amendment::Revoke, 5_000)]).await.unwrap();
+        assert_eq!(withdraws(&store, h1).await, Some(true));
+        let x1 = row_of(&store, "x1").await;
+        apply(vec![Change::Outbox(Step::Failed { outbox: x1, error: "406".into(), next_at: None })]).await.unwrap();
+        apply(vec![Change::Outbox(Step::Withdrawn { outbox: h1 })]).await.unwrap();
+        let queued = on(&store, move |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox WHERE n = ?1 AND state = 'queued'", [h1], |r| r.get(0))?)
+        })
+        .await;
+        assert_eq!(queued, 1, "the HD copy of a message whose deletion was refused stays, to go");
+        assert_eq!(withdraws(&store, h1).await, Some(false), "and the sender, reading it again, sends it");
     }
 
     #[tokio::test(flavor = "multi_thread")]
