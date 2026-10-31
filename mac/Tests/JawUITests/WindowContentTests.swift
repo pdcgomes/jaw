@@ -102,3 +102,30 @@ func content(width: CGFloat, laidOut: Bool = true) -> WindowContent {
            now: Date(), actions: WindowContent.Actions())
     #expect(c.bar.status.rootView.needs.map(\.id) == [waiting.id])
 }
+
+@MainActor @Test func `the status line is set again only when what it draws changes, its dots only for the people it names`() {
+    let ana = ChatRow(id: "ana", v: 1, sort: "3", name: "Ana", unread: 2), rui = ChatRow(id: "rui", v: 1, sort: "2", name: "Rui", unread: 1)
+    let climbers = ChatRow(id: "climbers", v: 1, sort: "1", kind: .group, name: "Climbers", unread: 4)
+    let c = content(width: 1180)
+    var set: [String] = []
+    /// Shows the content with `typing`, its status line's actions saying `as` once its open is used.
+    func show(_ typing: Typists, focused: ChatRow? = nil, as tag: String) {
+        c.show(Situation(reach: .up, connection: Connection(state: .online)), chats: [ana, rui, climbers], typing: typing,
+               focused: focused, panes: nil, roles: Catalog.jaw.dark, now: Date(), actions: WindowContent.Actions(open: { _ in set.append(tag) }))
+    }
+    /// Which show's status line is the bar's.
+    func current() -> String? {
+        c.bar.status.rootView.open(ana)
+        return set.popLast()
+    }
+    let ze = [Typist(id: "person:9", name: "Zé")], typingAna = [Typist(id: "person:4", name: "Ana")]
+    show([:], as: "nobody")
+    show(["climbers": ze], as: "a group")
+    #expect(current() == "nobody", "a group's typing, which the right half counts without naming, leaves it as it was")
+    show(["climbers": ze, "ana": typingAna], as: "Ana")
+    #expect(current() == "Ana" && c.bar.status.rootView.typingIn == ["ana"], "Ana's typing puts a dot before her name")
+    show(["climbers": ze, "ana": typingAna], as: "the same")
+    #expect(current() == "Ana", "nothing new, nothing set")
+    show(["climbers": ze, "ana": typingAna], focused: climbers, as: "focused")
+    #expect(current() == "focused" && c.bar.status.rootView.who == "Zé", "the focused chat's typing on the left")
+}

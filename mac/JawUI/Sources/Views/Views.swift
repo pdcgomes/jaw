@@ -218,7 +218,7 @@ public struct StatusLine: View {
             }
             Spacer(minLength: 12)
             ViewThatFits(in: .horizontal) {
-                right(names: 3, count: .long)
+                right(names: Self.widest, count: .long)
                 right(names: 2, count: .long)
                 right(names: 2, count: .short)
                 right(names: 1, count: .short)
@@ -237,9 +237,23 @@ public struct StatusLine: View {
 
     enum Count { case long, short, tiny }
 
+    /// The most chats the right half names, as its widest form does.
+    static let widest = 3
+
+    /// The chats the right half names, up to `n`: mentions and people, in `needs`' order.
+    static func named(_ needs: [ChatRow], _ n: Int) -> [ChatRow] {
+        Array(needs.filter { $0.mentions > 0 || !$0.kind.isGroup }.prefix(n))
+    }
+
+    /// Of `typing`, the chats the right half puts a dot before: the people it names at its widest,
+    /// someone typing in their chat, as a mention's name has none.
+    static func typingIn(_ typing: Typists, needs: [ChatRow]) -> Set<String> {
+        Set(named(needs, widest).filter { $0.mentions == 0 && typing[$0.id] != nil }.map(\.id))
+    }
+
     /// Mentions and people named, up to `names`, and the rest counted.
     @ViewBuilder func right(names: Int, count: Count) -> some View {
-        let named = Array(needs.filter { $0.mentions > 0 || !$0.kind.isGroup }.prefix(names))
+        let named = Self.named(needs, names)
         let rest = needs.filter { c in !named.contains { $0.id == c.id } }
         HStack(spacing: 10) {
             ForEach(named, id: \.id) { c in
@@ -271,7 +285,15 @@ public struct StatusLine: View {
         }
         .fixedSize()
     }
+}
 
+extension StatusLine: @MainActor Equatable {
+    /// The same when it draws the same; `open` and `glance` are left out, as the window makes the
+    /// same ones for it each time.
+    public static func == (a: StatusLine, b: StatusLine) -> Bool {
+        a.state == b.state && a.warn == b.warn && a.who == b.who && a.typing == b.typing && a.chat == b.chat && a.needs == b.needs
+            && a.typingIn == b.typingIn && a.roles == b.roles
+    }
 }
 
 /// A message's receipts: when it was sent, and each recipient's delivered, read and played times.

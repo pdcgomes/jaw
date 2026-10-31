@@ -165,10 +165,12 @@ public final class WindowContent: NSViewController {
         let state = situation.stateLine
         let shown = Set(panes.map { p in p.grid.slots.filter { p.views[$0.id] != nil }.compactMap(\.chat) } ?? [])
         let line = situation.chatLine(focused: focused, typing: focused.flatMap { typing[$0.id] } ?? [], now: now)
-        bar.status.rootView = StatusLine(state: state?.text, warn: state?.warn ?? false, who: line?.who ?? "", typing: line?.typing,
-                                         chat: line?.rest,
-                                         needs: Situation.needs(chats, shown: shown), typingIn: Set(typing.keys), roles: roles,
-                                         open: actions.open, glance: actions.glance)
+        let needs = Situation.needs(chats, shown: shown)
+        let status = StatusLine(state: state?.text, warn: state?.warn ?? false, who: line?.who ?? "", typing: line?.typing,
+                                chat: line?.rest, needs: needs, typingIn: StatusLine.typingIn(typing, needs: needs), roles: roles,
+                                open: actions.open, glance: actions.glance)
+        // Setting the root view lays the bar's hosting view out again, so one that draws the same isn't set.
+        if status != bar.status.rootView { bar.status.rootView = status }
         switch situation.stateView(hasChats: !chats.isEmpty, hasPanes: panes != nil) {
         case let .linking(step, loggedOut)?:
             detail.showLinking(step: step, loggedOut: loggedOut, roles: roles, start: actions.linkStart, cancel: actions.linkCancel)
