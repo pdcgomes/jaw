@@ -441,4 +441,53 @@ struct LiveTests {
         take(jawd.drain())
         #expect(rows == freshRows && slots == freshSlots, "the tree after jawd was killed is a fresh watch's")
     }
+
+    @Test func `a folder's roster on a real jawd: someone filed in the folder comes into its window, and leaves once taken out`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let jawd = Jawd(socket: demo.socket, client: "jaw-mac-live", version: "0", focus: false) { _ in }
+        jawd.start()
+        defer { jawd.close() }
+        _ = jawd.watchFolders()
+        let all = jawd.watchRoster("all", .top(50))
+        var everyone = People<RosterRow>(folder: "all", place: .top(50))
+        var inFolder = People<RosterRow>(folder: "", place: .top(50))
+        var roster: WindowID?
+        func take(_ updates: [JawUpdate]) {
+            for case let .roster(w, u) in updates {
+                if w == all { everyone.apply(u) } else if w == roster { inFolder.apply(u) }
+            }
+        }
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return everyone.count > 0
+        }, "the demo's people come")
+        let someone = try #require(everyone.list.first)
+
+        jawd.folderCreate(name: "Family", parent: nil)
+        let made = await drain(jawd, seconds: 20) { all in all.contains { if case .named = $0 { true } else { false } } }
+        take(made)
+        let named = made.compactMap { update -> String? in if case let .named(row) = update { row?.id } else { nil } }
+        let family = try #require(named.first)
+        inFolder = People(folder: family, place: .top(50))
+        roster = jawd.watchRoster(family, .top(50))
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return inFolder.loaded
+        }, "Family's people are watched")
+        #expect(inFolder.count == 0, "nobody in it yet")
+
+        jawd.folderAdd(family, item: someone.id, said: "filed")
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return inFolder.get(someone.id) != nil
+        }, "\(someone.name), filed in Family, comes into its people")
+        #expect(inFolder.get(someone.id)?.folders.contains(family) == true)
+        jawd.folderRemove(family, item: someone.id, said: "taken out")
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return inFolder.get(someone.id) == nil
+        }, "and leaves them once taken out")
+        #expect(everyone.get(someone.id) != nil, "still among everyone")
+    }
 }
