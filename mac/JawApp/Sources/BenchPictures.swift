@@ -105,12 +105,18 @@ enum BenchPictures {
         var said: [String: Double] = [:]
     }
 
-    /// Once the chat's rows are in its table: the fling in bubbles, then in lines, then the footprint.
+    /// Once the chat's rows are in its table: the flings, then the footprint on a screen of photos,
+    /// and with no window open.
     static func flung(_ c: ConversationController, rows: [MessageRow], model: AppModel, window: NSWindow, folder: URL) {
         let found = Found()
         found.said = ["rows": Double(rows.count), "pictures": Double(rows.reduce(0) { $0 + ($1.album?.items.count ?? 1) })]
         look(0, c, model: model, found: found) {
-            // A screen of photos, decoded and settled, for the footprint.
+            // A screen of photos in bubbles, drawn from the window's pictures again and settled.
+            var style = model.style
+            style.look = .bubbles
+            c.pictures = model.pictures
+            c.spec = LayoutSpec(style: style, me: model.me)
+            c.relayoutForBench()
             c.scrollTranscript(to: 0)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 MainActor.assumeIsolated {
@@ -120,18 +126,29 @@ enum BenchPictures {
                     let counts = model.pictures.queue.counts
                     found.said["decoded"] = Double(counts.decoded)
                     found.said["dropped"] = Double(counts.dropped)
-                    found.said["load"] = load()
-                    window.orderOut(nil)
-                    try? FileManager.default.removeItem(at: folder)
-                    Bench.finish(found.said)
+                    // No window open: the bench's closed and let go of, the app's closed as you'd close it.
+                    window.contentView = nil
+                    window.close()
+                    model.window?.window?.performClose(nil)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        MainActor.assumeIsolated {
+                            found.said["no_window_mb"] = Double(Bench.footprint()) / 1_048_576
+                            found.said["no_window_decoded_mb"] = Double(model.pictures.cache.bytes) / 1_048_576
+                            found.said["load"] = load()
+                            try? FileManager.default.removeItem(at: folder)
+                            Bench.finish(found.said)
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// Each fling: in bubbles and in lines with the pictures, then in bubbles again with nothing
+    /// Each fling: in bubbles and in lines with the pictures, then in each again with nothing
     /// decoded, their wells alone, to say what the transcript costs before any picture.
-    static let looks: [(name: String, look: Look, pictures: Bool)] = [("bubbles", .bubbles, true), ("lines", .lines, true), ("wells", .bubbles, false)]
+    static let looks: [(name: String, look: Look, pictures: Bool)] = [
+        ("bubbles", .bubbles, true), ("lines", .lines, true), ("wells", .bubbles, false), ("wells_lines", .lines, false),
+    ]
 
     /// The fling `i`, and those after it, then `then`.
     static func look(_ i: Int, _ c: ConversationController, model: AppModel, found: Found, then: @escaping @MainActor () -> Void) {
