@@ -162,7 +162,10 @@ public struct StateView: View {
 public struct StatusLine: View {
     public var state: String?
     public var warn: Bool
-    /// Who's typing in the focused chat, drawn in the online colour before the rest of `chat`.
+    /// Who's typing in the focused chat, in a group: their names, drawn in the online colour before
+    /// `typing`.
+    public var who: String
+    /// What they're doing, "typing…" or "recording…", in the online colour before the rest of `chat`.
     public var typing: String?
     public var chat: String?
     public var needs: [ChatRow]
@@ -172,11 +175,12 @@ public struct StatusLine: View {
     public var open: (ChatRow) -> Void
     public var glance: () -> Void
 
-    public init(state: String?, warn: Bool, typing: String? = nil, chat: String?, needs: [ChatRow] = [], typingIn: Set<String> = [],
-                roles: Roles, open: @escaping (ChatRow) -> Void = { _ in }, glance: @escaping () -> Void = {})
+    public init(state: String?, warn: Bool, who: String = "", typing: String? = nil, chat: String?, needs: [ChatRow] = [],
+                typingIn: Set<String> = [], roles: Roles, open: @escaping (ChatRow) -> Void = { _ in }, glance: @escaping () -> Void = {})
     {
         self.state = state
         self.warn = warn
+        self.who = who
         self.typing = typing
         self.chat = chat
         self.needs = needs
@@ -187,11 +191,15 @@ public struct StatusLine: View {
     }
 
     /// How the focused chat is, as it's drawn: who's typing in the online colour, then the rest,
-    /// quieter.
-    static func chatParts(typing: String?, chat: String?, roles: Roles) -> [(text: String, colour: RGBA)] {
-        var parts: [(text: String, colour: RGBA)] = []
-        if let typing { parts.append((typing, roles.online)) }
-        if let chat { parts.append(((typing == nil ? "" : " · ") + chat, roles.secondary)) }
+    /// quieter. Where there isn't room, only the names are cut short, so what they're doing and
+    /// "· muted" after it always show; what was said, in their place, is cut short too.
+    static func chatParts(who: String, typing: String?, chat: String?, roles: Roles) -> [(text: String, colour: RGBA, cut: Bool)] {
+        var parts: [(text: String, colour: RGBA, cut: Bool)] = []
+        if let typing {
+            if !who.isEmpty { parts.append((who, roles.online, true)) }
+            parts.append(((who.isEmpty ? "" : " ") + typing, roles.online, false))
+        }
+        if let chat { parts.append(((typing == nil ? "" : " · ") + chat, roles.secondary, typing == nil)) }
         return parts
     }
 
@@ -200,13 +208,13 @@ public struct StatusLine: View {
             if let state {
                 Text(state).foregroundStyle((warn ? roles.mention : roles.accent).color)
             }
-            let parts = Self.chatParts(typing: typing, chat: chat, roles: roles)
+            let parts = Self.chatParts(who: who, typing: typing, chat: chat, roles: roles)
             if !parts.isEmpty {
-                Text(parts.reduce(into: AttributedString()) { line, part in
-                    var said = AttributedString(part.text)
-                    said.foregroundColor = part.colour.color
-                    line.append(said)
-                })
+                HStack(spacing: 0) {
+                    ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                        Text(part.text).foregroundStyle(part.colour.color).fixedSize(horizontal: !part.cut, vertical: false)
+                    }
+                }
             }
             Spacer(minLength: 12)
             ViewThatFits(in: .horizontal) {

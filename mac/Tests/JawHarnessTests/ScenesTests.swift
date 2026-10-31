@@ -24,18 +24,22 @@ import Testing
     #expect(Format.now() == Samples.now)
 }
 
-/// A chat list with no chats in the chat list scene's band, `band`, at the frame that scene gives its
-/// list and at its width: the scene as it would be drawn if its chats never arrived.
-func emptyChatList(_ band: Note, width: CGFloat) -> HarnessScene {
+/// A chat list with no chats in each of the chat list scene's bands, `bands`, at the frames that scene
+/// gives its lists and at its width: the scene as it would be drawn if its chats never arrived.
+func emptyChatList(_ bands: [Note], width: CGFloat) -> HarnessScene {
     HarnessScene(id: "no-chats", title: "No chats", symbol: "list.bullet.rectangle", synopsis: "", section: .chatList,
                  covers: [], width: width) { c in
-        SpecimenGroup(title: band.title, note: band.note, roles: c.roles) {
-            ControllerSpecimen {
-                let list = ChatListController(folder: "all", roles: c.roles)
-                _ = list.view
-                return list
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(zip(bands, [CGFloat(260), 56]).enumerated()), id: \.offset) { _, band in
+                SpecimenGroup(title: band.0.title, note: band.0.note, roles: c.roles) {
+                    ControllerSpecimen {
+                        let list = ChatListController(folder: "all", roles: c.roles)
+                        _ = list.view
+                        return list
+                    }
+                    .frame(width: 300, height: band.1)
+                }
             }
-            .frame(width: 300, height: 260)
         }
     }
 }
@@ -81,8 +85,8 @@ func emptyChatList(_ band: Note, width: CGFloat) -> HarnessScene {
         let scene = try #require(HarnessCatalog.shared.scene(id: "chat-list"))
         let dark = try #require(scene.variants.first { $0.name == "dark" }).applied(to: Conditions())
         let chats = try await Pictures.draw(scene, dark)
-        let band = try #require(chats.notes.first)
-        let none = try await Pictures.draw(emptyChatList(band, width: scene.width), dark)
+        #expect(chats.notes.count == 2, "the four chats and the busy group")
+        let none = try await Pictures.draw(emptyChatList(chats.notes, width: scene.width), dark)
         #expect(none.points == chats.points, "drawn the same way")
         #expect(none.hash != chats.hash)
     }

@@ -369,12 +369,10 @@ final class ChatCell: NSView {
 
     override func draw(_: NSRect) {
         guard let chat, let roles else { return }
-        let indent: CGFloat = inCommunity ? 18 : 0
         if isSelected {
             roles.selection.nsColor.setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 2), xRadius: 8, yRadius: 8).fill()
         }
-        let avatarRect = NSRect(x: 12 + indent, y: 10, width: 36, height: 36)
         drawAvatar(chat, in: avatarRect, roles)
         let x = avatarRect.maxX + 10
         let right = bounds.width - 12
@@ -403,18 +401,37 @@ final class ChatCell: NSView {
         ]).draw(in: NSRect(x: x, y: 9, width: max(nameRight - x, 10), height: 18))
 
         var badgeRight = right
-        let unread = chat.kind == .community ? (chat.childrenUnread ?? 0) : chat.unread
-        if unread > 0 || chat.markedUnread {
-            badgeRight -= badge(unread > 0 ? Format.num(unread) : " ", right: badgeRight,
-                                fill: chat.muted ? roles.tertiary : roles.accent, roles) + 4
+        for (text, fill) in badges(chat, roles) {
+            badgeRight -= badge(text, right: badgeRight, fill: fill, roles) + 4
         }
-        if chat.mentions > 0 {
-            badgeRight -= badge("@", right: badgeRight, fill: roles.mention, roles) + 4
-        }
-        line(chat, roles).draw(in: NSRect(x: x, y: 30, width: max(badgeRight - x - 4, 10), height: 17))
+        line(chat, roles).draw(in: lineRect(chat, roles))
         if let (count, colour) = ticks(chat, roles), let ctx = NSGraphicsContext.current?.cgContext {
             Ticks.draw(count, x: x, baseline: 43, size: 12, colour: colour.cgColor, in: ctx)
         }
+    }
+
+    /// The badges at the second line's end, from the right: the unread count, or a blank while it's
+    /// marked unread, then an @ for a mention.
+    func badges(_ chat: ChatRow, _ roles: Roles) -> [(text: String, fill: RGBA)] {
+        var out: [(text: String, fill: RGBA)] = []
+        let unread = chat.kind == .community ? (chat.childrenUnread ?? 0) : chat.unread
+        if unread > 0 || chat.markedUnread {
+            out.append((unread > 0 ? Format.num(unread) : " ", chat.muted ? roles.tertiary : roles.accent))
+        }
+        if chat.mentions > 0 { out.append(("@", roles.mention)) }
+        return out
+    }
+
+    /// The avatar's place, indented under its community; the name and the second line start after it.
+    var avatarRect: NSRect {
+        NSRect(x: 12 + (inCommunity ? 18 : 0), y: 10, width: 36, height: 36)
+    }
+
+    /// Where the second line is drawn: after the avatar, up to the badges.
+    func lineRect(_ chat: ChatRow, _ roles: Roles) -> NSRect {
+        let x = avatarRect.maxX + 10
+        let badgeRight = bounds.width - 12 - badges(chat, roles).reduce(0) { $0 + badgeWidth($1.text) + 4 }
+        return NSRect(x: x, y: 30, width: max(badgeRight - x - 4, 10), height: 17)
     }
 
     /// Your last message's ticks, on the second line while it shows that message rather than who's
@@ -430,13 +447,17 @@ final class ChatCell: NSView {
         return p
     }
 
-    /// The second line: who's typing, the draft, or the newest message with your ticks.
+    /// The second line: who's typing, its names cut short to leave room for their words, the draft,
+    /// or the newest message with your ticks.
     func line(_ chat: ChatRow, _ roles: Roles) -> NSAttributedString {
         let quiet: [NSAttributedString.Key: Any] = [.font: TextStyle.callout.nsFont, .foregroundColor: roles.secondary.nsColor,
                                                     .paragraphStyle: truncating]
         let out = NSMutableAttributedString()
-        if let typing = TypingWords.line(typists, group: chat.kind.isGroup) {
-            out.append(NSAttributedString(string: typing, attributes: quiet.merging([.foregroundColor: roles.online.nsColor]) { $1 }))
+        let typing = quiet.merging([.foregroundColor: roles.online.nsColor]) { $1 }
+        if let said = TypingWords.line(typists, group: chat.kind.isGroup, in: lineRect(chat, roles).width,
+                                       width: { NSAttributedString(string: $0, attributes: typing).size().width })
+        {
+            out.append(NSAttributedString(string: said, attributes: typing))
             return out
         }
         if let draft = chat.draft, !draft.isEmpty {
@@ -476,7 +497,7 @@ final class ChatCell: NSView {
             .foregroundColor: (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor,
         ]
         let s = NSAttributedString(string: text, attributes: attributes)
-        let w = max(s.size().width + 10, 18)
+        let w = badgeWidth(text)
         let rect = NSRect(x: right - w, y: 29, width: w, height: 18)
         fill.nsColor.setFill()
         NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
@@ -484,6 +505,11 @@ final class ChatCell: NSView {
         // Without .usesLineFragmentOrigin, the point drawn at is the baseline's.
         s.draw(with: NSRect(x: rect.midX - s.size().width / 2, y: (rect.midY + ink.midY).rounded(), width: 0, height: 0), options: [], context: nil)
         return w
+    }
+
+    /// A badge's width for `text`: its text and 5 points each side, and no narrower than it's high.
+    func badgeWidth(_ text: String) -> CGFloat {
+        max(NSAttributedString(string: text, attributes: [.font: TextStyle.caption.emphasised]).size().width + 10, 18)
     }
 
     @discardableResult

@@ -23,6 +23,23 @@ let anaTyping = Typist(id: "person:4", name: "Ana")
     #expect(TypingWords.line([ruiRecording, Typist(id: "person:4", name: "Ana", state: .recording)], group: true)
         == "Rui, Ana recording…", "recording while everyone records")
     #expect(TypingWords.who([anaTyping, ruiTyping], group: false) == "", "a one-to-one chat names nobody")
+    #expect(TypingWords.words([anaTyping, ruiRecording]) == "typing…" && TypingWords.words([ruiRecording]) == "recording…")
+    #expect(TypingWords.words([]) == nil)
+}
+
+@Test func `short of room, the names are cut short and what they're doing never is`() {
+    // A point a character, so the room is a count of characters.
+    let width = { (s: String) in CGFloat(s.count) }
+    let both = [anaTyping, ruiTyping]
+    #expect(TypingWords.line(both, group: true, in: 16, width: width) == "Ana, Rui typing…", "whole where it fits")
+    #expect(TypingWords.line(both, group: true, in: 15, width: width) == "Ana, R… typing…", "the longest start of the names that fits")
+    #expect(TypingWords.line(both, group: true, in: 12, width: width) == "Ana… typing…", "without its last comma or space")
+    #expect(TypingWords.line(both, group: true, in: 9, width: width) == "typing…", "no names where even \"A… \" doesn't fit")
+    #expect(TypingWords.line(both, group: true, in: 3, width: width) == "typing…", "and the words whatever the room")
+    #expect(TypingWords.line([ruiRecording], group: true, in: 12, width: width) == "recording…")
+    #expect(TypingWords.line(both, group: false, in: 7, width: width) == "typing…", "a one-to-one chat has no names to cut")
+    #expect(TypingWords.line([], group: true, in: 100, width: width) == nil)
+    #expect(TypingWords.fitted("Ana, Rui", before: "typing...", in: 18, width: width) == "Ana, Rui ", "as the header fits its names")
 }
 
 @MainActor @Test func `it plays only where it's looked at, in a key window on screen, with motion allowed`() {

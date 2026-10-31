@@ -47,6 +47,16 @@ public enum Samples {
     /// Who's typing in the samples' chats, as jawd says it: Rui, in Lisbon Climbing.
     public static let typing: Typists = [group.id: [Typist(id: rui.id, name: rui.name)]]
 
+    /// A busy group, where `busy` are typing.
+    public static let busyGroup = ChatRow(
+        id: "120363012345678902@g.us", v: 38, sort: "0~1792144400000~5", kind: .group, name: "Família Gomes",
+        last: Last(from: "Inês", mine: false, summary: "who's bringing the cake?", at: now - 300_000),
+    )
+
+    /// Five people typing at once, oldest first, their names more than a chat list's row holds.
+    public static let busy = ["Ana Margarida Ribeiro", "Rui Pedro Costa", "Inês Gomes Sousa", "Francisco Xavier Mendonça",
+                              "Maria do Carmo Vasconcelos"].enumerated().map { Typist(id: "person:\($0.offset + 20)", name: $0.element) }
+
     /// A group's messages, oldest first.
     public static var messages: [MessageRow] {
         let yesterday = now - 86_400_000

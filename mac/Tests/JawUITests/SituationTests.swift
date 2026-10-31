@@ -53,7 +53,9 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
     #expect(s.chatLine(focused: nil, now: now) == nil)
     #expect(s.chatLine(focused: Samples.group, now: now) == nil, "nobody typing in a chat that isn't muted says nothing")
     #expect(s.chatLine(focused: Samples.group, typing: [Typist(id: "person:7", name: "Rui")], now: now)
-        == Situation.ChatLine(typing: "Rui typing…"), "a group names who")
+        == Situation.ChatLine(who: "Rui", typing: "typing…"), "a group names who, apart from what they're doing")
+    #expect(s.chatLine(focused: Samples.busyGroup, typing: Samples.busy, now: now)
+        == Situation.ChatLine(who: Samples.busy.map(\.name).joined(separator: ", "), typing: "typing…"))
     var direct = Samples.direct
     #expect(s.chatLine(focused: direct, typing: ana, now: now) == Situation.ChatLine(typing: "typing…"))
     #expect(s.chatLine(focused: direct, typing: [Typist(id: "person:12", name: "Ana", state: .recording)], now: now)
@@ -70,13 +72,17 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
         == Situation.ChatLine(rest: "nothing unread"), "what was said shows with no chat focused")
 }
 
-@MainActor @Test func `the status line draws who's typing in the online colour, and the rest quieter`() {
+@MainActor @Test func `the status line draws who's typing in the online colour, and the rest quieter, cutting only the names short`() {
     let roles = Catalog.jaw.dark
-    let both = StatusLine.chatParts(typing: "Rui typing…", chat: "muted", roles: roles)
-    #expect(both.map(\.text) == ["Rui typing…", " · muted"] && both.map(\.colour) == [roles.online, roles.secondary])
-    #expect(StatusLine.chatParts(typing: nil, chat: "muted", roles: roles).map(\.text) == ["muted"])
-    #expect(StatusLine.chatParts(typing: "typing…", chat: nil, roles: roles).map(\.colour) == [roles.online])
-    #expect(StatusLine.chatParts(typing: nil, chat: nil, roles: roles).isEmpty)
+    let all = StatusLine.chatParts(who: "Rui", typing: "typing…", chat: "muted", roles: roles)
+    #expect(all.map(\.text) == ["Rui", " typing…", " · muted"] && all.map(\.colour) == [roles.online, roles.online, roles.secondary])
+    #expect(all.map(\.cut) == [true, false, false], "the names cut short where there isn't room, never the words or muted")
+    let direct = StatusLine.chatParts(who: "", typing: "recording…", chat: nil, roles: roles)
+    #expect(direct.map(\.text) == ["recording…"] && direct.map(\.colour) == [roles.online] && direct.map(\.cut) == [false])
+    #expect(StatusLine.chatParts(who: "", typing: nil, chat: "muted", roles: roles).map(\.text) == ["muted"])
+    #expect(StatusLine.chatParts(who: "", typing: nil, chat: "not sent: no connection", roles: roles).map(\.cut) == [true],
+            "what was said, in their place, is cut short as before")
+    #expect(StatusLine.chatParts(who: "", typing: nil, chat: nil, roles: roles).isEmpty)
 }
 
 @Test func `the panes' place shows what jawd's situation calls for`() {

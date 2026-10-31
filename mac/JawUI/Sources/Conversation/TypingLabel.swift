@@ -117,35 +117,10 @@ final class TypingLabel: LiveStateView {
         shimmer.frame = bounds
     }
 
-    /// The characters a name cut short loses from its end before its "…".
-    static let trailing = CharacterSet(charactersIn: ", ")
-
-    /// `who` and a space, as they fit in `room` before the words, their dots and what follows them:
-    /// whole, or cut short with "…", or nothing when even "…" doesn't fit.
-    func fitted() -> String {
-        guard !who.isEmpty else { return "" }
-        let after = words + "..." + rest
-        guard width(who + " " + after) > room else { return who + " " }
-        // The longest start of the names that fits, found by halves, since a longer start is no narrower.
-        let characters = Array(who)
-        var lo = 1, hi = characters.count - 1, best = ""
-        while lo <= hi {
-            let n = (lo + hi) / 2
-            let cut = String(characters[..<n]).trimmingCharacters(in: Self.trailing) + "… "
-            if width(cut + after) <= room {
-                best = cut
-                lo = n + 1
-            } else {
-                hi = n - 1
-            }
-        }
-        return best
-    }
-
     /// Its size, the names that fit, the dots' places and their image follow the words, the room
     /// and the colour.
     func relayout() {
-        shownWho = fitted()
+        shownWho = TypingWords.fitted(who, before: words + "..." + rest, in: room, width: width)
         invalidateIntrinsicContentSize()
         let (image, w) = dotImage()
         for (i, d) in dotLayers.enumerated() {

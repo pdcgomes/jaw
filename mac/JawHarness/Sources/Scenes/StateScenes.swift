@@ -53,14 +53,17 @@ private struct StatesScene: View {
             }
             SpecimenGroup(
                 title: "The status line",
-                note: "jawd's state on the left, in the accent, or in the mention colour when it warns, and how the focused chat is beside it: who's typing in the online colour, \"Rui typing…\", then \"muted\", quieter.",
+                note: "jawd's state on the left, in the accent, or in the mention colour when it warns, and how the focused chat is beside it: who's typing in the online colour, \"Rui typing…\", then \"muted\", quieter. Short of room, as the last is, a busy group's names are cut short and \"typing… · muted\" stays whole.",
                 roles: roles,
             ) {
-                VStack(spacing: Space.m) {
-                    StatusLine(state: "catching up 1,204 of 5,000", warn: false, typing: "Rui typing…", chat: "muted", roles: roles)
+                VStack(alignment: .leading, spacing: Space.m) {
+                    StatusLine(state: "catching up 1,204 of 5,000", warn: false, who: "Rui", typing: "typing…", chat: "muted", roles: roles)
                         .frame(height: 30)
                     StatusLine(state: "phone offline: photos and older history wait for it", warn: true, chat: nil, roles: roles)
                         .frame(height: 30)
+                    StatusLine(state: nil, warn: false, who: Samples.busy.map(\.name).joined(separator: ", "), typing: "typing…",
+                               chat: "muted", roles: roles)
+                        .frame(width: 360, height: 30)
                 }
             }
         }

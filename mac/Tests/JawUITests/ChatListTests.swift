@@ -9,7 +9,7 @@ import Testing
 
 @MainActor @Test func `a row says who's typing in the online colour in place of its draft or newest message, with no ticks`() {
     let roles = Catalog.jaw.dark
-    let cell = ChatCell()
+    let cell = ChatCell(frame: NSRect(x: 0, y: 0, width: 300, height: 56))
     func line(_ chat: ChatRow, _ typists: [Typist]) -> NSAttributedString {
         cell.show(chat, typists: typists, roles: roles, open: false, inCommunity: false, avatar: nil)
         return cell.line(chat, roles)
@@ -28,6 +28,34 @@ import Testing
     #expect(cell.ticks(direct, roles) == nil, "no ticks while someone's typing")
     #expect(line(direct, []).string.hasSuffix("yes, the one at the lake") && cell.ticks(direct, roles)?.0 == 2,
             "your read message and its ticks back once nobody is")
+}
+
+@MainActor @Test func `a busy group's row cuts its names short at 300 points, and always says typing`() throws {
+    let roles = Catalog.jaw.dark
+    let list = ChatListController(folder: "all", roles: roles)
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 260), styleMask: [.borderless], backing: .buffered, defer: true)
+    w.contentView = list.view
+    var busy = Samples.busyGroup
+    busy.unread = 12
+    busy.mentions = 1
+    list.apply(Update(seq: 1, upsert: [busy, Samples.direct], total: 2))
+    list.typing = [busy.id: Samples.busy]
+    list.view.layoutSubtreeIfNeeded()
+    let row = try #require(list.all.firstIndex { $0.id == busy.id })
+    func drawn() throws -> (ChatCell, NSAttributedString, NSRect) {
+        let cell = try #require(list.table.view(atColumn: 0, row: row, makeIfNecessary: true) as? ChatCell)
+        return (cell, cell.line(busy, roles), cell.lineRect(busy, roles))
+    }
+    let (cell, said, room) = try drawn()
+    #expect(cell.bounds.width >= 280 && room.width < 200, "a 300-point row, its count and its @ beside the line")
+    #expect(said.string.hasPrefix("Ana Margarida") && said.string.hasSuffix("… typing…"), "\(said.string)")
+    #expect(said.size().width <= room.width, "\(said.size().width) in \(room.width) points, so nothing cuts its end")
+    #expect(said.attribute(.foregroundColor, at: said.length - 1, effectiveRange: nil) as? NSColor == roles.online.nsColor)
+    #expect(cell.accessibilityLabel() == "Família Gomes, 12 unread, mentions you, \(Samples.busy.map(\.name).joined(separator: ", ")) typing…",
+            "VoiceOver hears every name")
+    list.typing = [busy.id: Samples.busy.map { Typist(id: $0.id, name: $0.name, state: .recording) }]
+    let (_, recording, _) = try drawn()
+    #expect(recording.string.hasSuffix("… recording…") && recording.size().width <= room.width, "\(recording.string)")
 }
 
 @MainActor @Test func `a change of who's typing redraws only the rows whose typing it changes`() {

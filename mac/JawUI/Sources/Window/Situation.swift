@@ -69,13 +69,17 @@ public struct Situation: Equatable, Sendable {
         }
     }
 
-    /// The status line's word on the focused chat: who's typing there, which it draws in the online
-    /// colour, and the rest, quieter.
+    /// The status line's word on the focused chat: who's typing there, their names apart from what
+    /// they're doing, both of which it draws in the online colour, and the rest, quieter.
     public struct ChatLine: Equatable, Sendable {
+        /// Who's typing, in a group: their names, "Ana, Rui".
+        public var who: String
+        /// What they're doing: "typing…", or "recording…" while everyone is.
         public var typing: String?
         public var rest: String?
 
-        public init(typing: String? = nil, rest: String? = nil) {
+        public init(who: String = "", typing: String? = nil, rest: String? = nil) {
+            self.who = who
             self.typing = typing
             self.rest = rest
         }
@@ -86,7 +90,8 @@ public struct Situation: Equatable, Sendable {
     public func chatLine(focused chat: ChatRow?, typing: [Typist] = [], now: Date) -> ChatLine? {
         if let said, said.until > now { return ChatLine(rest: said.text) }
         guard let chat else { return nil }
-        let line = ChatLine(typing: TypingWords.line(typing, group: chat.kind.isGroup), rest: chat.muted ? "muted" : nil)
+        let line = ChatLine(who: TypingWords.who(typing, group: chat.kind.isGroup), typing: TypingWords.words(typing),
+                            rest: chat.muted ? "muted" : nil)
         return line == ChatLine() ? nil : line
     }
 
