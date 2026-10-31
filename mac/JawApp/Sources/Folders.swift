@@ -53,11 +53,22 @@ extension AppModel: SidebarHost {
     static let folderItemTag = 7301
 
     /// What the menu bar's folder items are made from: the focused chat, the folders it's in, the
-    /// list's folder, and your folders' places and names.
+    /// list's folder, and your folders' places and names and what's on each slot.
     var folderItemsKey: [String] {
         guard let chat = conversation?.chat, tree.served else { return [] }
-        return [chat.id, folder, chat.folders.joined(separator: ",")] + tree.yours.map { "\($0.depth) \($0.row.id) \($0.row.name)" }
+        return [chat.id, folder, chat.folders.joined(separator: ",")] + treeKey
+    }
+
+    /// The tree's part of that key, made again only once the tree's shape or slots have changed, as
+    /// every drain asks for it and a push of the folders' counts comes with every message.
+    var treeKey: [String] {
+        let changes = window?.sidebar.shapeChanges ?? 0
+        if let made = treeItemsKey, made.changes == changes { return made.key }
+        let tree = tree
+        let key = tree.yours.map { "\($0.depth) \($0.row.id) \($0.row.name)" }
             + (1 ... 9).map { "\($0) \(tree.favourite($0)?.target ?? "") \(tree.slotName($0) ?? "")" }
+        treeItemsKey = (changes, key)
+        return key
     }
 
     /// The menu bar's Chat menu ends with the focused chat's folder items, made again only when what

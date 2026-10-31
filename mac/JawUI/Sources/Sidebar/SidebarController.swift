@@ -24,6 +24,9 @@ public protocol SidebarHost: AnyObject {
 public final class SidebarController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate {
     public weak var host: SidebarHost?
     public internal(set) var tree = FolderTree()
+    /// How many times the tree's shape or slots have changed, which what the menus are made from
+    /// follows, so the app makes its folder items again only then and not with every push of counts.
+    public internal(set) var shapeChanges = 0
     /// The folder the chat list shows, selected whenever its row is in sight.
     public internal(set) var picked = "all"
     public var roles: Roles? {
@@ -127,8 +130,10 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         let before = tree
         tree.apply(update)
         if let n = naming, let gone = n.renaming ?? n.parent, tree.row(gone) == nil { naming = nil }
+        let reshaped = before.shape != tree.shape || before.served != tree.served
+        if reshaped || before.favourites != tree.favourites { shapeChanges += 1 }
         guard isViewLoaded else { return }
-        if before.shape != tree.shape || before.served != tree.served {
+        if reshaped {
             keepingNaming {
                 outline.reloadData()
                 restoreOpen()

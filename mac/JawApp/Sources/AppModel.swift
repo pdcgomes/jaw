@@ -30,6 +30,8 @@ final class AppModel {
     var foldersWindow: WindowID?
     /// The key the menu bar's folder items were last made from.
     var folderItemsMade: [String] = []
+    /// The tree's part of that key, and the sidebar's count of the tree's changes it was made at.
+    var treeItemsKey: (changes: Int, key: [String])?
     /// A chat a favourite or the roster opens once jawd finds its row.
     var opening: Opening?
     var rosterWindow: WindowID?

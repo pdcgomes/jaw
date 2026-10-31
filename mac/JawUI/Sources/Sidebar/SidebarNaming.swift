@@ -68,6 +68,7 @@ extension SidebarController: NSTextFieldDelegate {
         if let row {
             tree.apply(Update(upsert: [row]))
             roster.tree = tree
+            shapeChanges += 1
         }
         outline.reloadData()
         restoreOpen()

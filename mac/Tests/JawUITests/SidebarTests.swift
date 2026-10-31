@@ -155,6 +155,26 @@ func sidebar(_ host: SideHost? = nil) -> SidebarController {
 }
 
 @MainActor
+@Test func `the tree's shape changes are counted as its folders come, go, move, are renamed and fill or empty slots, and not as their counts change`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    let served = s.shapeChanges
+    #expect(served >= 1, "jawd's tree came")
+    s.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:2", v: 50, parent: "folder:1", name: "Cousins", position: 0, unread: 4)]))
+    #expect(s.shapeChanges == served, "Cousins' counts alone, as with every message")
+    s.apply(Update(seq: 302, upsert: [FolderRow(id: "folder:2", v: 51, parent: "folder:1", name: "Primos", position: 0, unread: 4)]))
+    #expect(s.shapeChanges == served + 1, "renamed")
+    s.apply(Update(seq: 303, upsert: [FolderRow(id: "folder:2", v: 52, name: "Primos", position: 4, unread: 4)]))
+    #expect(s.shapeChanges == served + 2, "moved to the top")
+    s.apply(Update(seq: 304, favourites: [Favourite(slot: 1, folder: "folder:1")]))
+    #expect(s.shapeChanges == served + 3, "two slots emptied")
+    s.apply(Update(seq: 305, remove: ["folder:6"]))
+    #expect(s.shapeChanges == served + 4, "Clients deleted")
+    s.named(FolderRow(id: "folder:7", v: 70, name: "Parents", position: 5))
+    #expect(s.shapeChanges == served + 5, "a folder made in place, before jawd's push brings it")
+}
+
+@MainActor
 @Test func `the digits, @s and counts end at the row's right, however long the name and however deep the folder`() {
     let s = sidebar()
     let window = NSWindow(contentViewController: s)
