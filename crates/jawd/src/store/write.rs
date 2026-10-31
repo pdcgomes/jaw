@@ -788,7 +788,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
             let key = serde_json::to_string(index)?;
             db.prepare_cached("INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)")?
                 .execute(params![key, value])?;
-            if chat_actions::held_back(db, &key, *seq, *at)? {
+            if chat_actions::held_back(db, index, *seq, *at)? {
                 return Ok(false);
             }
             let mut changed = false;
@@ -1572,11 +1572,18 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
 const SAID: &str = "SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1)
     OR EXISTS (SELECT 1 FROM app_state_awaiting WHERE key = ?1)";
 
-/// History's `chat` less each setting app state has said anything of for it, under any of `jids` or
-/// the JID jaw keeps the chat by, which jaw's own patches name.
+/// The JIDs of the person whose one-to-one chat is chat `?1`.
+const THEIR_JIDS: &str =
+    "SELECT j.jid FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.id = ?1 AND c.kind = 'direct'";
+
+/// History's `chat` less each setting app state has said anything of for it, under any of `jids`,
+/// the JID jaw keeps the chat by, which jaw's own patches name, or, for a one-to-one chat, any other
+/// JID of its person, by which app state may name it too.
 fn unsaid(db: &Connection, chat: &Chat, jids: &[String]) -> Result<Chat> {
     let kept = chat_jid(db, &chat.id)?;
-    let mut named: Vec<&str> = jids.iter().map(String::as_str).chain([kept.as_str()]).collect();
+    let theirs: Vec<String> =
+        db.prepare_cached(THEIR_JIDS)?.query_map([&kept], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut named: Vec<&str> = jids.iter().chain(&theirs).map(String::as_str).chain([kept.as_str()]).collect();
     named.sort_unstable();
     named.dedup();
     let said = |index: &str| -> Result<bool> {
@@ -1743,12 +1750,13 @@ fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Resu
 }
 
 /// Starts merging chat `gone` into `keep`, each a chat's n and JID. What's small moves now (its
-/// tombstones, what waits for its messages, its folder places, its settings and where it was
-/// read), and writes for it go to `keep` from here on, as do the merges going into it; its
-/// messages follow a few at a time, and what's waiting to be sent follows its message. What it
-/// kept for a message `keep` already has is done to that message now, as it would be to one of
-/// its own as it moves: a deletion for you, and what waited for it. Only a person's one-to-one
-/// chats merge, so sending's group tables (recipients, settled, regroup) never take part.
+/// tombstones, what waits for its messages, its folder places, its settings, the waits for jaw's
+/// changes to them still on their way, and where it was read), and writes for it go to `keep` from
+/// here on, as do the merges going into it; its messages follow a few at a time, and what's waiting
+/// to be sent follows its message. What it kept for a message `keep` already has is done to that
+/// message now, as it would be to one of its own as it moves: a deletion for you, and what waited
+/// for it. Only a person's one-to-one chats merge, so sending's group tables (recipients, settled,
+/// regroup) never take part.
 fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
     let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
     let groups: i64 = db
@@ -1760,6 +1768,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
     db.prepare_cached("INSERT OR IGNORE INTO sync_state (key, value) VALUES (?1, '')")?
         .execute([merge_started(*gone)])?;
+    chat_actions::merging(db, gone_id, keep_id)?;
     repoint(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     carry(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;

@@ -2501,6 +2501,13 @@ DELETE FROM app_state_awaiting WHERE key = ?1
 DELETE FROM app_state_awaiting WHERE echo_by IS NOT NULL AND echo_by <= ?1
     SEARCH app_state_awaiting USING INDEX app_state_awaiting_by_echo (echo_by>? AND echo_by<?)
 
+-- src/store/write/chat_actions.rs
+SELECT key, at, outbox, echo_by FROM app_state_awaiting WHERE key >= ?1 AND key < ?2
+    SEARCH app_state_awaiting USING PRIMARY KEY (key>? AND key<?)
+
+-- src/store/write/chat_actions.rs
+INSERT INTO app_state_awaiting (key, at, outbox, echo_by) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = excluded.echo_by WHERE excluded.at > app_state_awaiting.at
+
 -- src/store/write/contacts.rs
 SELECT n, kind = 'contact' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
@@ -4019,6 +4026,11 @@ SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1) OR EXISTS (SELECT 1 FROM 
       SEARCH app_state USING PRIMARY KEY (key=?)
     SCALAR SUBQUERY 2
       SEARCH app_state_awaiting USING PRIMARY KEY (key=?)
+
+-- src/store/write.rs
+SELECT j.jid FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.id = ?1 AND c.kind = 'direct'
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH j USING INDEX person_jids_by_person (person=?)
 
 -- src/store/write.rs
 SELECT person FROM person_jids WHERE n = ?1
