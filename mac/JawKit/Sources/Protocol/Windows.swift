@@ -81,12 +81,33 @@ extension KeyedDecodingContainer {
         return lossy.rows
     }
 
-    /// An answer's `typing`, each typist read on its own: one that isn't jaw's protocol is left out,
-    /// a chat left with nobody has nobody typing, and a `typing` that isn't a map at all is none, so
-    /// the window still reads.
+    /// An answer's `typing`, each chat's typists and each typist read on its own: a typist that isn't
+    /// jaw's protocol, or a chat whose typists aren't a list, leaves out only itself, a chat left with
+    /// nobody has nobody typing, and a `typing` that isn't a map at all is none, so the window still
+    /// reads.
     func typists(_ key: Key) -> Typists {
-        guard let map = try? decodeIfPresent([String: Lossy<Typist>].self, forKey: key) else { return [:] }
-        return map.compactMapValues { $0.rows.isEmpty ? nil : $0.rows }
+        guard let map = try? nestedContainer(keyedBy: MapKey.self, forKey: key) else { return [:] }
+        var typing: Typists = [:]
+        for chat in map.allKeys {
+            if let who = try? map.decode(Lossy<Typist>.self, forKey: chat), !who.rows.isEmpty { typing[chat.stringValue] = who.rows }
+        }
+        return typing
+    }
+}
+
+/// A key of a map keyed by what it holds, as an answer's `typing` is by chat.
+struct MapKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? {
+        nil
+    }
+
+    init(stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(intValue _: Int) {
+        nil
     }
 }
 

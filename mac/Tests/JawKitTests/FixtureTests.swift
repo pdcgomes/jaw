@@ -151,6 +151,9 @@ func pushed(_ line: String) -> Incoming {
     let some = try answer(typing: #"{"a@s.whatsapp.net":[{"id":"person:2","name":"Zé","state":"typing"},{"state":"typing"}],"b@g.us":[{"oops":1}]}"#)
     #expect(some.rows.count == 2)
     #expect(some.typing == ["a@s.whatsapp.net": [Typist(id: "person:2", name: "Zé")]], "Zé typing; a chat left with nobody has nobody typing")
+    let one = try answer(typing: #"{"a@s.whatsapp.net":[{"id":"person:2","name":"Zé","state":"typing"}],"b@g.us":{"id":"person:3"},"c@g.us":"Rui","d@g.us":null}"#)
+    #expect(one.rows.count == 2 && one.typing == ["a@s.whatsapp.net": [Typist(id: "person:2", name: "Zé")]],
+            "a chat whose typists aren't a list leaves out only itself")
     let broken = try answer(typing: #""everyone""#)
     #expect(broken.rows.count == 2 && broken.typing.isEmpty, "a typing that isn't a map is nobody typing, and the rows still read")
 }
