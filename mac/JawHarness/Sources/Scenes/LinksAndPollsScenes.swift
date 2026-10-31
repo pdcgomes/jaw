@@ -78,7 +78,7 @@ private struct PollsScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Polls in Lisbon Climbing",
-            note: "Each poll's question, on three lines at most, then what a vote may choose (Choose one, Choose any, Choose up to 2), its options each with a tick, a circle for one choice and a square for several, filled in the accent where you chose, the count on the right and a bar for the option's share of those who voted, and how many voted at the foot: Inês's with your Saturday, Rui's of any with Quickdraws' bar full, Ana's with no votes yet and no bars, yours still on its way with its clock, and Rui's of up to two with its long question wrapped and its long options cut with an ellipsis.",
+            note: "Each poll's question, on three lines at most, then what a vote may choose (Choose one, Choose any, Choose up to 2), its options each with a tick, a circle for one choice and a square for several, solid in the accent with its tick in white, or in the ground's colour when dark, where you chose, the count on the right and a bar for the option's share of those who voted, and how many voted at the foot: Inês's with your Saturday, Rui's of any with Quickdraws' bar full, Ana's with no votes yet and no bars, yours still on its way with its clock, and Rui's of up to two with its long question wrapped and its long options cut with an ellipsis.",
             roles: conditions.roles,
         ) {
             ControllerSpecimen {

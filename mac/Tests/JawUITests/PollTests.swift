@@ -131,6 +131,46 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     }
 }
 
+/// Each option's tick, by the option's name: the symbol drawn left of its name.
+func ticks(_ l: Laid) -> [String: CGImage] {
+    var out: [String: CGImage] = [:]
+    for case let (rect, .vote(name)) in l.regions {
+        for case let .image(image, r) in l.parts where r.midX < rect.minX + 16 && r.midY > rect.minY && r.midY < rect.maxY {
+            out[name] = image
+        }
+    }
+    return out
+}
+
+/// How much of a picture is solid `colour`, give or take what anti-aliasing moves.
+func share(of colour: RGBA, in image: CGImage) -> Double {
+    let p = pixels(image)
+    let want = [colour.r, colour.g, colour.b].map { Int(($0 * 255).rounded()) }
+    var n = 0
+    for i in stride(from: 0, to: p.count, by: 4) where p[i + 3] >= 250 {
+        if abs(Int(p[i]) - want[0]) <= 24, abs(Int(p[i + 1]) - want[1]) <= 24, abs(Int(p[i + 2]) - want[2]) <= 24 { n += 1 }
+    }
+    return Double(n) / Double(p.count / 4)
+}
+
+@Test func `your choice is a tick on a solid disc or square of the accent, and an option you didn't choose an outline`() throws {
+    for look in Look.allCases {
+        for dark in [true, false] {
+            let s = spec(look, dark: dark)
+            let roles = s.style.roles
+            let onAccent = roles.isDark ? roles.ground : RGBA(0xFFFFFF)
+            for (id, yours, other) in [("P1", "Saturday", "Sunday"), ("P5", "Cabo da Roca, on the slabs above the lighthouse", "Peninha, if the wind has dropped")] {
+                let drawn = ticks(laid(samplePoll(id), s))
+                let mine = try #require(drawn[yours]), theirs = try #require(drawn[other])
+                let what = "\(id) in \(look), \(dark ? "dark" : "light")"
+                #expect(share(of: roles.accent, in: mine) > 0.3, "\(what): the accent solid, \(share(of: roles.accent, in: mine))")
+                #expect(share(of: onAccent, in: mine) > 0.01, "\(what): the tick in the ground's colour or white, \(share(of: onAccent, in: mine))")
+                #expect(share(of: roles.accent, in: theirs) == 0, "\(what): an outline, not the accent")
+            }
+        }
+    }
+}
+
 @MainActor @Test func `a click on an option asks to vote, a double click's second asks nothing, and one past the most says why`() async throws {
     let host = PaneHost()
     let (c, window) = await shown(Samples.polls, host)

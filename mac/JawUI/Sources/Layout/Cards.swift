@@ -9,11 +9,15 @@ import Synchronization
 enum Symbols {
     static let made = Mutex<[String: CGImage]>([:])
 
-    /// A symbol at a point size in a colour, at twice its size for the screen, and its size in points.
-    static func image(_ name: String, _ size: CGFloat, _ colour: RGBA) -> (CGImage, CGSize)? {
-        let key = "\(name) \(size) \(colour.hex) \(colour.a)"
+    /// A symbol at a point size in a colour, at twice its size for the screen, and its size in points:
+    /// its other layers in lighter shades of the colour, or, `on` a colour, solid in that one, as a
+    /// tick in `colour` on a disc filled with `on`.
+    static func image(_ name: String, _ size: CGFloat, _ colour: RGBA, on fill: RGBA? = nil) -> (CGImage, CGSize)? {
+        let key = "\(name) \(size) \(colour.hex) \(colour.a)" + (fill.map { " on \($0.hex) \($0.a)" } ?? "")
+        let colours = fill.map { NSImage.SymbolConfiguration(paletteColors: [colour.nsColor, $0.nsColor]) }
+            ?? NSImage.SymbolConfiguration(hierarchicalColor: colour.nsColor)
         guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .medium).applying(.init(hierarchicalColor: colour.nsColor)))
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .medium).applying(colours))
         else { return nil }
         let points = symbol.size
         if let image = made.withLock({ $0[key] }) { return (image, points) }
@@ -231,8 +235,8 @@ extension MessageLayout.Builder {
         roles.text.opacity(roles.isDark ? 0.07 : 0.06)
     }
 
-    mutating func symbol(_ name: String, _ size: CGFloat, _ colour: RGBA, centredIn r: CGRect) {
-        guard let (image, s) = Symbols.image(name, size, colour) else { return }
+    mutating func symbol(_ name: String, _ size: CGFloat, _ colour: RGBA, on fill: RGBA? = nil, centredIn r: CGRect) {
+        guard let (image, s) = Symbols.image(name, size, colour, on: fill) else { return }
         parts.append(.image(image, CGRect(x: (r.midX - s.width / 2).rounded(), y: (r.midY - s.height / 2).rounded(), width: s.width, height: s.height)))
     }
 
@@ -357,8 +361,12 @@ extension MessageLayout.Builder {
         for option in poll.options {
             regions.append((CGRect(x: r.minX, y: top - 4, width: r.width, height: optionHeight), .vote(option.name)))
             let tick = CGRect(x: r.minX, y: top, width: 16, height: lineHeight(fonts.body))
-            let mark = several ? (option.mine ? "checkmark.square.fill" : "square") : (option.mine ? "checkmark.circle.fill" : "circle")
-            symbol(mark, 14, option.mine ? roles.accent : roles.tertiary, centredIn: tick)
+            if option.mine {
+                let onAccent = roles.isDark ? roles.ground : RGBA(0xFFFFFF)
+                symbol(several ? "checkmark.square.fill" : "checkmark.circle.fill", 14, onAccent, on: roles.accent, centredIn: tick)
+            } else {
+                symbol(several ? "square" : "circle", 14, roles.tertiary, centredIn: tick)
+            }
             let count = line(Format.num(option.votes), fonts.time, roles.secondary)
             let cw = width(of: count)
             text(option.name, fonts.body, roles.text, x: x, top: top, most: r.maxX - x - cw - 8)
