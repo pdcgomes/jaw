@@ -5,7 +5,7 @@
 //! already watches, and draws from `&self`, so it never asks jawd for anything.
 
 use super::View;
-use crate::data::{Chat, ChatKind, PresenceState};
+use crate::data::{Chat, ChatKind};
 use crate::fmt;
 use jaw_proto::ConnectionState;
 use ratatui::buffer::Buffer;
@@ -67,20 +67,8 @@ impl View {
         let mut said: Vec<Span<'static>> = vec![];
         if let Some(who) = self.who_types(chat) {
             said.push(Span::styled(who, Style::new().fg(t.online)));
-        } else if let Some(p) = self.roster.iter().find(|p| p.chat.as_deref() == Some(chat.id.as_str())) {
-            match p.presence.state {
-                PresenceState::Online | PresenceState::Typing => {
-                    said.push(Span::styled("online", Style::new().fg(t.online)));
-                }
-                PresenceState::Recording => said.push(Span::styled("recording…", Style::new().fg(t.online))),
-                PresenceState::Seen => {
-                    if let Some(at) = p.presence.at {
-                        let seen = format!("seen {}", fmt::ago(at, self.now(), self.tz));
-                        said.push(Span::styled(seen, Style::new().fg(t.comment)));
-                    }
-                }
-                PresenceState::Hidden => {}
-            }
+        } else if let Some((presence, style)) = self.presence_said(&chat.id) {
+            said.push(Span::styled(presence, style));
         }
         if chat.muted(self.now()) {
             said.push(Span::styled("muted", Style::new().fg(t.comment)));

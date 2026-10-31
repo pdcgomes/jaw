@@ -1019,6 +1019,9 @@ pub enum Update {
     /// Who's typing in each chat the windows show, all of it as it is now: a chat left out has
     /// nobody typing.
     Typing(Typists),
+    /// The presence of the person of each one-to-one chat a conversation shows, all of it as it is
+    /// now, by chat: a chat left out has none said.
+    Presence(std::collections::BTreeMap<String, Presence>),
     /// The newest messages of `chat`, another than the open one, for the quick look while it's
     /// open; updates for a chat it doesn't show are from a quick look since closed.
     QuickLook {

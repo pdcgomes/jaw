@@ -8,7 +8,8 @@
 //! drafts and read positions jawd hadn't answered for.
 
 use crate::data::{
-    Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, OtherJawd, Place, Typing, Update,
+    Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, OtherJawd, Place, Presence, PresenceState,
+    Typing, Update,
 };
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
@@ -224,6 +225,16 @@ fn tail(log: &Path) -> String {
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let last = text.lines().rev().map(str::trim).find(|l| !l.is_empty());
     last.map(|l| format!(": {}", l.strip_prefix("jawd: ").unwrap_or(l))).unwrap_or_default()
+}
+
+/// A conversation's person's presence as the interface draws it.
+fn presence_of(said: jaw_proto::windows::PersonPresence) -> Presence {
+    let state = match said.presence.state.as_str() {
+        "online" => PresenceState::Online,
+        "seen" => PresenceState::Seen,
+        _ => PresenceState::Hidden,
+    };
+    Presence { state, at: said.presence.at, known: said.presence.known }
 }
 
 fn kind(k: FoundKind) -> Kind {
@@ -682,13 +693,22 @@ impl Jawd for Wire {
         self.ask("folders.watch", json!({}), Asked::Folders);
     }
 
+    /// Watches `folder`'s roster in place of the one before, which jaw-client unwatches, and which
+    /// shows its people's chats for typing as the client keeps it.
     fn watch_roster(&mut self, folder: &str) {
-        if let Some((_, Some(w))) = self.roster.take() {
-            self.ask("unwatch", json!({ "watch": w }), Asked::Quiet);
-        }
         self.roster = Some((folder.to_string(), None));
         let params = json!({ "folder": folder, "around": "top", "before": 0, "after": 200, "offline": true });
-        self.ask("roster.watch", params, Asked::Roster(folder.to_string()));
+        let asked = Asked::Roster(folder.to_string());
+        match self.client.watch_roster(params) {
+            Ok(id) => {
+                self.asked.insert(id, asked);
+            }
+            Err(failure) => {
+                if let Some(u) = self.refused(asked, &failure) {
+                    self.say(u);
+                }
+            }
+        }
     }
 
     fn folder_create(&mut self, name: &str, parent: Option<&str>) {
@@ -967,6 +987,9 @@ impl Jawd for Wire {
         // After the windows, which may bring in the chats it's for.
         if let Some(typing) = frame.typing {
             out.push(Update::Typing(typing));
+        }
+        if let Some(presence) = frame.presence {
+            out.push(Update::Presence(presence.into_iter().map(|(chat, said)| (chat, presence_of(said))).collect()));
         }
         out
     }

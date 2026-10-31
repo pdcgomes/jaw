@@ -577,6 +577,8 @@ impl View {
         let mut more = vec![];
         if let Some(who) = self.who_types(chat) {
             more.push(Span::styled(format!("· {who} "), Style::new().fg(t.online)));
+        } else if let Some((said, style)) = self.presence_said(&chat.id) {
+            more.push(Span::styled(format!("· {said} "), style));
         }
         self.title(&chat.name, more)
     }

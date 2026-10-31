@@ -12,7 +12,11 @@
 //!
 //! Who's typing is kept as the protocol says: a watch's or move's answer replaces it for every
 //! chat of its window, a `typing` push for its chat, and it's forgotten as a chat leaves every
-//! window and when the connection drops. A frame carries all of it when it changed.
+//! window and when the connection drops. The roster the caller watches through `watch_roster`
+//! shows its people's one-to-one chats for it, which the client reads from its answer and pushes
+//! as they come. A one-to-one chat's person's presence is kept for the conversations that show it,
+//! from their answers and `presence` pushes, and forgotten as they're unwatched. A frame carries
+//! all of either when it changed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -26,8 +30,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Select, Sender, TrySendError};
 use jaw_proto::find::{Find, Found};
 use jaw_proto::windows::{
-    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, TypingPush,
-    Typist, Typists, Watch, WatchMove,
+    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched,
+    PersonPresence, PresencePush, TypingPush, Typist, Typists, Watch, WatchMove,
 };
 use jaw_proto::{Connection, Hello, LinkStep, PROTOCOL, Push, Request, Welcome, code};
 use serde::Deserialize;
@@ -158,6 +162,9 @@ pub struct Frame<C, M> {
     pub messages: Vec<(WindowId, Update<M>)>,
     /// Who's typing in the chats the windows show, all of it as it is now, when it changed.
     pub typing: Option<Typists>,
+    /// The presence of the person of each one-to-one chat a conversation shows, all of it as it is
+    /// now, by chat, when it changed.
+    pub presence: Option<BTreeMap<String, PersonPresence>>,
     /// When the lines this frame carries were read, up to a thousand or so, for measuring how long
     /// they waited.
     pub read: Vec<Instant>,
@@ -165,7 +172,11 @@ pub struct Frame<C, M> {
 
 impl<C, M> Frame<C, M> {
     pub fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.chats.is_empty() && self.messages.is_empty() && self.typing.is_none()
+        self.events.is_empty()
+            && self.chats.is_empty()
+            && self.messages.is_empty()
+            && self.typing.is_none()
+            && self.presence.is_none()
     }
 }
 
@@ -246,6 +257,12 @@ struct State<C, M> {
     /// last drain.
     typing: Typists,
     typing_changed: bool,
+    /// The presence of each one-to-one chat's person a conversation shows, by chat, and whether it
+    /// changed since the last drain.
+    presence: BTreeMap<String, PersonPresence>,
+    presence_changed: bool,
+    /// The roster the caller watches, which shows its people's one-to-one chats for typing.
+    roster: Option<Roster>,
     read: Vec<Instant>,
     /// Whether the caller has been woken, or will be, for what's in the inbox.
     signalled: bool,
@@ -263,6 +280,16 @@ enum Asked {
     Find(String),
     Window(Landing),
     Unwatch,
+    /// A roster's watch, answered to the caller as a request is.
+    Roster,
+}
+
+/// The roster the caller watches: the request that watched it, jawd's id for it once answered, and
+/// the one-to-one chat of each person it shows, by their `person:` id.
+struct Roster {
+    asked: u64,
+    watch: Option<String>,
+    chats: HashMap<String, String>,
 }
 
 /// A watch or a move in flight.
@@ -362,13 +389,14 @@ fn messages_push<R>(push: MessagesPush<R>) -> (String, Update<R>) {
     (push.watch, update)
 }
 
-/// A watch's or move's answer: jawd's watch id, the update, `newer` then, and who's typing in the
-/// window's chats.
+/// A watch's or move's answer: jawd's watch id, the update, `newer` then, who's typing in the
+/// window's chats, and a conversation's person's presence.
 struct Landed<R> {
     watch: String,
     update: Update<R>,
     newer: u64,
     typing: Typists,
+    presence: Option<PersonPresence>,
 }
 
 fn chats_watched<R>(watched: ChatsWatched<R>) -> Landed<R> {
@@ -379,7 +407,7 @@ fn chats_watched<R>(watched: ChatsWatched<R>) -> Landed<R> {
         total: Some(watched.total),
         ..Update::default()
     };
-    Landed { watch: watched.watch, update, newer: 0, typing: watched.typing }
+    Landed { watch: watched.watch, update, newer: 0, typing: watched.typing, presence: None }
 }
 
 fn messages_watched<R>(watched: MessagesWatched<R>) -> Landed<R> {
@@ -392,7 +420,7 @@ fn messages_watched<R>(watched: MessagesWatched<R>) -> Landed<R> {
         newer: Some(watched.newer),
         moved: None,
     };
-    Landed { watch: watched.watch, update, newer: watched.newer, typing: watched.typing }
+    Landed { watch: watched.watch, update, newer: watched.newer, typing: watched.typing, presence: watched.presence }
 }
 
 impl<C, M> State<C, M> {
@@ -433,9 +461,59 @@ impl<C, M> State<C, M> {
         }
     }
 
-    /// Whether a window it keeps shows `chat`.
+    /// Whether a window it keeps shows `chat`, or its roster as one of its people's own.
     fn shows(&self, chat: &str) -> bool {
         self.windows.values().any(|w| !w.closing && w.shows(chat))
+            || self.roster.as_ref().is_some_and(|roster| roster.chats.values().any(|shown| shown == chat))
+    }
+
+    /// Whether a conversation it keeps shows `chat`.
+    fn converses(&self, chat: &str) -> bool {
+        self.windows.values().any(|w| !w.closing && w.kind == Kind::Messages && w.of == chat)
+    }
+
+    fn set_presence(&mut self, chat: String, presence: Option<PersonPresence>) {
+        match presence {
+            Some(presence) if self.presence.get(&chat) != Some(&presence) => {
+                self.presence.insert(chat, presence);
+                self.presence_changed = true;
+            }
+            Some(_) => {}
+            None => self.presence_changed |= self.presence.remove(&chat).is_some(),
+        }
+    }
+
+    /// Takes the roster's answer: jawd's id for it, the chats its people have, and who's typing in
+    /// each of them.
+    fn rostered(&mut self, answer: &Value) {
+        let Some(roster) = self.roster.as_mut() else { return };
+        roster.watch = answer["watch"].as_str().map(str::to_string);
+        roster.chats = answer["rows"].as_array().into_iter().flatten().filter_map(person_chat).collect();
+        let chats: Vec<String> = roster.chats.values().cloned().collect();
+        let mut answered: Typists = serde_json::from_value(answer["typing"].clone()).unwrap_or_default();
+        for chat in chats {
+            let who = answered.remove(&chat).unwrap_or_default();
+            self.set_typing(chat, who);
+        }
+        self.unshown();
+    }
+
+    /// Takes a roster push's people who came, changed and left, for the chats it shows.
+    fn roster_moved(&mut self, push: &Value) {
+        let Some(roster) = self.roster.as_mut().filter(|roster| roster.watch.as_deref() == push["watch"].as_str())
+        else {
+            return;
+        };
+        for row in push["upsert"].as_array().into_iter().flatten() {
+            if let Some(id) = row["id"].as_str() {
+                roster.chats.remove(id);
+            }
+            roster.chats.extend(person_chat(row));
+        }
+        for id in push["remove"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            roster.chats.remove(id);
+        }
+        self.unshown();
     }
 
     fn set_typing(&mut self, chat: String, who: Vec<Typist>) {
@@ -447,19 +525,33 @@ impl<C, M> State<C, M> {
         }
     }
 
-    /// Forgets the typing of the chats no window shows.
+    /// Forgets the typing of the chats no window shows, and the presence of those no conversation
+    /// shows.
     fn unshown(&mut self) {
         let gone: Vec<String> = self.typing.keys().filter(|chat| !self.shows(chat)).cloned().collect();
         for chat in gone {
             self.typing.remove(&chat);
             self.typing_changed = true;
         }
+        let gone: Vec<String> = self.presence.keys().filter(|chat| !self.converses(chat)).cloned().collect();
+        for chat in gone {
+            self.presence.remove(&chat);
+            self.presence_changed = true;
+        }
     }
 
-    fn forget_typing(&mut self) {
+    /// Forgets who's typing and everyone's presence, as when the connection drops.
+    fn forget_shown(&mut self) {
         self.typing_changed |= !self.typing.is_empty();
         self.typing.clear();
+        self.presence_changed |= !self.presence.is_empty();
+        self.presence.clear();
     }
+}
+
+/// A roster row's person and their one-to-one chat, if they have one.
+fn person_chat(row: &Value) -> Option<(String, String)> {
+    Some((row["id"].as_str()?.to_string(), row["chat"].as_str()?.to_string()))
 }
 
 /// The default anchor of a window's list, keeping as many rows, for a window whose anchor has gone.
@@ -497,6 +589,9 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
             messages: HashMap::new(),
             typing: Typists::new(),
             typing_changed: false,
+            presence: BTreeMap::new(),
+            presence_changed: false,
+            roster: None,
             read: Vec::new(),
             signalled: false,
             woken: false,
@@ -574,6 +669,20 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         self.shared.request(method, params, Asked::Request)
     }
 
+    /// Watches a folder's roster with `params`, as `roster.watch` takes them, in place of the one
+    /// watched before, which is unwatched. Its answer comes as `Event::Reply` with the id this
+    /// returns and its pushes as `Event::Push`, as a request's do; the client keeps who's typing in
+    /// the one-to-one chats of the people it shows, as for its windows' chats.
+    pub fn watch_roster(&self, params: Value) -> Result<u64, Failure> {
+        let mut state = self.shared.lock();
+        if let Some(watch) = state.roster.take().and_then(|roster| roster.watch) {
+            self.shared.unwatch_line(&mut state, watch);
+        }
+        state.unshown();
+        drop(state);
+        self.shared.request("roster.watch", params, Asked::Roster)
+    }
+
     /// Sends a find for the palette, at each keystroke: only the latest one's answer comes, as
     /// `Event::Found`.
     pub fn find(&self, find: Find) -> Result<u64, Failure> {
@@ -589,21 +698,28 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
 
     /// Takes everything that came since the last drain.
     pub fn drain(&self) -> Frame<C, M> {
-        let (events, chats, messages, read, typing) = {
+        let (events, chats, messages, read, typing, presence) = {
             let mut state = self.shared.lock();
             state.signalled = false;
             state.woken = false;
             state.wake_at = None;
             state.drained = Instant::now();
             let typing = std::mem::take(&mut state.typing_changed).then(|| state.typing.clone());
+            let presence = std::mem::take(&mut state.presence_changed).then(|| state.presence.clone());
             let taken = (
                 std::mem::take(&mut state.events),
                 std::mem::take(&mut state.chats),
                 std::mem::take(&mut state.messages),
                 std::mem::take(&mut state.read),
                 typing,
+                presence,
             );
-            if !taken.0.is_empty() || !taken.1.is_empty() || !taken.2.is_empty() || taken.4.is_some() {
+            if !taken.0.is_empty()
+                || !taken.1.is_empty()
+                || !taken.2.is_empty()
+                || taken.4.is_some()
+                || taken.5.is_some()
+            {
                 state.stats.frames += 1;
             }
             self.shared.changed.notify_all();
@@ -614,6 +730,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
             chats: chats.into_iter().map(|(window, merged)| (window, merged.into_update())).collect(),
             messages: messages.into_iter().map(|(window, merged)| (window, merged.into_update())).collect(),
             typing,
+            presence,
             read,
         }
     }
@@ -769,8 +886,10 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         let id = state.id();
         match self.requests.try_send(Line { id, bytes: encode(id, method, params) }) {
             Ok(()) => {
-                if let Asked::Find(_) = asked {
-                    state.find = Some(id);
+                match asked {
+                    Asked::Find(_) => state.find = Some(id),
+                    Asked::Roster => state.roster = Some(Roster { asked: id, watch: None, chats: HashMap::new() }),
+                    _ => {}
                 }
                 state.asked.insert(id, asked);
                 Ok(id)
@@ -932,7 +1051,8 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
         state.find = None;
         state.watches.clear();
-        state.forget_typing();
+        state.roster = None;
+        state.forget_shown();
         state.windows.retain(|_, w| !w.closing);
         for w in state.windows.values_mut() {
             w.watch = None;
@@ -994,6 +1114,22 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 self.notify(state, now);
                 true
             }
+            (None, Some("presence")) => {
+                let Ok(PresencePush { chat, presence }) = read(envelope.params, "a presence push") else {
+                    return self.skip(generation);
+                };
+                let mut state = self.lock();
+                if !state.current(generation) {
+                    return false;
+                }
+                state.note_read(at);
+                if state.converses(&chat) {
+                    state.set_presence(chat, Some(presence));
+                }
+                let now = state.presence_changed && state.signal(self.config.frame, SETTLE);
+                self.notify(state, now);
+                true
+            }
             (None, Some("resync")) => {
                 let Ok(Watch { watch }) = read(envelope.params, "a resync") else { return self.skip(generation) };
                 let mut state = self.lock();
@@ -1036,6 +1172,11 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                     return false;
                 }
                 state.note_read(at);
+                if let Event::Push(push) = &event
+                    && push.method == "roster"
+                {
+                    state.roster_moved(&push.params);
+                }
                 self.push_event(state, generation, event);
                 true
             }
@@ -1169,6 +1310,20 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 true
             }
             Asked::Unwatch => true,
+            Asked::Roster => {
+                let outcome = outcome.and_then(|raw| read::<Value>(raw, "a roster"));
+                let mut state = self.lock();
+                if !state.current(generation) {
+                    return false;
+                }
+                if let Ok(answer) = &outcome
+                    && state.roster.as_ref().is_some_and(|roster| roster.asked == id)
+                {
+                    state.rostered(answer);
+                }
+                self.push_event(state, generation, Event::Reply { id, outcome });
+                true
+            }
             Asked::Window(landing) => {
                 let kind = self.lock().windows.get(&landing.window).map(|w| w.kind);
                 match kind {
@@ -1206,7 +1361,8 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         let Some(w) = state.windows.get_mut(&window).filter(|w| w.asking == Some(id)) else { return true };
         w.asking = None;
         match landed {
-            Ok(Landed { watch, mut update, newer, typing }) => {
+            Ok(Landed { watch, mut update, newer, typing, presence }) => {
+                let conversation = (w.kind == Kind::Messages).then(|| w.of.clone());
                 if w.closing {
                     state.windows.remove(&window);
                     state.unshown();
@@ -1222,6 +1378,9 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 state.watches.insert(watch, window);
                 if follow {
                     self.ask(&mut state, window, false);
+                }
+                if let Some(chat) = conversation {
+                    state.set_presence(chat, presence);
                 }
                 self.merge(state, window, update, !follow, Some(typing), merges);
             }

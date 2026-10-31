@@ -838,8 +838,10 @@ fn when_jawd_goes_the_screen_keeps_what_it_had_and_comes_back_without_a_jump() {
     let gone = until(&mut v, &rx, "can't reach jawd");
     assert!(gone.lines().next().unwrap().contains("can't reach jawd · trying again in"), "{gone}");
     // Who's typing goes with the connection, as the protocol has it: a chat-list row marks it with
-    // a dot and says it under its name.
-    let typed = |line: &str| line.contains("typing…") || line.contains("recording…") || line.contains('●');
+    // a dot and says it under its name. So does the conversation's person's presence, in its title.
+    let typed = |line: &str| {
+        line.contains("typing…") || line.contains("recording…") || line.contains('●') || line.contains("· online")
+    };
     assert!(before.lines().any(typed) && !gone.lines().any(typed), "{before}\n{gone}");
     let kept = |screen: &str, other: &str| -> Vec<String> {
         screen

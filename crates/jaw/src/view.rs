@@ -17,7 +17,9 @@ mod status_line;
 mod voice;
 
 use crate::composer::Composer;
-use crate::data::{Chat, Jawd, Message, Place, Typing, Typist, TypistState, Typists, Update, key};
+use crate::data::{
+    Chat, Jawd, Message, Place, Presence, PresenceState, Typing, Typist, TypistState, Typists, Update, key,
+};
 use crate::fmt::{self, MINUTE};
 use crate::graphics::{Images, Protocol};
 use crate::layout::{self, Shape};
@@ -27,9 +29,10 @@ use jaw_client::{Chats, Messages};
 use jaw_proto::settings::{Settings, SettingsSet};
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::Line;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -195,6 +198,8 @@ pub struct View {
     messages: Option<Messages<Message>>,
     /// Who's typing in the chats the windows show, as jawd last said.
     typing: Typists,
+    /// The presence of the person of each one-to-one chat a conversation shows, as jawd last said.
+    presence: BTreeMap<String, Presence>,
     /// The open chat, kept by ID however the list moves.
     open: Option<String>,
     /// The chat the list has selected, which is the open one except while picking on a narrow
@@ -346,6 +351,7 @@ impl View {
             chats: Chats::new("all", Place::top(LIST_ROWS)),
             messages: None,
             typing: Typists::new(),
+            presence: BTreeMap::new(),
             open: None,
             selected: None,
             list_top: 0,
@@ -619,6 +625,7 @@ impl View {
                 }
             }
             Update::Typing(typing) => self.typing = typing,
+            Update::Presence(presence) => self.presence = presence,
             Update::QuickLook { chat, update } => self.quick_look_came(&chat, update),
             Update::Found { id, results, counts } => self.found(id, results, counts),
             Update::FindFailed { id, cancelled, why } => self.find_failed(id, cancelled, why),
@@ -1150,6 +1157,24 @@ impl View {
         }
         let names: Vec<&str> = typists.iter().map(|t| t.name.as_str()).collect();
         Some(format!("{} {doing}", names.join(", ")))
+    }
+
+    /// How the person of a one-to-one chat is, in a word, as its header and the status line say it:
+    /// online, or when they were last seen, from what jawd told its conversation, or its roster row
+    /// until then; nothing when they hide it. It's drawn faintly while jawd isn't following them,
+    /// as the roster draws them. Typing, which shows from the chat's own, is said before it.
+    fn presence_said(&self, chat: &str) -> Option<(String, Style)> {
+        let roster = || self.roster.iter().find(|p| p.chat.as_deref() == Some(chat)).map(|p| p.presence);
+        let presence = self.presence.get(chat).copied().or_else(roster)?;
+        let t = &self.theme;
+        let (said, style) = match presence.state {
+            PresenceState::Online => ("online".to_string(), Style::new().fg(t.online)),
+            PresenceState::Seen => {
+                (format!("seen {}", fmt::ago(presence.at?, self.now(), self.tz)), Style::new().fg(t.comment))
+            }
+            PresenceState::Typing | PresenceState::Recording | PresenceState::Hidden => return None,
+        };
+        Some((said, if presence.known { style } else { Style::new().fg(t.gutter) }))
     }
 
     /// What a message's lines depend on, from the one before it.

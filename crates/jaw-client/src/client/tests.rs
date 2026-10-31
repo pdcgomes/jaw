@@ -457,3 +457,143 @@ fn typing_is_kept_for_the_chats_the_windows_show_as_answers_and_pushes_say_and_f
     });
     assert_eq!(last, held(&[]), "nothing kept once the connection ends");
 }
+
+/// A one-to-one chat's person's presence, as the client keeps it: each conversation's answer says
+/// it for its chat, a push changes it for a chat a conversation shows and nothing for one none
+/// does, a move's answer says it again, and it's forgotten as the conversation is unwatched and when
+/// the connection goes.
+#[test]
+fn presence_is_kept_for_the_conversations_shown_as_answers_and_pushes_say_and_forgotten_with_them() {
+    let fake = Fake::new();
+    let client: Client = Client::start(fake.config(), || {});
+    let mut peer = fake.accept();
+    peer.greet();
+    connected(&client);
+    let states = |frame: &Frame<ChatRow, MessageRow>| -> Option<Vec<(String, String, bool)>> {
+        let presence = frame.presence.as_ref()?;
+        Some(presence.iter().map(|(chat, p)| (chat.clone(), p.presence.state.clone(), p.presence.known)).collect())
+    };
+    let held = |states: &[(&str, &str, bool)]| -> Option<Vec<(String, String, bool)>> {
+        Some(states.iter().map(|(chat, state, known)| (chat.to_string(), state.to_string(), *known)).collect())
+    };
+
+    let conversation = client.watch_messages("a", Place::newest(10));
+    let watch = peer.request();
+    let mut messages = watched("w1", 1, vec![message(1)]);
+    messages["presence"] = json!({"person": "person:3", "state": "online", "known": true});
+    peer.answer(&watch, messages);
+    let mut last = None;
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("a", "online", true)]));
+
+    // A push changes it; one for a chat no conversation shows is let go of.
+    let seen = json!({"chat": "a", "person": "person:3", "state": "seen", "at": 1792000000000i64, "known": true});
+    peer.send(json!({"method": "presence", "params": seen}));
+    let elsewhere = json!({"chat": "z", "person": "person:9", "state": "online", "known": true});
+    peer.send(json!({"method": "presence", "params": elsewhere}));
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("a", "seen", true)]));
+    let at = client.drain();
+    assert_eq!(at.presence, None, "nothing more came");
+
+    // Moved, the conversation's answer says it again, faint now.
+    client.move_window(conversation, Place::newest(20));
+    let moving = peer.request();
+    assert_eq!(moving["method"], "watch.move");
+    let mut moved = watched("w1", 2, vec![message(1)]);
+    moved["presence"] = json!({"person": "person:3", "state": "seen", "at": 1792000000000i64, "known": false});
+    peer.answer(&moving, moved);
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("a", "seen", false)]));
+
+    // Unwatched, it's forgotten; and another conversation's goes with the connection.
+    client.unwatch(conversation);
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[]), "forgotten once its conversation is unwatched");
+    let _ = peer.request();
+    client.watch_messages("b", Place::newest(10));
+    let watch = peer.request();
+    let mut messages = watched("w2", 3, vec![message(1)]);
+    messages["presence"] = json!({"person": "person:4", "state": "hidden", "known": true});
+    peer.answer(&watch, messages);
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("b", "hidden", true)]));
+    drop(peer);
+    drain_until(&client, |frame| {
+        last = states(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[]), "nothing kept once the connection ends");
+}
+
+/// A roster watched through `watch_roster` shows its people's one-to-one chats for typing: its
+/// answer says who's typing in them, a push keeps typing for a chat whose person a roster push just
+/// brought in, and a chat is forgotten as its person leaves the roster; its answer and pushes still
+/// reach the caller.
+#[test]
+fn a_rosters_people_own_chats_are_shown_for_typing_from_its_answer_and_its_pushes_as_they_come() {
+    let fake = Fake::new();
+    let client: Client = Client::start(fake.config(), || {});
+    let mut peer = fake.accept();
+    peer.greet();
+    connected(&client);
+    let who = |name: &str| json!([{"id": "person:1", "name": name, "state": "typing"}]);
+    let typing = |frame: &Frame<ChatRow, MessageRow>| -> Option<Vec<String>> {
+        frame.typing.as_ref().map(|t| t.keys().cloned().collect())
+    };
+    let person = |n: u64, chat: Option<&str>| {
+        json!({"id": format!("person:{n}"), "v": n, "sort": format!("2~{n}"), "name": format!("P{n}"), "phone": null,
+            "about": null, "avatar": null, "presence": {"state": "hidden", "known": false}, "chat": chat, "folders": []})
+    };
+
+    let asked = client.watch_roster(json!({"folder": "all", "around": "top", "after": 10})).unwrap();
+    let watch = peer.request();
+    assert_eq!(watch["method"], "roster.watch");
+    let mut roster = json!({"watch": "w1", "seq": 1, "total": 2, "rows": [person(1, Some("a")), person(2, None)]});
+    roster["typing"] = json!({"a": who("Ana")});
+    peer.answer(&watch, roster);
+    let mut last = None;
+    let mut answered = false;
+    drain_until(&client, |frame| {
+        answered |= frame.events.iter().any(|e| matches!(e, Event::Reply { id, .. } if *id == asked));
+        last = typing(&frame).or(last.take());
+        answered && last.is_some()
+    });
+    assert_eq!(last, Some(vec!["a".to_string()]), "the answer's typing, for the chat its person has");
+
+    // Someone comes into the roster, and a typing push for their chat follows at once.
+    let came = json!({"watch": "w1", "seq": 2, "upsert": [person(3, Some("c"))]});
+    peer.send(json!({"method": "roster", "params": came}));
+    peer.send(json!({"method": "typing", "params": {"chat": "c", "who": who("Cora")}}));
+    let mut pushed = false;
+    drain_until(&client, |frame| {
+        pushed |= frame.events.iter().any(|e| matches!(e, Event::Push(push) if push.method == "roster"));
+        last = typing(&frame).or(last.take());
+        pushed && last.as_ref().is_some_and(|chats| chats.len() == 2)
+    });
+    assert_eq!(last, Some(vec!["a".to_string(), "c".to_string()]));
+
+    // Ana leaves the roster, so her chat's typing is forgotten.
+    let left = json!({"watch": "w1", "seq": 3, "remove": ["person:1"]});
+    peer.send(json!({"method": "roster", "params": left}));
+    drain_until(&client, |frame| {
+        last = typing(&frame).or(last.take());
+        last.as_ref().is_some_and(|chats| chats.len() == 1)
+    });
+    assert_eq!(last, Some(vec!["c".to_string()]));
+}

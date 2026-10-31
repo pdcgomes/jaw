@@ -8,7 +8,7 @@
 
 use super::{Focus, Reach, View};
 use crate::data::Place;
-use crate::data::{FolderRow, PresenceState, RosterRow};
+use crate::data::{FolderRow, PresenceState, RosterRow, TypistState};
 use crate::fmt;
 use jaw_client::Chats;
 use ratatui::Frame;
@@ -176,7 +176,7 @@ impl View {
             if members.is_empty() {
                 return;
             }
-            let around: Vec<&RosterRow> = members.iter().copied().filter(|p| p.presence.around()).collect();
+            let around: Vec<&RosterRow> = members.iter().copied().filter(|p| self.is_around(p)).collect();
             out.push(Roster::Heading { name, online: around.len(), of: members.len() });
             out.extend(around.iter().map(|p| Roster::Person(Box::new((*p).clone()))));
             if members.len() > around.len() {
@@ -193,6 +193,11 @@ impl View {
         let rest: Vec<&RosterRow> = people.iter().copied().filter(|p| !placed.contains(p.id.as_str())).collect();
         group(&mut out, "Others".into(), rest);
         out
+    }
+
+    /// Whether someone in the roster is around: online, or typing or recording in their chat.
+    fn is_around(&self, p: &RosterRow) -> bool {
+        p.presence.around() || p.chat.as_deref().is_some_and(|chat| !self.typists(chat).is_empty())
     }
 
     /// A folder and the folders under it.
@@ -544,8 +549,18 @@ impl View {
                     (vec![Span::styled(format!("  {n} offline"), Style::new().fg(t.gutter))], false, None)
                 }
                 Roster::Person(p) => {
-                    let faint = !p.presence.known;
-                    let (dot, said, said_style) = match p.presence.state {
+                    // Typing and recording show from their chat's typing, which jawd tells the
+                    // roster for its people's own chats, and which is never faint.
+                    let typists = p.chat.as_deref().map_or(&[][..], |chat| self.typists(chat));
+                    let typing = (!typists.is_empty()).then(|| {
+                        if typists.iter().all(|t| t.state == TypistState::Recording) {
+                            PresenceState::Recording
+                        } else {
+                            PresenceState::Typing
+                        }
+                    });
+                    let faint = typing.is_none() && !p.presence.known;
+                    let (dot, said, said_style) = match typing.unwrap_or(p.presence.state) {
                         PresenceState::Typing => ("●", "typing…".to_string(), Style::new().fg(t.online)),
                         PresenceState::Recording => ("●", "recording…".to_string(), Style::new().fg(t.online)),
                         PresenceState::Online => ("●", "online".to_string(), Style::new().fg(t.comment)),
@@ -556,7 +571,7 @@ impl View {
                         ),
                         PresenceState::Hidden => (" ", String::new(), Style::new().fg(t.comment)),
                     };
-                    let dot_style = if p.presence.around() && !faint {
+                    let dot_style = if typing.is_some() || (p.presence.around() && !faint) {
                         Style::new().fg(t.online)
                     } else {
                         Style::new().fg(t.comment)

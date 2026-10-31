@@ -170,7 +170,7 @@ fn below_90_columns_the_list_takes_the_screen_until_a_chat_is_picked() {
     assert!(screen.contains("⏎ open"), "{screen}");
     press(&mut v, &rx, "<down>\n");
     let screen = frame(&mut v);
-    assert!(screen.contains("╭ Mãe ─") && screen.contains("ok, ligo-te logo à noite"), "{screen}");
+    assert!(screen.contains("╭ Mãe · seen 5 min ago ─") && screen.contains("ok, ligo-te logo à noite"), "{screen}");
     assert!(!screen.contains("chats · All") && screen.contains("esc chat list"), "{screen}");
     press(&mut v, &rx, "<esc>");
     assert!(frame(&mut v).contains("chats · All"), "Esc goes back to the list");
@@ -2720,4 +2720,49 @@ fn someone_typing_shows_after_the_newest_message_at_their_margin_and_in_the_row_
     let screen = frame(&mut v);
     assert!(!screen.contains("• • •") && !screen.contains("recording…") && !screen.contains("● Família"), "{screen}");
     assert!(screen.contains("╭ Família Gomes ─"), "{screen}");
+}
+
+/// A one-to-one chat's header and the status line say how its person is, as jawd tells their
+/// conversation: online, or when they were last seen, faint while jawd isn't following them, and
+/// nothing when they hide it; who's typing says itself first. A roster row says typing or
+/// recording from their chat's typing, never faint, as jawd tells the roster its people's chats'.
+#[test]
+fn a_conversation_says_its_persons_presence_in_its_header_and_the_status_line_and_a_roster_row_its_chats_typing() {
+    let (mut v, rx) = view(140, 34);
+    v.experiments = crate::experiments::Experiments::parse("status_line");
+    v.open_chat("mae");
+    run::settle(&mut v, &rx);
+    let said =
+        |state, at, known| Update::Presence(BTreeMap::from([("mae".to_string(), Presence { state, at, known })]));
+    let status = |screen: &str| screen.lines().rev().nth(1).unwrap().to_string();
+
+    v.apply(said(PresenceState::Online, None, true));
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ Mãe · online ─"), "{screen}");
+    assert!(status(&screen).contains("online"), "the status line: {}", status(&screen));
+
+    // Seen a while ago, and no longer followed: said faintly, as the roster draws it.
+    v.apply(said(PresenceState::Seen, Some(NOW - 20 * MINUTE), false));
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ Mãe · seen 20 min ago ─"), "{screen}");
+    assert!(status(&screen).contains("seen 20 min ago"), "the status line: {}", status(&screen));
+    let (x, y) = cell_of(&screen, "seen 20 min ago ─");
+    let mut term = Terminal::new(TestBackend::new(140, 34)).unwrap();
+    term.draw(|f| v.draw(f)).unwrap();
+    assert_eq!(term.backend().buffer()[(x, y)].fg, v.theme.gutter, "faint while jawd isn't following her");
+    v.apply(said(PresenceState::Seen, Some(NOW - 20 * MINUTE), true));
+    let mut term = Terminal::new(TestBackend::new(140, 34)).unwrap();
+    term.draw(|f| v.draw(f)).unwrap();
+    assert_eq!(term.backend().buffer()[(x, y)].fg, v.theme.comment, "and not once it is");
+
+    // Hidden, nothing; typing says itself instead, in her roster row too.
+    v.apply(said(PresenceState::Hidden, None, true));
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ Mãe ─"), "{screen}");
+    let typist = crate::data::Typist { id: "person:2".into(), name: "Mãe".into(), state: TypistState::Recording };
+    v.apply(Update::Typing(Typists::from([("mae".to_string(), vec![typist])])));
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ Mãe · recording… ─"), "{screen}");
+    let roster = |l: &&str| l.starts_with("│ ● Mãe") && l.split("││").next().is_some_and(|s| s.contains("recording…"));
+    assert!(screen.lines().any(|l| roster(&l)), "her roster row, around now:\n{screen}");
 }

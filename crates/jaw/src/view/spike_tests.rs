@@ -81,13 +81,13 @@ fn digest(v: &mut View) -> (u64, String) {
 
 /// The screens the switches could change, with the digest of each as `main` drew it before them,
 /// every switch off. A change made to the default screen on purpose changes these too, as Ana
-/// typing, drawn after her newest message, did.
+/// typing, drawn after her newest message, did, and Mãe's presence in her conversation's header.
 const AS_IT_WAS: [(State, u16, u16, &str, u64); 14] = [
     (State::Online, 160, 45, "", 0x2a63_98c5_3378_9b5f),
     (State::Online, 140, 40, "", 0x7196_5711_1739_fa3f),
     (State::Online, 100, 30, "", 0x5e0a_0206_cb91_ebda),
     (State::Online, 80, 24, "", 0xb982_f07f_f882_04e1),
-    (State::Online, 80, 24, "<down>\n", 0xfae9_0b86_f22e_e0a7),
+    (State::Online, 80, 24, "<down>\n", 0xf7d9_6214_d581_a79f),
     (State::Online, 100, 30, "<up>", 0x6431_1bf7_677b_ca69),
     (State::Online, 140, 34, "levo o vinho<c-k>", 0xedca_cdd9_04b7_8f1e),
     (State::Online, 100, 30, "?", 0x43cd_4b4b_ba93_6031),
@@ -258,7 +258,7 @@ fn ctrl_f_folds_the_sidebar_and_the_list_away_for_one_chat_and_brings_them_back(
     press(&mut v, &rx, "<a-down>");
     let screen = frame(&mut v);
     assert!(
-        line(&screen, 1).starts_with("╭ Mãe ─") && !screen.contains("╭ chats"),
+        line(&screen, 1).starts_with("╭ Mãe · seen 5 min ago ─") && !screen.contains("╭ chats"),
         "focused, Alt-↓ moves on:\n{screen}"
     );
     press(&mut v, &rx, "<a-up><c-f><c-f><c-f>");
