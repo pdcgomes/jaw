@@ -115,7 +115,7 @@ final class AppModel {
             }
         }
         jawd.start()
-        Opened.empty()
+        Opened.sweep()
         listWindow = jawd.watchChats(folder, .top(ChatListController.rows))
         preferences.changed.append { [weak self] in self?.restyle() }
         glance.model = self
@@ -128,6 +128,7 @@ final class AppModel {
         savePanes()
         jawd?.close()
         agent.stop()
+        Opened.leave()
     }
 
     // MARK: - Draining

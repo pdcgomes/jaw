@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Darwin
 import JawKit
 import JawUI
@@ -171,7 +172,9 @@ enum Bench {
                     let selected = model.conversation?.selectedRow.map {
                         " · selected \($0.kind.rawValue) \"\($0.plain.prefix(24).replacingOccurrences(of: "\n", with: " "))\""
                     } ?? ""
-                    let looking = QuickLook.shared.items.isEmpty ? "" : " · looking at " + QuickLook.shared.items.map { $0.previewItemTitle ?? "" }.joined(separator: ", ")
+                    let looking = QuickLook.shared.items.isEmpty ? "" : " · looking at " + QuickLook.shared.items.map { item in
+                        (item.previewItemTitle ?? "") + handedOver(item.previewItemURL)
+                    }.joined(separator: ", ")
                     let said = palette + glance + form + selected + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
@@ -179,6 +182,16 @@ enum Bench {
                 press(Array(keys.dropFirst()), model: model, then: then)
             }
         }
+    }
+
+    /// How a clone handed to another app stands, for the snapshot's log: its mode and who
+    /// quarantined it as what.
+    static func handedOver(_ url: URL?) -> String {
+        guard let url, let mode = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int else { return "" }
+        let quarantine = (try? url.resourceValues(forKeys: [.quarantinePropertiesKey]))?.quarantineProperties
+        let type = (quarantine?[kLSQuarantineTypeKey as String] as? String).map { $0.replacingOccurrences(of: "LSQuarantineType", with: "") }
+        let agent = quarantine?[kLSQuarantineAgentNameKey as String] as? String
+        return " (\(String(mode, radix: 8)), \(type.map { "quarantined by \(agent ?? "?") as \($0)" } ?? "not quarantined"))"
     }
 
     /// The chat list's row `i`, counting from 0, or nil when it has no such row.

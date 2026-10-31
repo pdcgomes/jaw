@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 @testable import JawKit
 @testable import JawUI
 import Testing
@@ -59,8 +60,25 @@ func titles(_ offer: MediaOffer?) -> [String] {
     #expect(MediaOffer.named(Media(), id: "X") == "X.bin")
 }
 
-@Test func `a file is looked at and opened from a clone of it, which can change without changing jawd's`() throws {
-    let scratch = URL(fileURLWithPath: "/tmp/jaw-mac-media-tests-\(UInt32.random(in: 0 ... .max))", isDirectory: true)
+/// A scratch folder of the test's own, removed after it.
+func scratchFolder() throws -> URL {
+    let scratch = FileManager.default.temporaryDirectory.appending(path: "jaw-mac-media-tests-\(UInt32.random(in: 0 ... .max))", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    return scratch
+}
+
+func attributes(_ url: URL) throws -> [FileAttributeKey: Any] {
+    try FileManager.default.attributesOfItem(atPath: url.path)
+}
+
+/// A file's quarantine, as its type and the agent that set it.
+func quarantine(_ url: URL) throws -> (type: String?, agent: String?) {
+    let q = try url.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
+    return (q?[kLSQuarantineTypeKey as String] as? String, q?[kLSQuarantineAgentNameKey as String] as? String)
+}
+
+@Test func `a file is looked at and opened from a read-only clone of it, quarantined as a message's attachment, which nothing done to it lets reach jawd's`() throws {
+    let scratch = try scratchFolder()
     defer { try? FileManager.default.removeItem(at: scratch) }
     let jawds = scratch.appending(path: "media/files")
     try FileManager.default.createDirectory(at: jawds, withIntermediateDirectories: true)
@@ -70,16 +88,41 @@ func titles(_ offer: MediaOffer?) -> [String] {
 
     let clone = try Opened.copy(of: file, named: "Sintra topo.pdf", for: "3EB0/A1", in: opened)
     #expect(clone.lastPathComponent == "Sintra topo.pdf" && clone.deletingLastPathComponent().lastPathComponent == "3EB0_A1")
-    try Data("edited in another app".utf8).write(to: clone)
-    let kept = try Data(contentsOf: file)
-    #expect(kept == Data("jawd's file".utf8), "jawd's file is as it was")
+    let marked = try quarantine(clone)
+    #expect(marked.type == kLSQuarantineTypeInstantMessageAttachment as String && marked.agent == "Jaw")
+    #expect(try quarantine(file).type == nil, "jawd's own file isn't touched")
+    #expect(try attributes(clone)[.posixPermissions] as? Int == 0o444)
+    #expect(throws: (any Error).self, "an app can't save into it") { try Data("edited in another app".utf8).write(to: clone) }
+    #expect(try Data(contentsOf: file) == Data("jawd's file".utf8), "jawd's file is as it was")
     let again = try Opened.copy(of: file, named: "Sintra topo.pdf", for: "3EB0/A1", in: opened)
-    let reread = try Data(contentsOf: again)
-    #expect(again == clone && reread == Data("jawd's file".utf8), "looked at again, it's jawd's again")
-    #expect(Opened.clone(of: file, named: "x.pdf", for: "M", in: opened) != nil, "a clone at once, for a drag")
-    Opened.empty(opened)
-    #expect(!FileManager.default.fileExists(atPath: opened.path))
+    #expect(try again == clone && attributes(again)[.systemFileNumber] as? Int == attributes(clone)[.systemFileNumber] as? Int,
+            "looked at again, the same clone, so an app showing it keeps it")
+    let hd = jawds.appending(path: "cd34.pdf")
+    try Data("jawd's HD copy".utf8).write(to: hd)
+    let better = try Opened.copy(of: hd, named: "Sintra topo.pdf", for: "3EB0/A1", in: opened)
+    #expect(try better == clone && Data(contentsOf: better) == Data("jawd's HD copy".utf8), "another file under its name is cloned again")
+
+    let dragged = try #require(Opened.clone(of: file, named: "Sintra topo.pdf", for: "3EB0/A1", in: opened), "a clone at once, for a drag")
+    #expect(dragged != clone, "beside the one looked at, which a drag never takes away")
+    #expect(try quarantine(dragged).type == kLSQuarantineTypeInstantMessageAttachment as String)
+    #expect(try (attributes(dragged)[.posixPermissions] as? Int ?? 0) & 0o200 != 0, "writable, as the Finder's copy of it will be")
     #expect(throws: (any Error).self) { try Opened.copy(of: jawds.appending(path: "missing.pdf"), named: "m.pdf", for: "M", in: opened) }
+    Opened.leave(opened)
+    #expect(!FileManager.default.fileExists(atPath: opened.path), "emptied as the run quits, read-only clones and all")
+}
+
+@Test func `each run keeps its clones in a folder of its own, and one starting empties only those of runs that have gone`() throws {
+    let root = try scratchFolder()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let mine = try #require(Opened.run(getpid()))
+    #expect(Opened.folder.lastPathComponent == mine && mine.hasPrefix("\(getpid())-"))
+    let gone = "\(getpid())-1", earlier = "999999-12345", old = "3EB0DEMO00000008"
+    for name in [mine, gone, earlier, old] {
+        try FileManager.default.createDirectory(at: root.appending(path: name).appending(path: "open"), withIntermediateDirectories: true)
+    }
+    Opened.sweep(root)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [mine],
+            "a run with this process's ID that started at another time has gone, as has one with no process, and an earlier build's clones")
 }
 
 @MainActor

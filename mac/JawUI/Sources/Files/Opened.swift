@@ -1,3 +1,4 @@
+import CoreServices
 import Darwin
 import Foundation
 
@@ -6,38 +7,98 @@ import Foundation
 /// that has it, and an app that edits what it opens saves into it, so nothing jaw hands another app
 /// is jawd's own file. On APFS a clone costs neither space nor time and leaves jawd's file as it is
 /// whatever is done to it; where one can't be made, as on another volume, it's a copy.
+///
+/// Each is quarantined as a message's attachment, so macOS checks what someone sent before it runs,
+/// as it checks a download; one looked at or opened is read-only, so an app that edits it offers to
+/// duplicate it rather than saving into a file that goes when Jaw quits. Each run keeps its own in a
+/// folder of its own, emptied as it quits, and the folders of runs that have gone are emptied as one
+/// starts, so a run beside another never takes its files away.
 public enum Opened {
-    /// The folder the clones are made in, emptied at launch of what an earlier run left.
-    public static let folder = FileManager.default.temporaryDirectory.appending(path: "dev.badcoffee.jaw.opened", directoryHint: .isDirectory)
+    /// Every run's folders.
+    public static let root = FileManager.default.temporaryDirectory.appending(path: "dev.badcoffee.jaw.opened", directoryHint: .isDirectory)
+    /// This run's, named by its process and when that started.
+    public static let folder = root.appending(path: run(getpid()) ?? "\(getpid())", directoryHint: .isDirectory)
 
-    /// A fresh clone of `file` named `name`, in a folder of its own for `message`, so two messages'
-    /// files of one name don't meet. It can take as long as a copy, so it's made off the main thread.
+    /// A run's folder's name, its process's ID and when it started in microseconds; nil when no
+    /// process has that ID.
+    static func run(_ pid: pid_t) -> String? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        let t = info.kp_proc.p_starttime
+        return "\(pid)-\(Int64(t.tv_sec) * 1_000_000 + Int64(t.tv_usec))"
+    }
+
+    /// A clone of `file` named `name`, read-only and quarantined, in a folder of its own for
+    /// `message`, so two messages' files of one name don't meet; the one made before, when it's of
+    /// the same file, so an app showing it keeps it. It can take as long as a copy, so it's made off
+    /// the main thread.
     public static func copy(of file: URL, named name: String, for message: String, in folder: URL = Opened.folder) throws -> URL {
-        let safe = message.map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined()
-        let dir = folder.appending(path: safe, directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let target = dir.appending(path: name)
-        if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: target) }
-        if clonefile(file.path, target.path, 0) == 0 { return target }
-        guard errno == EXDEV || errno == ENOTSUP || errno == EEXIST else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        let target = try place(message, name, in: folder.appending(path: "open", directoryHint: .isDirectory))
+        if same(target, as: file) { return target }
+        try? FileManager.default.removeItem(at: target)
+        if clonefile(file.path, target.path, 0) != 0 {
+            guard errno == EXDEV || errno == ENOTSUP else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            try FileManager.default.copyItem(at: file, to: target)
         }
-        try FileManager.default.copyItem(at: file, to: target)
+        try handOver(target, readOnly: true)
         return target
     }
 
-    /// A clone, when one can be made at once, as a drag starting needs; nil where it would take a copy.
+    /// A clone made at once, as a drag starting needs, nil where it would take a copy: quarantined,
+    /// and left writable, as the Finder keeps a file's mode on the copy it makes of a drop.
     public static func clone(of file: URL, named name: String, for message: String, in folder: URL = Opened.folder) -> URL? {
-        let safe = message.map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined()
-        let dir = folder.appending(path: safe, directoryHint: .isDirectory)
-        guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
-        let target = dir.appending(path: name)
+        guard let target = try? place(message, name, in: folder.appending(path: "drag", directoryHint: .isDirectory)) else { return nil }
+        if same(target, as: file) { return target }
         try? FileManager.default.removeItem(at: target)
-        return clonefile(file.path, target.path, 0) == 0 ? target : nil
+        guard clonefile(file.path, target.path, 0) == 0, (try? handOver(target, readOnly: false)) != nil else { return nil }
+        return target
     }
 
-    /// Lets go of every clone an earlier run made.
-    public static func empty(_ folder: URL = Opened.folder) {
+    /// Where `message`'s copy named `name` goes in `folder`, its folder made.
+    static func place(_ message: String, _ name: String, in folder: URL) throws -> URL {
+        let safe = message.map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined()
+        let dir = folder.appending(path: safe, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appending(path: name)
+    }
+
+    /// Whether `copy` was made of `file` as it is: the same size and time, which a clone and a copy
+    /// keep.
+    static func same(_ copy: URL, as file: URL) -> Bool {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: copy.path),
+              let b = try? FileManager.default.attributesOfItem(atPath: file.path) else { return false }
+        return a[.size] as? Int == b[.size] as? Int && a[.modificationDate] as? Date == b[.modificationDate] as? Date
+    }
+
+    /// Quarantines `url` as a message's attachment Jaw received, and makes it read-only when asked:
+    /// the quarantine is set first, as it can't be on a file that can't be written.
+    public static func handOver(_ url: URL, readOnly: Bool) throws {
+        var values = URLResourceValues()
+        values.quarantineProperties = [kLSQuarantineTypeKey as String: kLSQuarantineTypeInstantMessageAttachment as String,
+                                       kLSQuarantineAgentNameKey as String: "Jaw"]
+        var marked = url
+        try marked.setResourceValues(values)
+        if readOnly { try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: url.path) }
+    }
+
+    /// Empties the folders of runs that have gone, as a run starts; a run still going keeps its own.
+    public static func sweep(_ root: URL = Opened.root) {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return }
+        for name in names where !running(name) {
+            try? FileManager.default.removeItem(at: root.appending(path: name))
+        }
+    }
+
+    /// Whether the run a folder's named for is still going: its process, started when it says.
+    static func running(_ name: String) -> Bool {
+        guard let pid = name.split(separator: "-").first.flatMap({ pid_t($0) }) else { return false }
+        return run(pid) == name
+    }
+
+    /// Empties this run's folder, as it quits.
+    public static func leave(_ folder: URL = Opened.folder) {
         try? FileManager.default.removeItem(at: folder)
     }
 }
