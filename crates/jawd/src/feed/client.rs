@@ -705,7 +705,9 @@ fn changed<'a>(
 }
 
 /// What an interface holding `held` needs to hold what `found` found, and what it holds then.
-/// The folder tree's rows have no versions its counts keep, so it's always compared row by row.
+/// The folder tree's rows have no versions its counts keep, and a community's row in a chat list
+/// sums up the groups of it the list holds, which a folder moved, a rule changed, a folder made a
+/// favourite or a mute running out changes with no version, so both are always compared row by row.
 fn settle<'a>(
     held: &HashMap<String, Held>,
     favourites: Option<u64>,
@@ -713,7 +715,7 @@ fn settle<'a>(
     since: Option<i64>,
 ) -> (Update<'a>, State) {
     let kind = Kind::of(&found.spec);
-    let since = since.filter(|_| kind != Kind::Folders);
+    let since = since.filter(|_| !matches!(kind, Kind::Folders | Kind::Chats));
     let (upsert, remove, held) = changed(held, &found.rows, since);
     let update = Update {
         kind,

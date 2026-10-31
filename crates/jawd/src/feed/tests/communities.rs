@@ -119,9 +119,17 @@ impl Held {
         Held::watch(watcher, json!({"folder": folder, "around": "top", "after": 50})).await
     }
 
+    /// Watches again after a write, as `watch_again`, every row whose content it changed coming at
+    /// a new version.
+    async fn come_back(&mut self, watcher: &mut Watcher, what: &str) {
+        let was = self.model.clone();
+        self.watch_again(watcher, what).await;
+        self.model.assert_stamped(&was, what);
+    }
+
     /// Watches again from the seq it held with the ids it holds, as an interface coming back does,
     /// and must then hold what a fresh watch gives.
-    async fn come_back(&mut self, watcher: &mut Watcher, what: &str) {
+    async fn watch_again(&mut self, watcher: &mut Watcher, what: &str) {
         let mut params = self.params.clone();
         params["since"] = self.model.seq.into();
         params["have"] = json!(self.model.ids());
@@ -350,6 +358,94 @@ async fn a_community_a_window_hasnt_open_is_one_row_summing_up_the_same_and_open
     let many: Vec<String> = (0..1_001).map(|n| format!("1203630{n:011}@g.us")).collect();
     let refused = watcher.call("chats.watch", json!({"folder": "all", "around": "top", "open": many})).await;
     assert_eq!(refused.unwrap_err().code, code::INVALID_PARAMS, "a thousand communities open at most");
+}
+
+/// A folder's number, from its id.
+fn n_of(folder: &str) -> i64 {
+    folder.split_once(':').unwrap().1.parse().unwrap()
+}
+
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+/// A smart folder of yours with `rule`.
+async fn ruled(bed: &Bed, name: &str, rule: &str) -> String {
+    match step(bed, |done| Step::Create { name: name.into(), parent: None, rule: Some(rule.into()), done }).await {
+        Outcome::Done(Some(n)) => format!("smart:{n}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_again_after_a_folder_moves_under_another_a_community_sums_up_what_that_one_holds_now() {
+    let bed = Bed::new(brisk());
+    let family = bairro(&bed).await;
+    let more = folder(&bed, "More").await;
+    file(&bed, &more, Item::Chat(AVISOS.into())).await;
+    let mut watcher = bed.watcher(64);
+    let mut held = Held::top(&mut watcher, &family).await;
+    assert_eq!(shape(&held.model), ["Ana", "Bairro 2/1", "  Festa"]);
+    let (more, family_n) = (n_of(&more), n_of(&family));
+    let moved = step(&bed, |done| Step::Move { folder: more, parent: Some(family_n), position: None, done }).await;
+    assert_eq!(moved, Outcome::Done(None));
+    held.watch_again(&mut watcher, "More moved under Family").await;
+    assert_eq!(shape(&held.model), ["Ana", "Bairro 3/1", "  Avisos", "  Festa"], "Avisos too, now More's in Family");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_again_after_a_smart_folders_rule_changes_a_community_sums_up_what_it_holds_now() {
+    let bed = Bed::new(brisk());
+    bairro(&bed).await;
+    let mut watcher = bed.watcher(64);
+    let mentions = smart(&mut watcher, "Mentions me").await;
+    let mut held = Held::top(&mut watcher, &mentions).await;
+    assert_eq!(shape(&held.model), ["Bairro 2/1", "  Festa"]);
+    let ruled =
+        step(&bed, |done| Step::Rule { folder: n_of(&mentions), rule: r#"{"unread":true}"#.into(), done }).await;
+    assert_eq!(ruled, Outcome::Done(None));
+    held.watch_again(&mut watcher, "Mentions me asking for unread").await;
+    assert_eq!(shape(&held.model), ["Ana", "Bairro 3/1", "  Avisos", "  Festa", "Regata"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_again_after_a_groups_mute_runs_out_a_community_sums_up_what_a_folder_of_muted_chats_holds_now() {
+    let bed = Bed::new(brisk());
+    bairro(&bed).await;
+    let ends = wall_ms() + 3_000;
+    bed.apply(vec![
+        Change::Chat(Chat { id: FESTA.into(), muted_until: Some(ends), ..Chat::default() }),
+        Change::Chat(Chat { id: AVISOS.into(), muted_until: Some(ends + 3_600_000), ..Chat::default() }),
+    ])
+    .await;
+    let muted = ruled(&bed, "Muted", r#"{"muted":true}"#).await;
+    let mut watcher = bed.watcher(64);
+    let mut held = Held::top(&mut watcher, &muted).await;
+    assert_eq!(shape(&held.model), ["Bairro 3/1", "  Avisos", "  Festa"], "watched while Festa's mute lasts");
+    tokio::time::sleep(ms((ends + 500 - wall_ms()).max(0) as u64)).await;
+    held.watch_again(&mut watcher, "Festa's mute ran out").await;
+    assert_eq!(shape(&held.model), ["Bairro 1/0", "  Avisos"], "Avisos alone, where Avisos is");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_again_after_a_folder_is_made_a_favourite_a_community_sums_up_what_a_folder_of_favourites_holds_now() {
+    use crate::store::folders::Target;
+    let bed = Bed::new(brisk());
+    let family = bairro(&bed).await;
+    let more = folder(&bed, "More").await;
+    file(&bed, &more, Item::Chat(AVISOS.into())).await;
+    let favourites = ruled(&bed, "Favs", r#"{"favourites":true}"#).await;
+    let family_n = n_of(&family);
+    let slotted = step(&bed, |done| Step::Favourite { slot: 1, target: Some(Target::Folder(family_n)), done }).await;
+    assert_eq!(slotted, Outcome::Done(None));
+    let mut watcher = bed.watcher(64);
+    let mut held = Held::top(&mut watcher, &favourites).await;
+    assert_eq!(shape(&held.model), ["Ana", "Bairro 2/1", "  Festa"]);
+    let more_n = n_of(&more);
+    let slotted = step(&bed, |done| Step::Favourite { slot: 2, target: Some(Target::Folder(more_n)), done }).await;
+    assert_eq!(slotted, Outcome::Done(None));
+    held.watch_again(&mut watcher, "More made a favourite").await;
+    assert_eq!(shape(&held.model), ["Ana", "Bairro 3/1", "  Avisos", "  Festa"]);
 }
 
 /// Each chat list's layout, as `shape` gives it.

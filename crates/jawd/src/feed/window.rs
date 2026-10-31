@@ -274,10 +274,10 @@ fn mentioned(spans: &Value) -> impl Iterator<Item = &str> {
 }
 
 /// A chat list's rows on the wire: each chat, and each community with the groups of it the list
-/// holds when the window has it open, which keep their own sorts, so a row's sort changes only
-/// with it and a window watched again from since is exact; interfaces show them under it. A
-/// community's sort is its place, just above the newest of what it brings, and its row sums up
-/// those groups, open or not: their unread messages and mentions, and their newest message.
+/// holds when the window has it open, which keep their own sorts, so a group's row changes only
+/// with it; interfaces show them under it. A community's sort is its place, just above the newest
+/// of what it brings, and its row sums up those groups, open or not: their unread messages and
+/// mentions, and their newest message.
 fn chat_rows(entries: Vec<communities::Entry>) -> Vec<(i64, proto::ChatRow)> {
     let mut rows = Vec::with_capacity(entries.len());
     for entry in entries {

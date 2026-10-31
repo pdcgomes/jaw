@@ -186,6 +186,21 @@ impl Model {
             assert_eq!((self.older, self.newer), (fresh.older, fresh.newer), "{what}: older and newer");
         }
     }
+
+    /// Asserts each row it holds that `was` held otherwise came at a version past the seq `was`
+    /// held, as the write that changed it must give it.
+    fn assert_stamped(&self, was: &Model, what: &str) {
+        for (id, row) in &self.rows {
+            if was.rows.get(id).is_some_and(|held| held != row) {
+                assert!(
+                    row["v"].as_u64() > Some(was.seq),
+                    "{what}: {id} changed at v {}, held at seq {}",
+                    row["v"],
+                    was.seq
+                );
+            }
+        }
+    }
 }
 
 /// A client driven by the test, with what its interface would hold.
@@ -1225,7 +1240,7 @@ async fn draft(bed: &Bed) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reconnecting_with_since_returns_only_what_changed() {
+async fn reconnecting_with_since_returns_only_what_changed_of_a_chats_messages_and_a_chat_list_whole() {
     let bed = Bed::new(brisk());
     let mut seeding = Vec::new();
     for n in 0..12 {
@@ -1321,8 +1336,8 @@ async fn reconnecting_with_since_returns_only_what_changed() {
     };
     assert_eq!(ids(&messages_result), ["o39", "new1", "new2"], "only what changed or came in");
     assert_eq!(removed(&messages_result), ["o31", "o35"], "the one that went and the oldest, pushed out");
-    assert_eq!(ids(&chats_result), [person(1), OPEN.into()], "the pinned chat, and the open chat's newest message");
-    assert_eq!(removed(&chats_result), [person(8)]);
+    assert_eq!(ids(&chats_result).len(), 5, "a chat list comes whole: {:?}", ids(&chats_result));
+    assert_eq!(removed(&chats_result), [person(8)], "and its have says which row left");
     chats.take(&chats_result, "rows");
     messages.take(&messages_result, "rows");
     chats.assert_matches(&fresh(&bed.store, &chats_want).await, "the chat list, reconnected");
@@ -3893,9 +3908,10 @@ mod folders {
         }
 
         /// Watches again as an interface coming back does, from the seq it held and with the ids of
-        /// the rows it holds, and takes what comes: it must then hold what a fresh watch gives, so
-        /// every row it held whose content changed since took a new version.
+        /// the rows it holds, and takes what comes: it must then hold what a fresh watch gives, and
+        /// every row it held whose content changed since must have taken a new version.
         async fn come_back(&mut self, watcher: &mut Watcher, what: &str) {
+            let was = self.model.clone();
             let mut params = self.params.clone();
             params["since"] = self.model.seq.into();
             params["have"] = json!(self.model.ids());
@@ -3904,6 +3920,7 @@ mod folders {
             self.model.take(&result, "rows");
             let fresh = Held::watch(watcher, self.method, self.params.clone()).await;
             self.model.assert_matches(&fresh.model, what);
+            self.model.assert_stamped(&was, what);
         }
 
         fn row(&self, id: &str) -> &Value {
@@ -4862,15 +4879,17 @@ async fn watching_again_from_since_says_whos_typing_now_as_a_fresh_watch_does_wh
     typed(&typing, GROUP, &["Rui"]).await;
     let list = json!({"around": "top", "after": 3});
     let conversation = json!({"chat": GROUP, "around": "newest", "before": 5});
+    let quiet = json!({"chat": person(1), "around": "newest", "before": 5});
 
-    // An interface watches its chat list and the group, then goes.
-    let (first_list, first_conversation, since) = tokio::task::spawn_blocking({
-        let (socket, list, conversation) = (socket.clone(), list.clone(), conversation.clone());
+    // An interface watches its chat list, the group and a quiet chat, then goes.
+    let (first_list, first_conversation, first_quiet, since) = tokio::task::spawn_blocking({
+        let (socket, list, conversation, quiet) = (socket.clone(), list.clone(), conversation.clone(), quiet.clone());
         move || {
             let (mut line, welcome) = Line::open(&socket, None);
             let first_list = line.call("chats.watch", list);
             let first_conversation = line.call("messages.watch", conversation);
-            (first_list, first_conversation, welcome["seq"].as_u64().unwrap())
+            let first_quiet = line.call("messages.watch", quiet);
+            (first_list, first_conversation, first_quiet, welcome["seq"].as_u64().unwrap())
         }
     })
     .await
@@ -4893,27 +4912,40 @@ async fn watching_again_from_since_says_whos_typing_now_as_a_fresh_watch_does_wh
     let ids = |result: &Value| -> Vec<String> {
         result["rows"].as_array().unwrap().iter().map(|row| row["id"].as_str().unwrap().to_string()).collect()
     };
-    let (held_list, held_conversation) = (ids(&first_list), ids(&first_conversation));
-    let (again_list, again_conversation, fresh_list, fresh_conversation) = tokio::task::spawn_blocking(move || {
-        let (mut line, _) = Line::open(&socket, Some(since));
-        let mut list_again = list.clone();
-        list_again["have"] = json!(held_list);
-        let mut conversation_again = conversation.clone();
-        conversation_again["have"] = json!(held_conversation);
-        let again_list = line.call("chats.watch", list_again);
-        let again_conversation = line.call("messages.watch", conversation_again);
-        let (mut fresh, _) = Line::open(&socket, None);
-        (again_list, again_conversation, fresh.call("chats.watch", list), fresh.call("messages.watch", conversation))
-    })
-    .await
-    .unwrap();
+    let (held_list, held_conversation, held_quiet) = (ids(&first_list), ids(&first_conversation), ids(&first_quiet));
+    assert!(!held_quiet.is_empty(), "the quiet chat has a message to leave out: {first_quiet}");
+    let (again_list, again_conversation, again_quiet, fresh_list, fresh_conversation) =
+        tokio::task::spawn_blocking(move || {
+            let (mut line, _) = Line::open(&socket, Some(since));
+            let mut list_again = list.clone();
+            list_again["have"] = json!(held_list);
+            let mut conversation_again = conversation.clone();
+            conversation_again["have"] = json!(held_conversation);
+            let mut quiet_again = quiet;
+            quiet_again["have"] = json!(held_quiet);
+            let again_list = line.call("chats.watch", list_again);
+            let again_conversation = line.call("messages.watch", conversation_again);
+            let again_quiet = line.call("messages.watch", quiet_again);
+            let (mut fresh, _) = Line::open(&socket, None);
+            let (fresh_list, fresh_conversation) =
+                (fresh.call("chats.watch", list), fresh.call("messages.watch", conversation));
+            (again_list, again_conversation, again_quiet, fresh_list, fresh_conversation)
+        })
+        .await
+        .unwrap();
     let now = want(&[(GROUP, &["Zé"]), (&person(1), &["+351910000001"])]);
     assert_eq!(answered_typing(&fresh_list), now, "a fresh watch says how things are now");
     assert_eq!(answered_typing(&again_list), answered_typing(&fresh_list), "and so does one from since");
     assert_eq!(answered_typing(&again_conversation), answered_typing(&fresh_conversation));
     assert_eq!(answered_typing(&again_conversation), want(&[(GROUP, &["Zé"])]));
-    assert!(!ids(&again_list).contains(&person(1)), "its row is left out, unchanged since: {again_list}");
-    assert_eq!(again_list["typing"][person(1)][0]["state"], "typing", "but who's typing there isn't");
+    assert!(ids(&again_quiet).is_empty(), "the quiet chat's message is left out, unchanged since: {again_quiet}");
+    assert_eq!(
+        answered_typing(&again_quiet),
+        want(&[(&person(1), &["+351910000001"])]),
+        "but who's typing there isn't"
+    );
+    assert!(ids(&again_list).contains(&person(1)), "a chat list comes whole, unchanged rows too: {again_list}");
+    assert_eq!(again_list["typing"][person(1)][0]["state"], "typing", "with who's typing in them");
     assert_eq!(again_list["typing"][GROUP][0]["state"], "recording");
 }
 
