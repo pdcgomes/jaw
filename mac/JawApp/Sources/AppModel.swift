@@ -889,7 +889,7 @@ extension AppModel {
             pending = nil
             hand(act, offers, at: at)
         case .save, .saveHD:
-            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: launch.downloads, variant: act == .saveHD ? .hd : nil)
+            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: launch.downloads, variant: offer.variant(act))
             saving[ticket] = (offer.message, false, nil)
             if !offer.isHere { say("\(offer.name) is coming; it's saved once it's here") }
         case .reveal:

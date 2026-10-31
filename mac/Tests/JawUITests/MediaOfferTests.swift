@@ -12,7 +12,7 @@ func titles(_ offer: MediaOffer?) -> [String] {
     offer?.menu.map(\.title) ?? []
 }
 
-@Test func `a file here is looked at, opened, saved and shown in Finder, and one away offers what its state lets you do`() {
+@Test func `a file here is looked at, opened, saved and shown in Finder, and one away offers what its state lets you do`() throws {
     let here = MediaOffer.of(state("D15"))
     #expect(titles(here) == ["Quick Look", "Open", "Save to Downloads", "Show in Finder"])
     #expect(here?.menu.map(\.key) == ["Space", "⌘↩", "s", nil])
@@ -24,6 +24,12 @@ func titles(_ offer: MediaOffer?) -> [String] {
     #expect(titles(MediaOffer.of(state("D4"))).last == "Show in Finder", "waiting for the phone: nothing more to ask")
     let hd = MediaOffer.of(Samples.pictures.first { $0.id == "P4" }!)
     #expect(titles(hd).contains("Save HD Copy to Downloads"))
+    var hdHere = Samples.pictures.first { $0.id == "P4" }!
+    hdHere.media?.hdPath = "media/files/rope-hd.jpg"
+    let shown = try #require(MediaOffer.of(hdHere))
+    #expect(shown.here == "media/files/rope-hd.jpg" && shown.variant(.save) == .hd, "Save saves the HD copy a look shows, once it's here")
+    #expect(hd?.variant(.save) == nil && hd?.variant(.saveHD) == .hd, "and the standard one until then; Save HD Copy the HD one")
+    #expect(MediaOffer.of(state("D15"))?.variant(.save) == nil)
     #expect(MediaOffer.of(state("D2"))?.stateAct?.0 == .stop && MediaOffer.of(state("D5"))?.stateAct?.0 == .fetch)
     #expect(["D11", "D3", "D2", "D5", "D6", "D4", "D15"].map { MediaOffer.of(state($0))?.statePhrase } == [
         "Download this file", "Try downloading this file again", "Stop downloading this file", "Ask the phone for this file again",

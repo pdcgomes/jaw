@@ -100,6 +100,12 @@ public struct MediaOffer: Sendable, Hashable {
         return media.hdPath ?? media.path
     }
 
+    /// The copy `act` saves: the HD one for Save HD Copy, and for Save the one a look shows, which is
+    /// the HD one once that's here; nil for jawd's standard copy.
+    public func variant(_ act: Act) -> Variant? {
+        act == .saveHD || act == .save && isHere && media.hdPath != nil ? .hd : nil
+    }
+
     /// What its state lets you do about it, as the menu says it: nothing once it's here.
     public var stateAct: (Act, String)? {
         switch media.state {
