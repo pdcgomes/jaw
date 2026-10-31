@@ -273,6 +273,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     var pollSheet: NSWindow?
+    /// The poll form in that sheet, for the snapshot's log.
+    var pollForm: PollForm?
 
     /// The poll form, in a sheet over the window: Send closes it and sends the poll to `chat`.
     func showPollForm(_ form: PollForm, chat: String) {
@@ -281,6 +283,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             guard let self, let sheet = pollSheet else { return }
             window.endSheet(sheet)
             pollSheet = nil
+            pollForm = nil
         }
         let view = PollFormView(model: form, roles: model.roles, send: { [weak model] in
             guard let poll = form.poll else { return }
@@ -289,6 +292,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }, cancel: end)
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
         pollSheet = sheet
+        pollForm = form
         window.beginSheet(sheet)
     }
 

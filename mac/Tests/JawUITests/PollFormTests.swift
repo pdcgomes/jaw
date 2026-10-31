@@ -61,6 +61,33 @@ import Testing
     #expect(two.options.count == 2, "two stay")
 }
 
+@MainActor @Test func `each option keeps its number as others come and go, and the field of one taken out writes nothing`() {
+    let form = PollForm(chat: "Lisbon Climbing", question: "Jantar?", options: ["Ramen", "Pizza", "Tasca"])
+    #expect(form.ids == [0, 1, 2])
+    form.focus = .option(2)
+    form.remove(at: 2)
+    #expect(form.ids == [0, 1] && form.options == ["Ramen", "Pizza"] && form.focus == .option(1), "the third, being typed in, taken out")
+    form.write("Tasca do Chico", to: 2)
+    #expect(form.options == ["Ramen", "Pizza"] && form.words(of: 2).isEmpty, "its field's last write goes nowhere")
+    form.add()
+    #expect(form.ids == [0, 1, 3], "a new option has a number of its own")
+    form.write("Sushi", to: 3)
+    form.remove(at: 0)
+    form.write("Ramen", to: 0)
+    #expect(form.options == ["Pizza", "Sushi"] && form.words(of: 1) == "Pizza", "the first taken out, the others keep their words")
+    form.options = ["a", "b", "c", "d"]
+    #expect(form.ids == [1, 3, 4, 5], "options set whole keep the numbers they had, and new ones get theirs")
+    form.options = ["a", "b"]
+    #expect(form.ids == [1, 3])
+    let middle = PollForm(chat: "Lisbon Climbing", options: ["Saturday", "Sunday", "Monday"])
+    middle.focus = .option(1)
+    middle.remove(at: 1)
+    #expect(middle.options == ["Saturday", "Monday"] && middle.focus == .option(2), "the keys go to the option in its place, by its number")
+    let turned = PollForm(chat: "Lisbon Climbing", returned: SendPoll(chat: "g", question: "?", options: ["Rope", "Pads"], key: nil), said: "no")
+    turned.write("Rope", to: turned.ids[0])
+    #expect(turned.said == "no", "a field writing what it already had changes nothing")
+}
+
 @MainActor @Test func `a poll jawd turned down opens again as it was, with jawd's words, until it's changed`() {
     let turned = SendPoll(chat: "g", question: "What do we bring?", options: ["Rope", "Quickdraws"], max: 2, key: "jaw-k")
     let form = PollForm(chat: "Lisbon Climbing", returned: turned, said: "the outbox is full")

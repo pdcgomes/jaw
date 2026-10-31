@@ -92,7 +92,8 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
-                || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll")
+                || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
+            if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -136,11 +137,12 @@ enum Bench {
                 }
             }
             let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "1": 18, "2": 19, "3": 20,
-                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36]
+                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48]
             let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
                                          "down": NSDownArrowFunctionKey]
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
-            let typed = arrows[char].map { String(UnicodeScalar($0)!) } ?? (char == "return" ? "\r" : mods.contains(.shift) ? char.uppercased() : char)
+            let typed = arrows[char].map { String(UnicodeScalar($0)!) }
+                ?? (char == "return" ? "\r" : char == "tab" ? "\t" : mods.contains(.shift) ? char.uppercased() : char)
             if !step, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
                                             windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
@@ -157,7 +159,8 @@ enum Bench {
                     let glance = model.glance.isOpen ? model.window?.window.map { w in
                         " · glance centre \(Int(model.glance.panel.frame.midX - w.frame.midX)),\(Int(model.glance.panel.frame.midY - w.frame.midY)) from the window's"
                     } ?? "" : ""
-                    let said = palette + glance + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                    let form = model.window?.pollForm.map { " · poll form " + formSaid($0, sheet: model.window?.pollSheet) } ?? ""
+                    let said = palette + glance + form + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 }
@@ -201,6 +204,39 @@ enum Bench {
         let several = parts.count > 1 && parts.last == "several"
         if several { parts.removeLast() }
         return PollForm(chat: chat, question: parts.first ?? "", options: Array(parts.dropFirst()), several: several)
+    }
+
+    /// A click, as `click:120:240` has it: the left button down and up at that point in the key
+    /// window, or in `window` when the app isn't active and has none, in points from its content's
+    /// top left, through the app's own event handling.
+    static func click(_ at: String, in window: NSWindow?) {
+        let xy = at.split(separator: ":").compactMap { Double($0) }
+        guard xy.count == 2, let window = NSApp.keyWindow ?? window, let content = window.contentView else {
+            return FileHandle.standardError.write(Data("click:\(at): no point, or no window\n".utf8))
+        }
+        let point = NSPoint(x: content.frame.minX + xy[0], y: content.frame.maxY - xy[1])
+        for (type, pressure) in [(NSEvent.EventType.leftMouseDown, Float(1)), (.leftMouseUp, 0)] {
+            if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: pressure)
+            {
+                NSApp.sendEvent(event)
+            }
+        }
+    }
+
+    /// The poll form for the snapshot's log: its question, each option with its number, the field
+    /// with the keys as the form has it (an option by its number), and what has them in the key
+    /// window: the text of the field being edited, or the responder.
+    static func formSaid(_ form: PollForm, sheet: NSWindow?) -> String {
+        let focus = switch form.focus {
+        case .question?: "the question"
+        case let .option(i)?: "option \(i)"
+        case nil: "none"
+        }
+        let window = NSApp.keyWindow, responder = window?.firstResponder
+        let keys = window == nil ? "no key window" : (window === sheet ? "the sheet's " : "another window's ")
+            + ((responder as? NSTextView).map { "field, editing \"\($0.string)\"" } ?? responder.map { "\(type(of: $0))" } ?? "nothing")
+        return ([form.question] + zip(form.ids, form.options).map { "\($0):\($1)" }).joined(separator: " | ") + " · keys in \(focus), \(keys)"
     }
 
     /// A poll as its row is, for the snapshot's log: its question, each option's tally with yours

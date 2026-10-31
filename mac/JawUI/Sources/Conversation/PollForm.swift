@@ -8,6 +8,7 @@ import SwiftUI
 /// counted as jawd trims and counts them, and says the first thing in the way until then.
 @MainActor @Observable
 public final class PollForm {
+    /// A field of the form: the question, or an option's by its number in `ids`.
     public enum Field: Hashable, Sendable {
         case question, option(Int)
     }
@@ -24,19 +25,36 @@ public final class PollForm {
     /// The chat it's to, by name.
     public let chat: String
     public var question: String { didSet { said = nil } }
-    public var options: [String] { didSet { said = nil } }
+    public var options: [String] {
+        didSet {
+            said = nil
+            while ids.count < options.count {
+                ids.append(next)
+                next += 1
+            }
+            if ids.count > options.count { ids.removeLast(ids.count - options.count) }
+        }
+    }
+
     public var several: Bool { didSet { said = nil } }
     /// What jawd said when it turned this poll down, until it's changed.
     public var said: String?
     /// The field that has the keys.
     public var focus: Field?
+    /// Each option's own number, which stays with it as others are added and taken out, so each field
+    /// keeps its option.
+    public private(set) var ids: [Int]
+    @ObservationIgnored var next: Int
 
     public init(chat: String, question: String = "", options: [String] = ["", ""], several: Bool = false, said: String? = nil) {
+        let options = options.count < 2 ? options + Array(repeating: "", count: 2 - options.count) : options
         self.chat = chat
         self.question = question
-        self.options = options.count < 2 ? options + Array(repeating: "", count: 2 - options.count) : options
+        self.options = options
         self.several = several
         self.said = said
+        ids = Array(options.indices)
+        next = options.count
     }
 
     /// A poll jawd turned down, as it was, with jawd's words.
@@ -82,12 +100,13 @@ public final class PollForm {
     public func returned(in field: Field) -> Returned {
         switch field {
         case .question:
-            focus = .option(0)
+            if let first = ids.first { focus = .option(first) }
             return .moved
-        case let .option(i):
-            let words = options.indices.contains(i) && !Self.trimmed(options[i]).isEmpty
-            if words, i + 1 < options.count {
-                focus = .option(i + 1)
+        case let .option(id):
+            let i = ids.firstIndex(of: id)
+            let words = i.map { !Self.trimmed(options[$0]).isEmpty } ?? false
+            if words, let i, i + 1 < options.count {
+                focus = .option(ids[i + 1])
                 return .moved
             }
             if words, options.count < Self.most {
@@ -101,15 +120,33 @@ public final class PollForm {
     /// Another option, after the last, which takes the keys.
     public func add() {
         guard options.count < Self.most else { return }
+        let id = next
+        ids.append(id)
+        next += 1
         options.append("")
-        focus = .option(options.count - 1)
+        focus = .option(id)
     }
 
-    /// Takes an option out, two staying at least.
+    /// Takes an option out, two staying at least; when its field had the keys, they go to the option
+    /// in its place, or to the last when it was the last.
     public func remove(at i: Int) {
         guard options.count > 2, options.indices.contains(i) else { return }
+        let gone = ids.remove(at: i)
         options.remove(at: i)
-        if case let .option(at)? = focus, at >= options.count { focus = .option(options.count - 1) }
+        if focus == .option(gone) { focus = .option(ids[min(i, ids.count - 1)]) }
+    }
+
+    /// The words of option `id`, for its field; none once it's been taken out.
+    public func words(of id: Int) -> String {
+        ids.firstIndex(of: id).map { options[$0] } ?? ""
+    }
+
+    /// The words typed in option `id`'s field, written unless the option has been taken out: AppKit
+    /// ends the editing of a field whose option went while it had the keys, and SwiftUI then writes
+    /// what the field held.
+    public func write(_ words: String, to id: Int) {
+        guard let i = ids.firstIndex(of: id), options[i] != words else { return }
+        options[i] = words
     }
 }
 
@@ -143,14 +180,16 @@ public struct PollFormView: View {
                 .onSubmit { returned(.question) }
             VStack(alignment: .leading, spacing: Space.s) {
                 Text("Options").textStyle(.caption).tone(.secondary, roles)
-                ForEach(model.options.indices, id: \.self) { i in
+                ForEach(Array(model.ids.enumerated()), id: \.element) { i, id in
                     HStack(spacing: Space.s) {
-                        TextField("Option \(i + 1)", text: $model.options[i])
+                        TextField("Option \(i + 1)", text: Binding(get: { model.words(of: id) }, set: { model.write($0, to: id) }))
                             .textFieldStyle(.roundedBorder)
-                            .focused($focused, equals: .option(i))
-                            .onSubmit { returned(.option(i)) }
+                            .focused($focused, equals: .option(id))
+                            .onSubmit { returned(.option(id)) }
                         if model.options.count > 2 {
-                            Button { model.remove(at: i) } label: { Image(systemName: "xmark.circle.fill").tone(.tertiary, roles) }
+                            Button {
+                                if let at = model.ids.firstIndex(of: id) { model.remove(at: at) }
+                            } label: { Image(systemName: "xmark.circle.fill").tone(.tertiary, roles) }
                                 .buttonStyle(.borderless)
                                 .help("Take this option out")
                         }
