@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::super::read::{self, CHAT_JOINS, CHAT_SELECT, ChatCursor, ChatRow, Last, chat_row};
+use super::super::read::{self, CHAT_SELECT, ChatCursor, ChatRow, Last, OWN_JOINS, chat_row};
 use super::{List, chats, chats_above, community_groups, community_members, held};
 
 /// A row of a chat list: a chat, or a community with what it sums up of the groups of it the list
@@ -125,9 +125,9 @@ fn community(row: &ChatRow) -> Option<&str> {
     }
 }
 
-/// Community `id`'s row, if jaw has it as a community.
+/// Community `id`'s row, if jaw has it as a community, with its own newest message as its last.
 pub fn community_row(db: &Connection, id: &str) -> Result<Option<ChatRow>> {
-    let sql = format!("{CHAT_SELECT} FROM chats c {CHAT_JOINS} WHERE c.id = ?1 AND c.kind = 'community'");
+    let sql = format!("{CHAT_SELECT} FROM chats c {OWN_JOINS} WHERE c.id = ?1 AND c.kind = 'community'");
     Ok(db.prepare_cached(&sql)?.query_row([id], chat_row).optional()?)
 }
 

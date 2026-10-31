@@ -632,6 +632,31 @@ async fn a_community_a_list_holds_for_itself_alone_sits_at_its_own_place_held_wh
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_community_a_list_holds_for_itself_alone_shows_its_own_newest_message_not_its_groups() {
+    let bed = Bed::new(brisk());
+    bairro(&bed).await;
+    bed.apply(vec![
+        read_up_to(AVISOS, "a1"),
+        read_up_to(FESTA, "f2"),
+        Change::Chat(Chat { id: BAIRRO.into(), marked_unread: Some(true), ..Chat::default() }),
+    ])
+    .await;
+    let mut watcher = bed.watcher(64);
+    let unread = Held::top(&mut watcher, "unread").await;
+    assert_eq!(shape(&unread.model), ["Ana", "Regata", "Bairro 0/0"]);
+    assert_eq!(
+        unread.row(BAIRRO)["last"],
+        Value::Null,
+        "none of its own, not archived Biblioteca's, which Unread lacks"
+    );
+    bed.apply(vec![said(BAIRRO, "k1", AT + 2)]).await;
+    let unread = Held::top(&mut watcher, "unread").await;
+    assert_eq!(unread.row(BAIRRO)["last"]["summary"], json!("k1"), "its own");
+    let all = Held::top(&mut watcher, "all").await;
+    assert_eq!(all.row(BAIRRO)["last"]["summary"], json!("f2"), "where a list holds its groups, the newest of theirs");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_community_sits_among_the_pinned_at_its_own_place_above_its_groups() {
     let bed = Bed::new(brisk());
     bairro(&bed).await;

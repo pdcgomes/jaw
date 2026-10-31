@@ -308,6 +308,15 @@ pub(super) fn chat_name(
     }
 }
 
+/// CHAT_JOINS with a community's own newest message, as a chat list gathers it: the list shows the
+/// newest message of the groups of it it holds in its place, and its own when none of them has one
+/// (lists::communities).
+pub(super) const OWN_JOINS: &str = "
+    LEFT JOIN people p ON p.n = c.person
+    LEFT JOIN messages m ON m.n = c.last_message
+    LEFT JOIN person_jids mj ON mj.n = m.sender
+    LEFT JOIN people mp ON mp.n = mj.person";
+
 pub(super) fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
     let id: String = r.get(1)?;
     let name = chat_name(r.get(5)?, r.get(29)?, [r.get(16)?, r.get(17)?, r.get(18)?], &id);
