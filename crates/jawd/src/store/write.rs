@@ -1766,10 +1766,13 @@ fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Resu
 /// tombstones, what waits for its messages, its folder places, its settings, the waits for jaw's
 /// changes to them still on their way, and where it was read), and writes for it go to `keep` from
 /// here on, as do the merges going into it; its messages follow a few at a time, and what's waiting
-/// to be sent follows its message. What it kept for a message `keep` already has is done to that
-/// message now, as it would be to one of its own as it moves: a deletion for you, and what waited
-/// for it. Only a person's one-to-one chats merge, so sending's group tables (recipients, settled,
-/// regroup) never take part.
+/// to be sent follows its message. Each setting of the chat kept is the newest held for it under
+/// the two chats' JIDs, jaw's change still on its way counting at its time (chat_actions::settled),
+/// and only one nothing is held for is the two chats' combined: pinned or muted if either is,
+/// archived only if both are, marked if either is. What it kept for a message `keep` already has
+/// is done to that message now, as it would be to one of its own as it moves: a deletion for you,
+/// and what waited for it. Only a person's one-to-one chats merge, so sending's group tables
+/// (recipients, settled, regroup) never take part.
 fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
     let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
     let groups: i64 = db
@@ -1781,6 +1784,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
     db.prepare_cached("INSERT OR IGNORE INTO sync_state (key, value) VALUES (?1, '')")?
         .execute([merge_started(*gone)])?;
+    let settled = chat_actions::settled(db, keep_id, gone_id)?;
     chat_actions::merging(db, gone_id, keep_id)?;
     repoint(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     carry(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
@@ -1818,6 +1822,9 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     )?
     .execute(params![keep, gone, seq, opened, latest])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
+    if let Some(settled) = settled {
+        upsert_chat(db, stamps, &settled)?;
+    }
     merge_reads(db, stamps, *keep, *gone)
 }
 
@@ -1994,7 +2001,7 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     carry(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
     let started = db.prepare_cached("DELETE FROM sync_state WHERE key = ?1")?.execute([merge_started(gone)])? > 0;
     if !started && could_chain(db, keep)? {
-        merge_settings_again(db, stamps, keep, gone)?;
+        merge_settings_again(db, stamps, (keep, &keep_jid), (gone, &gone_jid))?;
     }
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
@@ -2017,7 +2024,9 @@ fn could_chain(db: &Connection, keep: i64) -> Result<bool> {
 /// jawd started for a person with three JIDs or more ends: a draft or a pin for another of the
 /// person's chats may have landed on `gone` since, through a chain of merges, and a draft.set that
 /// was answered is never lost. Its frecency, which start_merge added to `keep`'s, isn't added twice.
-fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
+fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: (i64, &str), gone: (i64, &str)) -> Result<()> {
+    let settled = chat_actions::settled(db, keep.1, gone.1)?;
+    let ((keep, _), (gone, _)) = (keep, gone);
     let seq = stamps.seq(CHAT, Some(keep));
     let changed = db
         .prepare_cached(
@@ -2039,6 +2048,9 @@ fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i
         stamps.record(db, CHAT, keep, Some(keep), seq)?;
         // Marked unread or not is part of what settle writes, for it and the chats merging into it.
         stamps.unsettle(keep);
+    }
+    if let Some(settled) = settled {
+        upsert_chat(db, stamps, &settled)?;
     }
     Ok(())
 }

@@ -27,7 +27,7 @@ use wa_proto::wa_web_protobuf_sync_action::SyncActionValue;
 
 use super::outbox::{OUTBOX_MOST, SHOWN_DELETED, app_state_row, waiting};
 use super::{
-    Amendment, Chat, Doing, Read, Stamps, apply_amendment, chat_jid, located, now_ms, set_read, their_jids,
+    Amendment, Change, Chat, Doing, Read, Stamps, apply_amendment, chat_jid, located, now_ms, set_read, their_jids,
     upsert_chat, user_jid,
 };
 
@@ -64,6 +64,8 @@ const HELD_UNDER: &str = "SELECT key, value FROM app_state WHERE key >= ?1 AND k
 
 /// The settings jaw's patches set, each naming its chat second in its index.
 const SETTINGS: [&str; 5] = ["pin_v1", "archive", "mute", "markChatAsRead", "star"];
+/// Those of a chat itself, whose index is that and its chat, which a merge combines.
+const CHAT_SETTINGS: [&str; 4] = ["pin_v1", "archive", "mute", "markChatAsRead"];
 
 /// A chat action as the writer takes it: the chat as the interface named it, what to do, and where
 /// to say what it came to. Each patch is an AppStatePatch the caller made, carrying the time it's
@@ -402,18 +404,44 @@ fn newest_held(
     kept: &str,
     waiting: Option<&Waiting>,
 ) -> Result<Option<Held>> {
-    let mut newest = waiting.map(|waiting| (waiting.at, waiting.named.clone(), Held::Back));
     // A star's setting is its message's: its chat, its ID and whether it's yours, whichever JID
     // names its sender.
-    let mut setting = index[..if index[0] == "star" { index.len().min(4) } else { 2 }].to_vec();
-    let mut jids = their_jids(db, kept)?;
-    jids.push(kept.to_string());
+    let setting = &index[..if index[0] == "star" { index.len().min(4) } else { 2 }];
+    let own = serde_json::to_string(index)?;
+    let newest = newest(db, setting, &jids_of(db, &[kept])?, &[&own], waiting)?;
+    Ok(newest.filter(|(time, under, _)| (*time, under.as_str()) > (at, own.as_str())).map(|(.., held)| held))
+}
+
+/// The JIDs `chats`, each a chat's JID, and those of their person, by any of which WhatsApp may name
+/// one of them.
+fn jids_of(db: &Connection, chats: &[&str]) -> Result<Vec<String>> {
+    let mut jids = Vec::new();
+    for chat in chats {
+        jids.extend(their_jids(db, chat)?);
+        jids.push(chat.to_string());
+    }
     jids.sort_unstable();
     jids.dedup();
-    let own = serde_json::to_string(index)?;
+    Ok(jids)
+}
+
+/// The newest held for `setting`, a chat setting's index up to its chat, or a star's up to whether
+/// its message is yours, under each of `jids` naming its chat, by its time and then its index, with
+/// that index as app_state keys it: what WhatsApp last sent under each index but those of `skip`,
+/// and under the one jaw's waiting patch named (`waiting`), that patch at its time, which WhatsApp
+/// ends with there and the chat already shows (`Held::Back`).
+fn newest(
+    db: &Connection,
+    setting: &[String],
+    jids: &[String],
+    skip: &[&str],
+    waiting: Option<&Waiting>,
+) -> Result<Option<(i64, String, Held)>> {
+    let mut newest = waiting.map(|waiting| (waiting.at, waiting.named.clone(), Held::Back));
+    let mut setting = setting.to_vec();
     let mut held = db.prepare_cached(HELD_UNDER)?;
     for jid in jids {
-        setting[1] = jid;
+        setting[1] = jid.clone();
         // Its keys under the JID: its JSON up to the setting's last closing quote, then the `]` or
         // `,` after it, which both come before `~`.
         let under = serde_json::to_string(&setting)?;
@@ -421,7 +449,7 @@ fn newest_held(
         let mut rows = held.query(params![from, format!("{from}~")])?;
         while let Some(row) = rows.next()? {
             let (key, value): (String, Vec<u8>) = (row.get(0)?, row.get(1)?);
-            if key == own || waiting.is_some_and(|waiting| key == waiting.named) {
+            if skip.contains(&key.as_str()) || waiting.is_some_and(|waiting| key == waiting.named) {
                 continue;
             }
             let time = SyncActionValue::decode(value.as_slice()).map_or(0, |v| v.timestamp.unwrap_or_default());
@@ -431,7 +459,72 @@ fn newest_held(
             }
         }
     }
-    Ok(newest.filter(|(time, under, _)| (*time, under.as_str()) > (at, own.as_str())).map(|(.., held)| held))
+    Ok(newest)
+}
+
+/// What chat `keep`'s settings are to be once chat `gone`, each named by its JID, merges into it,
+/// the two chats' own having been combined: each the newest held for it under the JIDs of either
+/// and of their person, weighed as what WhatsApp sends is (`newest`), so the merged chat shows what
+/// will last, a request is judged against it, and the next full fetch leaves it. Of jaw's waits
+/// for a setting under `keep`'s JID, as jaw keeps it, and under `gone`'s, which become one as
+/// `merging` moves `gone`'s, the one for the later patch counts, at its time, with the value the
+/// chat it was queued for shows; neither index they named counts what WhatsApp sent under it,
+/// since WhatsApp ends there with jaw's patch. A setting nothing is held for is left out, so the
+/// two chats' combination stands; None when that's every setting. Taken before `merging` moves the
+/// waits and the chats are combined.
+pub(super) fn settled(db: &Connection, keep: &str, gone: &str) -> Result<Option<Chat>> {
+    let kept = chat_jid(db, keep)?;
+    let jids = jids_of(db, &[&kept, keep, gone])?;
+    let mut settled = Chat { id: keep.to_string(), ..Chat::default() };
+    for setting in CHAT_SETTINGS {
+        let mut waits = Vec::new();
+        for chat in [kept.as_str(), gone] {
+            let key = serde_json::to_string(&[setting, chat])?;
+            let wait: Option<(String, i64)> =
+                db.prepare_cached(AWAITED)?.query_row([&key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            waits.extend(wait.map(|(named, at)| (Waiting { named, at }, chat)));
+        }
+        // As `merging` moves them, the later patch's wait stays, and the kept chat's of two at one time.
+        let staying = waits.iter().reduce(|staying, wait| if wait.0.at > staying.0.at { wait } else { staying });
+        let skip: Vec<&str> = waits.iter().map(|(wait, _)| wait.named.as_str()).collect();
+        let prefix = [setting.to_string(), kept.clone()];
+        let shown = match newest(db, &prefix, &jids, &skip, staying.map(|(wait, _)| wait))? {
+            None => continue,
+            Some((.., Held::Instead { index, value })) => {
+                let changes = crate::convert::app_state::mutation(&index, &value).changes;
+                changes.into_iter().find_map(|change| match change {
+                    Change::Chat(chat) => Some(chat),
+                    _ => None,
+                })
+            }
+            Some(_) => {
+                let was = match staying {
+                    Some((_, chat)) => state(db, chat)?,
+                    None => None,
+                };
+                was.map(|was| Chat {
+                    pinned: Some(was.pinned),
+                    archived: Some(was.archived),
+                    muted_until: Some(was.muted_until),
+                    marked_unread: Some(was.marked),
+                    ..Chat::default()
+                })
+            }
+        };
+        let Some(shown) = shown else { continue };
+        match setting {
+            "pin_v1" => settled.pinned = shown.pinned,
+            "archive" => settled.archived = shown.archived,
+            "mute" => settled.muted_until = shown.muted_until,
+            "markChatAsRead" => settled.marked_unread = shown.marked_unread,
+            _ => {}
+        }
+    }
+    let any = settled.pinned.is_some()
+        || settled.archived.is_some()
+        || settled.muted_until.is_some()
+        || settled.marked_unread.is_some();
+    Ok(any.then_some(settled))
 }
 
 /// Chat `gone` is merging into `keep`, each named by its JID: what waited under `gone`'s JID waits
@@ -1944,6 +2037,138 @@ mod tests {
             (hour, None),
             "jaw's echo, older than the hour's mute, ends the wait and changes nothing"
         );
+    }
+
+    /// Chat `chat` archived from jaw at `at`, or brought back, with the unpin the handler builds for
+    /// every one.
+    fn archive_at(chat: &str, archived: bool, at: i64, id: &str) -> Does {
+        Does::Set(Setting::Archive {
+            archived,
+            patch: patch_of(&["archive", chat], &archive_value(archived, at), id),
+            unpin: Some(patch_of(&["pin_v1", chat], &pin_value(false, at + 1), &format!("{id}u"))),
+        })
+    }
+
+    /// Chat `chat` muted from jaw at `at` until `until`.
+    fn mute_at(chat: &str, until: i64, at: i64, id: &str) -> Does {
+        Does::Set(Setting::Mute { until, patch: patch_of(&["mute", chat], &mute_value(until, at), id) })
+    }
+
+    #[test]
+    fn as_her_chats_merge_while_jaws_archive_waits_the_chat_stays_archived_so_bringing_it_back_isnt_so_already() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA, archive_at(ANA, true, AT, "a1")), Acted::Queued { .. }));
+        // Her LID's chat, never archived, merges into her number's (round three's A1): the newest
+        // held is jaw's archive, which every device ends with.
+        her_lid_joined(&db);
+        assert!(chat(&db, ANA).1, "still archived");
+        let back = acted(&db, ANA, archive_at(ANA, false, AT + 1_000, "a2"));
+        assert!(matches!(back, Acted::Queued { .. }), "so bringing it back isn't so already: {back:?}");
+        arrives(&db, &["archive", ANA], &archive_value(true, AT), 1);
+        assert!(!chat(&db, ANA).1, "and the archive's echo leaves it brought back");
+    }
+
+    #[test]
+    fn as_her_chats_merge_while_jaws_unpin_waits_the_chat_stays_unpinned_though_the_phone_pinned_both() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT - 60_000), 1);
+        arrives(&db, &["pin_v1", ANA], &pin_value(true, AT - 50_000), 2);
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, false, AT, "u1")), Acted::Queued { .. }));
+        // Jaw's unpin is newer than the phone's pin under her LID (round three's A2).
+        her_lid_joined(&db);
+        assert_eq!(chat(&db, ANA).0, 0, "still unpinned");
+        let pin = acted(&db, ANA, pin_at(ANA, true, AT + 1_000, "p1"));
+        assert!(matches!(pin, Acted::Queued { .. }), "so pinning it isn't so already: {pin:?}");
+        arrives(&db, &["pin_v1", ANA], &pin_value(false, AT), 3);
+        assert_eq!(chat(&db, ANA).0, AT + 1_000, "and the unpin's echo leaves jaw's pin");
+    }
+
+    #[test]
+    fn as_her_chats_merge_while_jaws_mark_read_waits_the_chat_stays_unmarked_though_the_phone_marked_her_lids() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT - 120_000), from_ana("m2", AT - 110_000)]);
+        chats(&db, &[ANA_LID]);
+        arrives(&db, &["markChatAsRead", ANA_LID], &unread_value(AT - 60_000), 1);
+        assert!(matches!(acted(&db, ANA, mark_at(ANA, false, "m2", AT, "r1")), Acted::Queued { .. }));
+        // Jaw's mark read is newer than the phone's mark under her LID (round three's A3).
+        her_lid_joined(&db);
+        assert!(!chat(&db, ANA).3, "still not marked");
+        let mark = acted(&db, ANA, mark_at(ANA, true, "m2", AT + 1_000, "u1"));
+        assert!(matches!(mark, Acted::Queued { .. }), "so marking it unread isn't so already: {mark:?}");
+        arrives(&db, &["markChatAsRead", ANA], &read_value(AT), 2);
+        assert!(chat(&db, ANA).3, "and the mark read's echo leaves jaw's mark");
+    }
+
+    #[test]
+    fn as_her_chats_merge_while_two_of_jaws_mutes_wait_the_chat_shows_the_later_though_it_ends_sooner() {
+        let (hour, two) = (AT + 3_600_000, AT + 7_200_000);
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA_LID, mute_at(ANA_LID, two, AT, "m1")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, ANA, mute_at(ANA, hour, AT + 1, "m2")), Acted::Queued { .. }));
+        // The wait for jaw's later mute stays, and so does its value (round three's A4).
+        her_lid_joined(&db);
+        assert_eq!((chat(&db, ANA).2, waits(&db)), (hour, 1), "muted for the hour, with one wait");
+        let longer = acted(&db, ANA, mute_at(ANA, two, AT + 2, "m3"));
+        assert!(matches!(longer, Acted::Queued { .. }), "so two hours isn't so already: {longer:?}");
+        arrives(&db, &["mute", ANA_LID], &mute_value(two, AT), 1);
+        arrives(&db, &["mute", ANA], &mute_value(hour, AT + 1), 2);
+        assert_eq!(chat(&db, ANA).2, two, "and the earlier patches' echoes leave jaw's two hours");
+    }
+
+    #[test]
+    fn as_her_chats_merge_what_was_held_back_under_the_index_of_jaws_earlier_wait_doesnt_count() {
+        let (hour, two) = (AT + 3_600_000, AT + 7_200_000);
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA_LID, mute_at(ANA_LID, two, AT, "m1")), Acted::Queued { .. }));
+        // The phone's unmute under her LID, later by its time, which WhatsApp took before jaw's mute
+        // there and so ends with jaw's mute in its place.
+        arrives(&db, &["mute", ANA_LID], &mute_value(0, AT + 5_000), 1);
+        assert_eq!(chat(&db, ANA_LID).2, two, "held back");
+        assert!(matches!(acted(&db, ANA, mute_at(ANA, hour, AT + 1, "m2")), Acted::Queued { .. }));
+        her_lid_joined(&db);
+        assert_eq!(chat(&db, ANA).2, hour, "jaw's later mute is the newest held once its earlier wait goes");
+        arrives(&db, &["mute", ANA_LID], &mute_value(two, AT), 2);
+        assert_eq!(chat(&db, ANA).2, hour, "the earlier mute's echo is older than the later");
+        arrives(&db, &["mute", ANA], &mute_value(hour, AT + 1), 3);
+        assert_eq!((chat(&db, ANA).2, waits(&db)), (hour, 0), "and the later's ends the wait");
+    }
+
+    #[test]
+    fn as_her_chats_merge_after_jaws_archive_echoed_the_chat_stays_archived_as_app_state_holds_it() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA, archive_at(ANA, true, AT, "a1")), Acted::Queued { .. }));
+        arrives(&db, &["archive", ANA], &archive_value(true, AT), 1);
+        assert_eq!(waits(&db), 0, "the echo ends the wait");
+        // Her LID's chat, never archived, merges in (round three's A5, main's X2): the newest held is
+        // the archive app state holds under her number.
+        her_lid_joined(&db);
+        assert!(chat(&db, ANA).1, "still archived");
+        arrives(&db, &["archive", ANA], &archive_value(true, AT), 2);
+        assert!(chat(&db, ANA).1, "and so after the next full fetch");
+    }
+
+    #[test]
+    fn as_a_merge_an_earlier_jawd_began_ends_while_jaws_archive_waits_the_chat_stays_archived() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        // A third JID of hers, by which a chain of merges could have put a setting on her LID's chat,
+        // so the merge's last step combines the two chats' settings again.
+        let old = "351910000099@s.whatsapp.net";
+        written(
+            &db,
+            &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into(), old.into()], ..Person::default() })],
+        );
+        // As if an earlier jawd began the merge: it leaves no mark that this one did.
+        db.execute("DELETE FROM sync_state WHERE key LIKE 'merge.started.%'", []).unwrap();
+        assert!(matches!(acted(&db, ANA, archive_at(ANA, true, AT, "a1")), Acted::Queued { .. }));
+        written(&db, &[Change::MergeStep(None)]);
+        let merging: i64 = db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0)).unwrap();
+        assert_eq!((merging, chat(&db, ANA).1), (0, true), "merged, and archived as jaw's archive on its way has it");
     }
 
     #[test]
