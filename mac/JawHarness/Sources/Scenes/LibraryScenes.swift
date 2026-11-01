@@ -13,6 +13,66 @@ extension HarnessScene {
     }
 }
 
+extension HarnessScene {
+    static var libraryRows: HarnessScene {
+        HarnessScene(
+            id: "library-rows", title: "Library rows", symbol: "list.bullet",
+            synopsis: "Files, links and voice messages as the library's rows, each with who shared it, where and when, one file selected",
+            section: .panes, covers: [LibraryController.self, LibraryLayout.self], axes: [.look], width: 560,
+        ) { LibraryRowsScene(conditions: $0) }
+    }
+
+    static var libraryAll: HarnessScene {
+        HarnessScene(
+            id: "library-all", title: "Library, every kind", symbol: "square.stack",
+            synopsis: "Every kind's window as a shelf of each: two lines of photos and videos, three files, three links and two voice messages, each headed by its kind and count",
+            section: .panes, covers: [LibraryController.self, LibraryLayout.self], axes: [.look], width: 560,
+        ) { LibraryAllScene(conditions: $0) }
+    }
+}
+
+private struct LibraryRowsScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Files",
+            note: "Each file's type in its symbol, its name, its type, size and pages, who shared it and in which chat, and when at its right; one not here says so first; a name too long for its row cut short, its date whole; the first selected. In bubbles each row is a card, in lines they're parted by hairlines.",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: .file, selected: "LF0", height: 340)
+        }
+        SpecimenGroup(
+            title: "Links",
+            note: "Each link's title, or its URL where it had none, its host in the accent, who and when; until jawd sends a link's thumbnail (P14) its well shows the link's mark.",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: .link, height: 290)
+        }
+        SpecimenGroup(
+            title: "Voice messages",
+            note: "▶ in the accent, the bars, the length, then who, where and when at the right: even bars until jawd sends a voice item's waveform (P14), as Inês's is; your own, with one, follows it.",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: .voice, height: 200)
+        }
+    }
+}
+
+private struct LibraryAllScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Every kind",
+            note: "Photos and videos together, newest first, in two lines of tiles; then three files, three links and two voice messages, each shelf headed by its kind, jawd's count and ›, which goes to that kind. A shelf with nothing isn't drawn.",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: nil, height: 880)
+        }
+    }
+}
+
 /// A library pane of the made-up items, at `kind`, as tall as `height`, its pictures decoded as it
 /// draws them, the item `selected` selected.
 struct LibrarySpecimen: View {
