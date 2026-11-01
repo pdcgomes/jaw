@@ -459,6 +459,7 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
         "app_state_awaiting",
         &[
             ("key", "'[\"mute\",\"351910000002@s.whatsapp.net\"]'"),
+            ("named", "'[\"mute\",\"100000000002@lid\"]'"),
             ("at", "1790000000990"),
             ("outbox", "1"),
             ("echo_by", "7"),

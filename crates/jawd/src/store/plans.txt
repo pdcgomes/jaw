@@ -2485,10 +2485,10 @@ SELECT at FROM app_state_awaiting WHERE key = ?1
     SEARCH app_state_awaiting USING PRIMARY KEY (key=?)
 
 -- src/store/write/chat_actions.rs
-INSERT INTO app_state_awaiting (key, at, outbox) VALUES (?1, ?2, ?3) ON CONFLICT (key) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = NULL
+INSERT INTO app_state_awaiting (key, named, at, outbox) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key) DO UPDATE SET named = excluded.named, at = excluded.at, outbox = excluded.outbox, echo_by = NULL
 
 -- src/store/write/chat_actions.rs
-SELECT a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox) FROM app_state_awaiting a WHERE a.key = ?1
+SELECT a.named, a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox) FROM app_state_awaiting a WHERE a.key = ?1
     SEARCH a USING PRIMARY KEY (key=?)
     CORRELATED SCALAR SUBQUERY 1
       SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
@@ -2502,11 +2502,11 @@ DELETE FROM app_state_awaiting WHERE echo_by IS NOT NULL AND echo_by <= ?1
     SEARCH app_state_awaiting USING INDEX app_state_awaiting_by_echo (echo_by>? AND echo_by<?)
 
 -- src/store/write/chat_actions.rs
-SELECT key, at, outbox, echo_by FROM app_state_awaiting WHERE key >= ?1 AND key < ?2
+SELECT key, named, at, outbox, echo_by FROM app_state_awaiting WHERE key >= ?1 AND key < ?2
     SEARCH app_state_awaiting USING PRIMARY KEY (key>? AND key<?)
 
 -- src/store/write/chat_actions.rs
-INSERT INTO app_state_awaiting (key, at, outbox, echo_by) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = excluded.echo_by WHERE excluded.at > app_state_awaiting.at
+INSERT INTO app_state_awaiting (key, named, at, outbox, echo_by) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (key) DO UPDATE SET named = excluded.named, at = excluded.at, outbox = excluded.outbox, echo_by = excluded.echo_by WHERE excluded.at > app_state_awaiting.at
 
 -- src/store/write/chat_actions.rs
 SELECT key, value FROM app_state WHERE key >= ?1 AND key < ?2

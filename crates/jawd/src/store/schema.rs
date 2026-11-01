@@ -1492,19 +1492,25 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // (`measure_the_communities_migration`). It drops no table, and nothing refers to what it
     // changes, so it needs neither a data step's backup nor its check of every foreign key.
     COMMUNITIES_GATHERED,
-    // 29: what WhatsApp sends for an app-state index while jaw's own patch for it is on its way,
-    // held back, a schema step: one new table and an index on it, which cost the same however big
-    // jaw.db is, and which nothing refers to.
+    // 29: what WhatsApp sends for a setting while jaw's own patch for it is on its way, held back,
+    // a schema step: one new table and an index on it, which cost the same however big jaw.db is,
+    // and which nothing refers to.
     "
-    -- Class: jaw's own. For each app-state index jaw has queued a patch for, its latest patch:
-    -- WhatsApp sends app state back in the order it took it, so what it sends for the index before
-    -- that patch's echo came before the patch, and is kept raw in app_state but not applied. A row
-    -- goes when its patch's echo is converted, when the converter passes echo_by without it, when
-    -- its outbox row has gone without going, or with its patch's refusal. Never dropped or rebuilt;
-    -- any rebuild copies it as it is. One row an index at most.
+    -- Class: jaw's own. For each setting jaw has queued a patch for (a chat's pin, archive, mute or
+    -- mark, or a message's star), its latest patch: WhatsApp sends app state back in the order it
+    -- took it, so what it sends under the index that patch named before the patch's echo came
+    -- before the patch, and is kept raw in app_state but not applied. A row goes when its patch's
+    -- echo is converted, when the converter passes echo_by without it, when its outbox row has gone
+    -- without going, or with its patch's refusal. Never dropped or rebuilt; any rebuild copies it as
+    -- it is. One row a setting at most.
     CREATE TABLE app_state_awaiting (
-        -- The index as app_state keys it: serde_json of the index's strings.
+        -- The setting, as app_state keys an index (serde_json of its strings) but with its chat
+        -- named by the JID jaw keeps the chat by, and a star's sender as '0': WhatsApp may name a
+        -- chat by any JID of its person, and a group message's sender by any of theirs, and a chat
+        -- merging into another takes its waits with it.
         key TEXT PRIMARY KEY CHECK (json_valid(key)),
+        -- The index the patch named, as app_state keys it: under it, WhatsApp ends with the patch.
+        named TEXT NOT NULL CHECK (json_valid(named)),
         -- The time jaw's latest patch for it carries, its SyncActionValue.timestamp.
         at INTEGER NOT NULL,
         -- That patch's outbox row (outbox.n, never reused).
@@ -2810,18 +2816,24 @@ mod tests {
             .unwrap();
         assert!(!made, "from the version before the migration");
         migrate(&mut db).unwrap();
-        let wait = |key: &str, outbox: i64| {
+        let wait = |key: &str, named: &str, outbox: i64| {
             db.execute(
-                "INSERT INTO app_state_awaiting (key, at, outbox) VALUES (?1, 5, ?2)",
-                rusqlite::params![key, outbox],
+                "INSERT INTO app_state_awaiting (key, named, at, outbox) VALUES (?1, ?2, 5, ?3)",
+                rusqlite::params![key, named, outbox],
             )
         };
-        let ana = r#"["pin_v1","351910000002@s.whatsapp.net"]"#;
-        wait(ana, 1).unwrap();
-        assert!(wait(ana, 2).is_err(), "one wait an index");
-        assert!(wait(r#"["mute","351910000002@s.whatsapp.net"]"#, 1).is_err(), "one index an outbox row");
-        assert!(wait("pin_v1 351910000002@s.whatsapp.net", 3).is_err(), "keyed as app_state is, by the index as JSON");
-        let late = db.execute("INSERT INTO app_state_awaiting (key, at, outbox) VALUES ('[\"x\"]', 'soon', 4)", []);
+        let (ana, her_lid) = (r#"["pin_v1","351910000002@s.whatsapp.net"]"#, r#"["pin_v1","100000000002@lid"]"#);
+        wait(ana, her_lid, 1).unwrap();
+        assert!(wait(ana, ana, 2).is_err(), "one wait an index");
+        assert!(wait(r#"["mute","351910000002@s.whatsapp.net"]"#, ana, 1).is_err(), "one index an outbox row");
+        assert!(wait("pin_v1 351910000002@s.whatsapp.net", ana, 3).is_err(), "keyed by an index as JSON");
+        assert!(wait(r#"["archive","351910000002@s.whatsapp.net"]"#, "archive", 3).is_err(), "naming one as JSON");
+        let unnamed = db.execute("INSERT INTO app_state_awaiting (key, at, outbox) VALUES ('[\"x\"]', 5, 4)", []);
+        assert!(unnamed.is_err(), "a wait keeps the index its patch named");
+        let late = db.execute(
+            "INSERT INTO app_state_awaiting (key, named, at, outbox) VALUES ('[\"x\"]', '[\"x\"]', 'soon', 4)",
+            [],
+        );
         assert!(late.is_err(), "a time is a number");
         let echo_by: Option<i64> = db.query_row("SELECT echo_by FROM app_state_awaiting", [], |r| r.get(0)).unwrap();
         assert_eq!(echo_by, None, "until WhatsApp has taken it");
