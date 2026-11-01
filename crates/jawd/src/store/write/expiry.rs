@@ -115,6 +115,8 @@ const OPEN_UNTIL: &str = "UPDATE messages SET expires_at = iif(expires_at < ?2, 
 const PLAYED: &str = "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at, target)
     VALUES (?1, ?2, 'played', ?3, ?4, ?4, ?5)";
 const OPEN_IN: &str = "SELECT m.chat FROM opened o JOIN messages m ON m.n = o.message WHERE o.message = ?1";
+/// Message ?1's ID, if it's open here.
+pub(super) const OPEN_HERE: &str = "SELECT m.id FROM opened o JOIN messages m ON m.n = o.message WHERE o.message = ?1";
 const STILL_OPEN: &str = "SELECT message FROM opened ORDER BY message LIMIT ?1";
 /// Whether message ?1 is someone else's view-once message.
 const ONCE: &str = "SELECT chat FROM messages WHERE n = ?1 AND view_once AND NOT mine";

@@ -2769,6 +2769,11 @@ SELECT m.chat FROM opened o JOIN messages m ON m.n = o.message WHERE o.message =
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/expiry.rs
+SELECT m.id FROM opened o JOIN messages m ON m.n = o.message WHERE o.message = ?1
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
 SELECT message FROM opened ORDER BY message LIMIT ?1
     SCAN opened
 

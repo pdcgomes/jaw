@@ -25,15 +25,46 @@ use crate::store::{Change, Lane, unpack};
 /// How long past its length an opened message waits for its interface to close it before it goes.
 const LEFT_OPEN_MS: i64 = 60_000;
 
-/// The view-once messages open now: by n, the connection that opened each and its answer.
+/// The view-once messages open now: by n, the connection that opened each, its ID and its answer.
 #[derive(Default)]
 pub(super) struct Open {
-    open: Mutex<HashMap<i64, (u64, Value)>>,
+    open: Mutex<HashMap<i64, (u64, String, Value)>>,
 }
 
 impl Open {
     pub(super) fn count(&self) -> u64 {
         self.open.lock().expect("view-once messages open").len() as u64
+    }
+
+    /// Ends the openings of the messages erased since, by n and ID, as at their time or opened
+    /// elsewhere: one of a copy folded into another since has its ID.
+    pub(super) fn forget(&self, closed: Vec<(i64, String)>) {
+        if closed.is_empty() {
+            return;
+        }
+        self.open
+            .lock()
+            .expect("view-once messages open")
+            .retain(|n, (_, id, _)| !closed.iter().any(|(gone, gone_id)| gone == n || gone_id == id));
+    }
+
+    /// Where message `n`, `id`, is open, as (its key, its connection): under its n, or, for one
+    /// opened on `connection` before its copy was folded into it, under the copy's.
+    fn opening(&self, n: i64, id: &str, connection: u64) -> Option<(i64, u64)> {
+        let open = self.open.lock().expect("view-once messages open");
+        open.get(&n).map(|(on, _, _)| (n, *on)).or_else(|| {
+            open.iter()
+                .find(|(_, (on, opened, _))| *on == connection && opened == id)
+                .map(|(key, (on, _, _))| (*key, *on))
+        })
+    }
+
+    /// Ends the openings of message `id` on `connection`, which is gone.
+    fn gone(&self, connection: u64, id: &str) {
+        self.open
+            .lock()
+            .expect("view-once messages open")
+            .retain(|_, (on, opened, _)| *on != connection || opened != id);
     }
 }
 
@@ -134,10 +165,11 @@ pub(super) async fn open(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -
     if !found.copy {
         return Err(Error::new(code::NOT_ALLOWED, "that message says no file to open"));
     }
+    inner.open.forget(inner.store.take_closed());
     {
         let open = inner.open.open.lock().expect("view-once messages open");
         match open.get(&found.n) {
-            Some((on, answer)) if *on == connection => return Ok(answer.clone()),
+            Some((on, _, answer)) if *on == connection => return Ok(answer.clone()),
             Some(_) => return Err(Error::new(code::NOT_ALLOWED, "that message is open in another interface")),
             None if open.len() as i64 >= OPEN_MOST => {
                 let mut error = Error::new(code::LIMIT, format!("{OPEN_MOST} view-once messages are open already"));
@@ -191,6 +223,7 @@ pub(super) async fn open(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -
     if let (Some(small), Some(large)) = (&file.small, &file.large) {
         shown["previews"] = json!({ "256": small, "768": large });
     }
+    let id = asked.message.clone();
     let answer = Opened {
         message: asked.message,
         kind: found.kind,
@@ -200,27 +233,32 @@ pub(super) async fn open(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -
         until,
     };
     let answer = serde_json::to_value(answer).map_err(|e| internal("answer", e.into()))?;
-    inner.open.open.lock().expect("view-once messages open").insert(n, (connection, answer.clone()));
+    inner.open.open.lock().expect("view-once messages open").insert(n, (connection, id, answer.clone()));
     Ok(answer)
 }
 
 /// `view_once.close`, for the interface on `connection`.
 pub(super) async fn close(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -> Result<Value, Error> {
+    inner.open.forget(inner.store.take_closed());
     let (id, chat) = (asked.message.clone(), asked.chat.clone());
     let n = match query(inner, move |db| find(db, &id, chat.as_deref())).await? {
         Ok(found) => found.n,
-        Err(e) if e.code == code::NOT_FOUND => return Ok(json!({})),
+        Err(e) if e.code == code::NOT_FOUND => {
+            // Erased already, as at its time: its opening here ends with it.
+            inner.open.gone(connection, &asked.message);
+            return Ok(json!({}));
+        }
         Err(e) => return Err(e),
     };
-    match inner.open.open.lock().expect("view-once messages open").get(&n) {
-        Some((on, _)) if *on != connection => {
+    let key = match inner.open.opening(n, &asked.message, connection) {
+        Some((_, on)) if on != connection => {
             return Err(Error::new(code::NOT_ALLOWED, "that message is open in another interface"));
         }
-        Some(_) => {}
+        Some((key, _)) => key,
         None => return Ok(json!({})),
-    }
+    };
     durably(inner, vec![Change::Once(Once::Closed { n })], "erase it").await?;
-    inner.open.open.lock().expect("view-once messages open").remove(&n);
+    inner.open.open.lock().expect("view-once messages open").remove(&key);
     Ok(json!({}))
 }
 
@@ -232,7 +270,7 @@ pub(super) async fn ended(inner: &Arc<Inner>, connection: u64) {
         .lock()
         .expect("view-once messages open")
         .iter()
-        .filter(|(_, (on, _))| *on == connection)
+        .filter(|(_, (on, _, _))| *on == connection)
         .map(|(n, _)| *n)
         .collect();
     if left.is_empty() {

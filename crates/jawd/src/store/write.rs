@@ -480,6 +480,9 @@ pub(super) struct Stamps {
     links_erased: Option<i64>,
     /// How many messages the transaction erased, disappeared or opened, for `status`.
     erased: u64,
+    /// The view-once messages open here that the transaction erased or deleted, by n and ID, for
+    /// the interfaces' openings of them to end.
+    closed: Vec<(i64, String)>,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -508,6 +511,7 @@ pub(super) struct Mark {
     unsettling: usize,
     copies_taken: bool,
     erased: u64,
+    closed: usize,
 }
 
 impl Stamps {
@@ -525,6 +529,7 @@ impl Stamps {
             expiring: None,
             links_erased: None,
             erased: 0,
+            closed: Vec::new(),
         })
     }
 
@@ -537,6 +542,7 @@ impl Stamps {
         self.expiring = None;
         self.links_erased = None;
         self.erased = 0;
+        self.closed.clear();
         self.opening = false;
         self.copies_taken = false;
     }
@@ -561,6 +567,7 @@ impl Stamps {
         self.expiring = None;
         self.links_erased = None;
         self.erased = 0;
+        self.closed.clear();
     }
 
     /// Notes that a statement took `rows` outbox rows whose copies may be on their way.
@@ -605,6 +612,18 @@ impl Stamps {
         std::mem::take(&mut self.erased)
     }
 
+    /// Notes that the transaction erased or deleted message `n`, `id`, a view-once message open
+    /// here.
+    pub(super) fn closed(&mut self, n: i64, id: String) {
+        self.closed.push((n, id));
+    }
+
+    /// The view-once messages open here that the committed transaction erased or deleted, taken
+    /// once.
+    pub(super) fn take_closed(&mut self) -> Vec<(i64, String)> {
+        std::mem::take(&mut self.closed)
+    }
+
     /// Notes that chat `n`'s unread messages may have changed.
     fn unsettle(&mut self, n: i64) -> &mut Unsettled {
         let at = match self.unsettled.iter().position(|(chat, _)| *chat == n) {
@@ -628,6 +647,7 @@ impl Stamps {
             unsettling: self.unsettling.len(),
             copies_taken: self.copies_taken,
             erased: self.erased,
+            closed: self.closed.len(),
         }
     }
 
@@ -639,6 +659,7 @@ impl Stamps {
         self.next = mark.next;
         self.copies_taken = mark.copies_taken;
         self.erased = mark.erased;
+        self.closed.truncate(mark.closed);
         for (at, was) in self.unsettling.drain(mark.unsettling..).rev() {
             match was {
                 Some(was) => self.unsettled[at].1 = was,
@@ -1351,14 +1372,20 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
     delete_row(db, stamps, chat, n)
 }
 
-/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back.
+/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back;
+/// a view-once message open here is open no more.
 fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     db.prepare_cached(
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
     )?
     .execute(params![n, now_ms()])?;
     outbox::deleted_for_you(db, stamps, n)?;
-    remove_row(db, stamps, chat, n)
+    let open: Option<String> = db.prepare_cached(expiry::OPEN_HERE)?.query_row([n], |r| r.get(0)).optional()?;
+    let removed = remove_row(db, stamps, chat, n)?;
+    if let Some(id) = open.filter(|_| removed) {
+        stamps.closed(n, id);
+    }
+    Ok(removed)
 }
 
 /// Takes message `n` out of `chat`, with its event, so windows let it go. A chat whose newest it

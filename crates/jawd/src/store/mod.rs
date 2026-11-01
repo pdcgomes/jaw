@@ -346,6 +346,8 @@ pub struct Store {
     soonest: Arc<Soonest>,
     /// How many messages have been erased since jaw.db was opened, disappeared or opened alike.
     erased: Arc<AtomicU64>,
+    /// The view-once messages open here erased since sending last looked, by n and ID.
+    closed: Arc<Mutex<Vec<(i64, String)>>>,
 }
 
 /// The soonest time a message the writer has committed since the timer last looked goes, which
@@ -732,9 +734,11 @@ impl Store {
         let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
         let soonest = Arc::new(Soonest::default());
         let erased = Arc::new(AtomicU64::new(0));
+        let closed = Arc::new(Mutex::new(Vec::new()));
         let writer = Writer {
             soonest: soonest.clone(),
             erased: erased.clone(),
+            closed: closed.clone(),
             stats: stats.clone(),
             inboxed: inboxed.clone(),
             opening: opening.clone(),
@@ -794,6 +798,7 @@ impl Store {
             files,
             soonest,
             erased,
+            closed,
         })
     }
 
@@ -805,6 +810,12 @@ impl Store {
     /// How many messages have been erased since jaw.db was opened, disappeared or opened alike.
     pub fn erased(&self) -> u64 {
         self.erased.load(Ordering::Relaxed)
+    }
+
+    /// The view-once messages open here that have been erased since this was last asked, by n and
+    /// ID: at their time, opened elsewhere, closed or deleted.
+    pub fn take_closed(&self) -> Vec<(i64, String)> {
+        std::mem::take(&mut *self.closed.lock().expect("the view-once messages erased"))
     }
 
     /// The thumbnails of link previews, kept as files beside jaw.db.
@@ -1045,6 +1056,7 @@ struct Writer {
     opening: Arc<Notify>,
     soonest: Arc<Soonest>,
     erased: Arc<AtomicU64>,
+    closed: Arc<Mutex<Vec<(i64, String)>>>,
     db: Connection,
     stamps: Stamps,
     realtime: Receiver<Inbox>,
@@ -1331,6 +1343,10 @@ impl Writer {
             self.links_erased = Some(at);
         }
         self.erased.fetch_add(self.stamps.take_erased(), Ordering::Relaxed);
+        let closed = self.stamps.take_closed();
+        if !closed.is_empty() {
+            self.closed.lock().expect("the view-once messages erased").extend(closed);
+        }
     }
 
     /// When links_fts is next to be merged whole, for the words of messages erased since the last

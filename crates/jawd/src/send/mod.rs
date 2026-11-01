@@ -240,6 +240,7 @@ impl Sending {
 
     /// The view-once messages open now, for `status`.
     pub fn open(&self) -> u64 {
+        self.inner.open.forget(self.inner.store.take_closed());
         self.inner.open.count()
     }
 

@@ -3299,3 +3299,36 @@ async fn a_view_once_photo_goes_once_the_interface_that_opened_it_goes() {
     }
     gone_with_its_files(&rig, "3EB0LEFT").await;
 }
+
+/// How many view-once messages `status` says are open, asked as call `id`.
+async fn open_now(ui: &mut Interface, id: u64) -> Value {
+    ui.call(id, "status", Value::Null).await["result"]["disappearing"]["open"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_once_photo_erased_or_gone_while_open_is_open_no_more_and_closing_it_then_says_done() {
+    let rig = rig(quick()).await;
+    view_once_photo(&rig, &Picture::lake(320, 240), "3EB0TIMED").await;
+    view_once_photo(&rig, &Picture::lake(320, 240), "3EB0VANISH").await;
+    let mut ui = Interface::open(&rig.serve_sending().await).await;
+    ui.call(1, "hello", json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" })).await;
+    let opened = ui.call(2, "view_once.open", json!({ "message": "3EB0TIMED" })).await;
+    let until = opened["result"]["until"].as_i64().expect("opened");
+    assert_eq!(open_now(&mut ui, 3).await, json!(1));
+    // The timer gets there first, at `until`, as it often does before the interface closes it.
+    assert_eq!(crate::expiry::erase_due(&rig.store, until, &[]).await.unwrap().erased, 1);
+    assert_eq!(open_now(&mut ui, 4).await, json!(0), "its erasure ends its opening");
+    assert_eq!(ui.call(5, "view_once.close", json!({ "message": "3EB0TIMED" })).await["result"], json!({}));
+    let opened = ui.call(6, "view_once.open", json!({ "message": "3EB0VANISH" })).await;
+    assert!(opened["result"]["path"].is_string(), "{opened}");
+    {
+        // Gone with nothing said of it, as one erased just before `view_once.close` looks.
+        let db = rusqlite::Connection::open(rig.home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        db.execute("DELETE FROM messages WHERE id = '3EB0VANISH'", []).unwrap();
+    }
+    assert_eq!(open_now(&mut ui, 7).await, json!(1));
+    assert_eq!(ui.call(8, "view_once.close", json!({ "message": "3EB0VANISH" })).await["result"], json!({}));
+    assert_eq!(open_now(&mut ui, 9).await, json!(0), "closing one that's gone ends its opening");
+}
