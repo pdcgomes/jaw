@@ -447,6 +447,46 @@ async fn an_earlier_jawds_view_once_messages_are_kept_as_this_ones_and_their_cap
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_once_backfill_counts_a_caption_at_what_the_costliest_took_so_no_transaction_takes_two_past_its_time() {
+    let home = tempfile::tempdir().unwrap();
+    {
+        // jaw.db as main's jawd left it, with 64 view-once photos whose captions it kept as text.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for migration in &schema::MIGRATIONS[..30] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 30).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
+            INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+            INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 0);
+            INSERT INTO sync_state (key, value) VALUES ('me', '351910000001@s.whatsapp.net');"
+        ))
+        .unwrap();
+        for n in 1..=64i64 {
+            db.execute(
+                "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, view_once, raw, v)
+                VALUES (?1, 1, ?2, ?3, ?1, 1, 'image', ?4, 1, x'00', 0)",
+                rusqlite::params![n, format!("once{n:02}"), AT + n, format!("a caption of {n}")],
+            )
+            .unwrap();
+        }
+    }
+    // Each caption counts as 5 ms, past a transaction's 3 ms, as a long one can at a million
+    // messages, though taking one out costs far less here.
+    let limits = crate::store::Limits { secure_delete_least: Duration::from_millis(5), ..crate::store::LIMITS };
+    let store = Store::open_with(home.path(), limits).unwrap();
+    let applied = store.apply(Lane::Background, vec![Change::Backfill(VIEW_ONCE); 64]).await.unwrap();
+    assert_eq!(applied.quarantined, 0);
+    assert_eq!(applied.transactions, 64, "a step, and its transaction, stop at the caption past their time");
+    let captioned: i64 =
+        query(&store, |db| Ok(db.query_row("SELECT count(*) FROM messages WHERE text IS NOT NULL", [], |r| r.get(0))?))
+            .await;
+    assert_eq!(captioned, 0, "and each was taken out, one to a transaction");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_message_that_comes_after_its_time_is_never_shown_and_what_waited_for_it_goes() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();

@@ -483,6 +483,11 @@ pub(super) struct Stamps {
     /// The view-once messages open here that the transaction erased or deleted, by n and ID, for
     /// the interfaces' openings of them to end.
     closed: Vec<(i64, String)>,
+    /// The longest a secure delete in the transaction took, an erasure or a caption taken out of
+    /// search, as what the next is counted at when a background transaction or a step paces itself.
+    costliest: Duration,
+    /// The least a secure delete counts as, the writer's limit.
+    least: Duration,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -530,7 +535,14 @@ impl Stamps {
             links_erased: None,
             erased: 0,
             closed: Vec::new(),
+            costliest: Duration::ZERO,
+            least: Duration::ZERO,
         })
+    }
+
+    /// Has every secure delete count as `least` at least when work paces itself.
+    pub(super) fn count_secure_deletes_from(&mut self, least: Duration) {
+        self.least = least;
     }
 
     pub(super) fn begin(&mut self) {
@@ -543,6 +555,7 @@ impl Stamps {
         self.links_erased = None;
         self.erased = 0;
         self.closed.clear();
+        self.costliest = Duration::ZERO;
         self.opening = false;
         self.copies_taken = false;
     }
@@ -622,6 +635,16 @@ impl Stamps {
     /// once.
     pub(super) fn take_closed(&mut self) -> Vec<(i64, String)> {
         std::mem::take(&mut self.closed)
+    }
+
+    /// Notes that a secure delete in the transaction took `took`.
+    pub(super) fn securely_deleted(&mut self, took: Duration) {
+        self.costliest = self.costliest.max(took.max(self.least));
+    }
+
+    /// The longest a secure delete in the transaction has taken so far.
+    pub(super) fn costliest(&self) -> Duration {
+        self.costliest
     }
 
     /// Notes that chat `n`'s unread messages may have changed.

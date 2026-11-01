@@ -103,7 +103,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         if wanted != Some(true) {
             continue;
         }
-        if took && taking.is_some_and(|most| began.elapsed() >= most) {
+        if took && taking.is_some_and(|most| began.elapsed() + stamps.costliest() >= most) {
             looked = i;
             break;
         }

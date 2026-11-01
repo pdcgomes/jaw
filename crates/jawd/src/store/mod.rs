@@ -469,6 +469,9 @@ struct Limits {
     batch_time: Duration,
     yield_after: Duration,
     links_merge_every: Duration,
+    /// The least a secure delete counts as when work paces itself, none in jawd: a test's makes
+    /// one cost what a million messages make it cost.
+    secure_delete_least: Duration,
 }
 
 const LIMITS: Limits = Limits {
@@ -481,6 +484,7 @@ const LIMITS: Limits = Limits {
     batch_time: BATCH_TIME,
     yield_after: YIELD_AFTER,
     links_merge_every: LINKS_MERGE_EVERY,
+    secure_delete_least: Duration::ZERO,
 };
 
 /// What a connection to jaw.db is for, which decides how it's set up.
@@ -711,6 +715,7 @@ impl Store {
         // The read path finds its store's files by the name SQLite gives jaw.db, symlinks resolved.
         let files = files::Files::open(db.path().map_or(path.as_path(), Path::new));
         let mut stamps = Stamps::load(&db)?;
+        stamps.count_secure_deletes_from(limits.secure_delete_least);
         flatten(&mut db, &mut stamps)?;
         let reads = Reads::open(&path)?;
         let checkpointer = connect(&path, Role::Checkpointer)?;
@@ -1122,7 +1127,7 @@ fn make_groups(
     stamps: &mut Stamps,
     changes: &[Change],
     groups: &[Range<usize>],
-    mut stop: impl FnMut(usize) -> bool,
+    mut stop: impl FnMut(usize, &Stamps) -> bool,
 ) -> Result<Made> {
     let start = groups.first().map_or(0, |g| g.start);
     let mut made = Made::default();
@@ -1158,7 +1163,7 @@ fn make_groups(
             }
         }
         made.taken = group.end - start;
-        if stop(made.taken) {
+        if stop(made.taken, stamps) {
             break;
         }
     }
@@ -1615,7 +1620,7 @@ impl Writer {
                             made: Made::default(),
                         });
                         let write = shared.last_mut().expect("the write just taken");
-                        write.made = make_groups(&mut tx, &mut self.stamps, &write.changes, &groups, |_| false)?;
+                        write.made = make_groups(&mut tx, &mut self.stamps, &write.changes, &groups, |_, _| false)?;
                     }
                     truncate => {
                         *after = Some(truncate);
@@ -1923,7 +1928,9 @@ impl Writer {
 
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
     /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or, once an inbox row
-    /// or a live write is waiting, once its work has had YIELD_AFTER. Each group runs in a
+    /// or a live write is waiting, once its work has had YIELD_AFTER, the next group counted as
+    /// costing what the costliest secure delete in it has (an erasure, or a caption taken out of
+    /// search), so it stops before one that would take it past its time. Each group runs in a
     /// savepoint: one that fails is rolled back and kept in quarantine with its error, and the rest
     /// go on. A durable one is refused unless it commits synced. Says how many changes were taken.
     fn transaction(
@@ -1938,8 +1945,9 @@ impl Writer {
         let made = (|| {
             let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let (realtime, live, pace) = (&self.realtime, &self.live, self.changes_pace);
-            let made = make_groups(&mut tx, &mut self.stamps, changes, groups, |taken| {
-                background && pace.ends(began.elapsed(), taken, !realtime.is_empty() || !live.is_empty())
+            let made = make_groups(&mut tx, &mut self.stamps, changes, groups, |taken, stamps| {
+                let waiting = !realtime.is_empty() || !live.is_empty();
+                background && pace.ends(began.elapsed() + stamps.costliest(), taken, waiting)
             })?;
             write::settle(&tx, &mut self.stamps)?;
             let synced = commits_synced(&tx)?;

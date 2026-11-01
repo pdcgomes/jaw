@@ -8,7 +8,7 @@
 //! indexes take its words out of the segments that hold them (FTS5's `secure-delete`) rather than
 //! leave them there until a merge; both go back to how they were as it ends.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -60,10 +60,12 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
 /// whose links' words links_fts holds is noted, for the whole merge that takes them out.
 pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     let linked = db.prepare_cached(LINKED)?.exists([n])?;
+    let began = Instant::now();
     let erased = erasing(db, || {
         forget_waiting(db, n)?;
         delete_row(db, stamps, chat, n)
     })?;
+    stamps.securely_deleted(began.elapsed());
     if erased {
         stamps.erased_one();
     }
@@ -204,7 +206,9 @@ pub(super) fn opened_aside(db: &Connection, chat: &str, id: &str) -> Result<bool
 /// open once says only what it is, its caption kept in its raw protobuf alone, for its opening.
 pub const VIEW_ONCE: &str = "once";
 /// How long a step makes messages as this jawd keeps them for, past the first: taking a caption's
-/// words out of search's segments costs far more than a look at a message.
+/// words out of search's segments costs far more than a look at a message, about a millisecond at
+/// a million messages, so the step, and the transaction it's in, counts the next caption at what
+/// the costliest so far took, and stops before one that would take it past its time.
 pub(super) const UNMARKING: Duration = Duration::from_millis(1);
 /// The next messages, each with whether it's marked view-once and not deleted. It reads no raw
 /// protobuf.
@@ -235,7 +239,9 @@ pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<boo
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = if once {
         let linked = db.prepare_cached(LINKED)?.exists([n])?;
+        let began = Instant::now();
         let hidden = erasing(db, || Ok(db.prepare_cached(UNCAPTIONED)?.execute(params![n, said, seq])? > 0))?;
+        stamps.securely_deleted(began.elapsed());
         if linked && hidden {
             let now = now_ms();
             db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;
