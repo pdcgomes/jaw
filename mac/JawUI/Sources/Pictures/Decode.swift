@@ -2,6 +2,7 @@ import Accelerate
 import CoreGraphics
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 /// Where the pictures' files are read from: jawd's folder, which the rows' paths are relative to,
 /// or pictures held in memory by path, as the harness and the tests draw their own.
@@ -31,9 +32,10 @@ public enum PictureFiles: Sendable, Hashable {
 enum Decode {
     static let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    /// The picture `key` names, from `files`, or nil when it can't be read.
+    /// The picture `key` names, from `files`, or nil when it can't be read, or isn't a JPEG where only
+    /// one is read.
     static func picture(_ key: PictureKey, from files: PictureFiles) -> CGImage? {
-        guard let source = files.source(key.path),
+        guard let source = files.source(key.path), !key.jpeg || CGImageSourceGetType(source) as String? == UTType.jpeg.identifier,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               var sw = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
               var sh = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue, sw > 0, sh > 0
@@ -42,9 +44,7 @@ enum Decode {
             swap(&sw, &sh)
         }
         let (tw, th) = (Double(key.width), Double(key.height))
-        let scale = key.fit == .fill ? max(tw / sw, th / sh) : min(tw / sw, th / sh)
-        // ImageIO decodes no larger than the file, and no larger than the place needs.
-        let most = max(1, Int((max(sw, sh) * min(scale, 1)).rounded(.up)))
+        let most = longSide(sw, sh, key)
         let options = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -62,6 +62,16 @@ enum Decode {
         ctx.draw(decoded, in: drawn)
         if key.blurred { blur(ctx, key) }
         return ctx.makeImage()
+    }
+
+    /// The long side ImageIO decodes a picture `sw` by `sh` at for `key`: no larger than the file, nor
+    /// than its place needs, its short side filling the place, or all of it fitting; and a picture
+    /// more than four times as long as its place, which shows only its middle, at four times.
+    static func longSide(_ sw: Double, _ sh: Double, _ key: PictureKey) -> Int {
+        let (tw, th) = (Double(key.width), Double(key.height))
+        let scale = key.fit == .fill ? max(tw / sw, th / sh) : min(tw / sw, th / sh)
+        let most = max(1, Int((max(sw, sh) * min(scale, 1)).rounded(.up)))
+        return min(most, 4 * max(key.width, key.height))
     }
 
     /// Blurs a bitmap in place, a tent's width about a twentieth of its shorter side, three times

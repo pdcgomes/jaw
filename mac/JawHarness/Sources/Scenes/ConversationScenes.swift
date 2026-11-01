@@ -26,7 +26,7 @@ private struct ConversationScene: View {
         ) {
             ControllerSpecimen {
                 let c = ConversationController(chat: Samples.group,
-                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.thumbnails),
+                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"]),
                                                layouts: Layouts(), place: .newest(100))
                 c.typing = Samples.typing[Samples.group.id] ?? []
                 c.pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)

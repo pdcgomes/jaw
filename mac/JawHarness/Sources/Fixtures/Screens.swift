@@ -81,13 +81,15 @@ struct Screen {
         content.view.layer?.backgroundColor = roles.ground.cgColor
         list.apply(Update(seq: 1, upsert: chats, total: UInt64(chats.count)))
         list.typing = typing
-        let spec = LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.thumbnails)
+        let spec = LayoutSpec(style: conditions.style, me: ["person:1"])
+        let pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)
         let layouts = Layouts()
         var views: [Int: NSView] = [:]
         var box: NSView?
         for (i, chat) in open.enumerated() {
             let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: .newest(100))
             c.typing = typing[chat.id] ?? []
+            c.pictures = pictures
             c.windowButtons = { [weak view = content.view] in
                 guard let view, let zoom = Self.titleBar.frame(of: .zoomButton, in: view) else { return nil }
                 return view.convert(zoom, to: nil)

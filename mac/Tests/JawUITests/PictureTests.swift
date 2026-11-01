@@ -55,8 +55,8 @@ func noisy(_ w: Int, _ h: Int) -> Data {
     return data as Data
 }
 
-func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: Bool = false) -> PictureKey {
-    PictureKey(path: path, width: w, height: h, fit: fit, blurred: blurred)
+func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: Bool = false, jpeg: Bool = false) -> PictureKey {
+    PictureKey(path: path, width: w, height: h, fit: fit, blurred: blurred, jpeg: jpeg)
 }
 
 @Test func `the 256-pixel preview is drawn up to 256 pixels, the 768 above, then the other`() {
@@ -210,5 +210,5 @@ func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: B
     let came = Count()
     pictures.ask(slot, scale: 2, for: pictures.token()) { came.n += 1 }
     #expect(came.n >= 1 && pictures.drawable(slot, scale: 2)?.isPreview == true)
-    #expect(SamplePictures.files.count == 3 * 8, "each made-up picture's two previews and thumbnail, and the sticker's")
+    #expect(SamplePictures.files.count == 3 * 8 + 3, "each made-up picture's two previews and thumbnail, the sticker's, and the links' thumbnails")
 }

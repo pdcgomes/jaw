@@ -2,29 +2,26 @@ import Foundation
 import JawKit
 import Synchronization
 
-/// What every layout in a pane shares: the style, its fonts, the IDs you go by, so a mention of you
-/// stands out, and where the messages' pictures are read from.
+/// What every layout in a pane shares: the style, its fonts, and the IDs you go by, so a mention
+/// of you stands out.
 public final class LayoutSpec: Sendable, Hashable {
     public let style: Style
     public let fonts: FontSet
     public let me: Set<String>
-    public let pictures: (any ThumbnailSource)?
 
-    public init(style: Style, me: Set<String>, pictures: (any ThumbnailSource)? = nil) {
+    public init(style: Style, me: Set<String>) {
         self.style = style
         fonts = FontSet(size: style.textSize, mono: style.font == .mono)
         self.me = me
-        self.pictures = pictures
     }
 
     public static func == (a: LayoutSpec, b: LayoutSpec) -> Bool {
-        a.style == b.style && a.me == b.me && a.pictures?.id == b.pictures?.id
+        a.style == b.style && a.me == b.me
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(style)
         hasher.combine(me)
-        hasher.combine(pictures?.id)
     }
 }
 
@@ -57,7 +54,7 @@ public final class Layouts: Sendable {
         let key = Self.key(m, width, spec, context)
         if let laid = cache.withLock({ $0[key] }) { return laid }
         let laid = MessageLayout.lay(m, width: CGFloat(key.width), context: context, style: spec.style,
-                                     fonts: spec.fonts, me: spec.me, pictures: spec.pictures)
+                                     fonts: spec.fonts, me: spec.me)
         cache.withLock { $0[key] = laid }
         return laid
     }

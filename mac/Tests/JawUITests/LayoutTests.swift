@@ -13,8 +13,7 @@ import UniformTypeIdentifiers
 let references = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "References")
 
 func spec(_ look: Look, dark: Bool, density: Density = .comfortable) -> LayoutSpec {
-    LayoutSpec(style: Style(roles: Catalog.jaw.roles(dark: dark), look: look, density: density), me: ["person:1"],
-               pictures: Samples.thumbnails)
+    LayoutSpec(style: Style(roles: Catalog.jaw.roles(dark: dark), look: look, density: density), me: ["person:1"])
 }
 
 @Test func `names show where a run starts, and days where they change`() {
@@ -102,7 +101,7 @@ func render(_ spec: LayoutSpec, _ rows: [MessageRow] = Samples.messages, typing:
 func render(_ rows: [MessageRow], _ spec: LayoutSpec, group: Bool, typing: Bool) -> CGImage? {
     let cs = MessageContext.of(rows, group: group, unfolded: [], now: Samples.now)
     let laid = zip(rows, cs).map {
-        MessageLayout.lay($0, width: 640, context: $1, style: spec.style, fonts: spec.fonts, me: spec.me, pictures: spec.pictures)
+        MessageLayout.lay($0, width: 640, context: $1, style: spec.style, fonts: spec.fonts, me: spec.me)
     }
     let height = laid.reduce(0) { $0 + $1.height } + (typing ? TypingRowView.height(spec.style) : 0) + 16
     let scale: CGFloat = 2

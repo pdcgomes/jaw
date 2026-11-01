@@ -91,15 +91,13 @@ final class AppModel {
     }
 
     var spec: LayoutSpec {
-        if let made = madeSpec, made.style == style, made.me == me, made.pictures?.id == thumbnails?.id { return made }
-        let spec = LayoutSpec(style: style, me: me, pictures: thumbnails)
+        if let made = madeSpec, made.style == style, made.me == me { return made }
+        let spec = LayoutSpec(style: style, me: me)
         madeSpec = spec
         return spec
     }
 
     var madeSpec: LayoutSpec?
-    /// The link thumbnails in jawd's folder, whose paths jawd's rows give relative to hello's root.
-    var thumbnails: FolderPictures?
 
     func start() {
         if let why = agent.ensure() {
@@ -156,10 +154,6 @@ final class AppModel {
             linked = w.account.state == .linked
             self.me = Set(me)
             window?.chatList.root = w.root
-            if thumbnails?.root != w.root {
-                thumbnails = FolderPictures(root: w.root)
-                if !panes.isEmpty { restyle() }
-            }
             pictures.files = .folder(w.root)
         case let .unreachable(why, retryIn):
             if let stopped = agent.stopped {

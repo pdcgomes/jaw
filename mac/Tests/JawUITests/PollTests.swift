@@ -13,7 +13,7 @@ func samplePoll(_ id: String) -> MessageRow {
 
 func builder(_ m: MessageRow, _ s: LayoutSpec = spec(.bubbles, dark: true)) -> MessageLayout.Builder {
     MessageLayout.Builder(m: m, width: 640, context: MessageContext(group: true, firstOfRun: true, showTime: true, day: nil),
-                          style: s.style, fonts: s.fonts, me: s.me, pictures: s.pictures)
+                          style: s.style, fonts: s.fonts, me: s.me)
 }
 
 func pollOptions(_ names: String...) -> [Poll.Option] {

@@ -2,16 +2,21 @@ import CoreGraphics
 import JawKit
 
 /// Where a picture is drawn from: jawd's previews, at most 256 and 768 pixels on their long side,
-/// and the tiny copy the message brought, which jawd draws at 256 and which is there first.
+/// and the tiny copy the message brought, which jawd draws at 256 and which is there first; or a
+/// link's thumbnail, a preview of 140 pixels jawd keeps as it came.
 public struct PictureSource: Sendable, Hashable {
     public var small: String?
     public var large: String?
     public var thumbnail: String?
+    /// Only a JPEG is read, as the protocol says a link's thumbnail is: jawd keeps one someone sent as
+    /// it came, so bytes of any other kind under its name are refused.
+    public var jpeg: Bool
 
-    public init(small: String? = nil, large: String? = nil, thumbnail: String? = nil) {
+    public init(small: String? = nil, large: String? = nil, thumbnail: String? = nil, jpeg: Bool = false) {
         self.small = small
         self.large = large
         self.thumbnail = thumbnail
+        self.jpeg = jpeg
     }
 
     public init(_ media: Media?) {
@@ -69,26 +74,32 @@ public struct PictureSlot: Sendable, Hashable {
     /// keeps previews in what that leaves.
     public func keys(_ scale: CGFloat) -> (previews: [PictureKey], thumbnail: PictureKey?) {
         let (w, h) = pixels(scale)
-        let previews = source.previews(for: CGFloat(max(w, h))).map { PictureKey(path: $0, width: w, height: h, fit: fit, blurred: false) }
-        return (previews, source.thumbnail.map { PictureKey(path: $0, width: max(w / 4, 1), height: max(h / 4, 1), fit: fit, blurred: true) })
+        let previews = source.previews(for: CGFloat(max(w, h))).map {
+            PictureKey(path: $0, width: w, height: h, fit: fit, blurred: false, jpeg: source.jpeg)
+        }
+        return (previews, source.thumbnail.map {
+            PictureKey(path: $0, width: max(w / 4, 1), height: max(h / 4, 1), fit: fit, blurred: true, jpeg: source.jpeg)
+        })
     }
 }
 
-/// A picture decoded at the pixels it's drawn at: its file, its size, how it fills, and whether it's
-/// a thumbnail blurred to stand in for its preview.
+/// A picture decoded at the pixels it's drawn at: its file, its size, how it fills, whether it's a
+/// thumbnail blurred to stand in for its preview, and whether only a JPEG is read.
 public struct PictureKey: Sendable, Hashable {
     public let path: String
     public let width: Int
     public let height: Int
     public let fit: PictureFit
     public let blurred: Bool
+    public let jpeg: Bool
 
-    public init(path: String, width: Int, height: Int, fit: PictureFit, blurred: Bool) {
+    public init(path: String, width: Int, height: Int, fit: PictureFit, blurred: Bool, jpeg: Bool = false) {
         self.path = path
         self.width = width
         self.height = height
         self.fit = fit
         self.blurred = blurred
+        self.jpeg = jpeg
     }
 
     /// The same picture at any size: what a slot can be drawn from, scaled, while its own size is

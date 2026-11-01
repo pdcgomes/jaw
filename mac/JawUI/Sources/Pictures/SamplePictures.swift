@@ -39,8 +39,19 @@ public enum SamplePictures {
         out[preview("smile", 256)] = png(sticker(256))
         out[preview("smile", 768)] = png(sticker(512))
         out[thumbnail("smile")] = png(sticker(64))
+        for (path, drawn) in links {
+            out[path] = encoded(link(drawn), UTType.jpeg, [kCGImageDestinationLossyCompressionQuality: 1.0])
+        }
         return out
     }()
+
+    /// The sample links' thumbnails, 140 pixels square as jawd keeps one, and JPEGs, as the protocol
+    /// says they are: a sky, a hill in front of it, and a sun for the forecast.
+    static let links: [String: (sky: UInt32, hill: UInt32, sun: Bool)] = [
+        "media/links/ipma.jpg": (0x7AA2F7, 0x9ECE6A, true),
+        "media/links/sintra.jpg": (0xBB9AF7, 0x414868, false),
+        "media/links/pena.jpg": (0xFF9E64, 0xF7768E, false),
+    ]
 
     public static func preview(_ name: String, _ long: Int) -> String {
         "media/previews/\(name).\(long).png"
@@ -97,6 +108,26 @@ public enum SamplePictures {
         big.interpolationQuality = .low
         big.draw(image, in: CGRect(x: 0, y: 0, width: big.width, height: big.height))
         return big.makeImage()!
+    }
+
+    /// A link's thumbnail as its colours say.
+    static func link(_ drawn: (sky: UInt32, hill: UInt32, sun: Bool)) -> CGImage {
+        let ctx = context(140, 140)
+        ctx.setFillColor(colour(drawn.sky))
+        ctx.fill(CGRect(x: 0, y: 0, width: 140, height: 140))
+        if drawn.sun {
+            ctx.setFillColor(colour(0xE0AF68))
+            ctx.fillEllipse(in: CGRect(x: 86, y: 84, width: 32, height: 32))
+        }
+        ctx.setFillColor(colour(drawn.hill))
+        ctx.move(to: CGPoint(x: 0, y: 0))
+        ctx.addLine(to: CGPoint(x: 0, y: 52))
+        ctx.addLine(to: CGPoint(x: 58, y: 92))
+        ctx.addLine(to: CGPoint(x: 140, y: 36))
+        ctx.addLine(to: CGPoint(x: 140, y: 0))
+        ctx.closePath()
+        ctx.fillPath()
+        return ctx.makeImage()!
     }
 
     /// A round face on nothing, as a sticker's transparent preview.

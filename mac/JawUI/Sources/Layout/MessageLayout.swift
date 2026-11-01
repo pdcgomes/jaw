@@ -94,8 +94,6 @@ public final class Laid: @unchecked Sendable {
         case ticks(Int, CGPoint, CGColor, CGFloat)
         /// A picture, or a symbol made into one, in a rect measured from the top.
         case image(CGImage, CGRect)
-        /// A picture filling a rect from its centre, clipped to the rect's rounded corners.
-        case picture(CGImage, CGRect, CGFloat)
         /// A ring around a centre, of a radius, filled from the top clockwise to a share of it, at a
         /// line's width.
         case ring(CGPoint, CGFloat, CGFloat, CGColor, CGFloat)
@@ -165,18 +163,6 @@ public final class Laid: @unchecked Sendable {
                 ctx.translateBy(x: rect.minX, y: rect.maxY + y)
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
-                ctx.restoreGState()
-            case let .picture(image, rect, radius):
-                let r = rect.offsetBy(dx: 0, dy: y)
-                ctx.saveGState()
-                ctx.addPath(CGPath(roundedRect: r, cornerWidth: min(radius, r.width / 2), cornerHeight: min(radius, r.height / 2),
-                                   transform: nil))
-                ctx.clip()
-                let filled = Fill.rect(CGSize(width: image.width, height: image.height), filling: r)
-                ctx.translateBy(x: filled.minX, y: filled.maxY)
-                ctx.scaleBy(x: 1, y: -1)
-                ctx.interpolationQuality = .high
-                ctx.draw(image, in: CGRect(origin: .zero, size: filled.size))
                 ctx.restoreGState()
             case let .ring(centre, radius, share, colour, width):
                 guard share > 0 else { break }
@@ -310,9 +296,9 @@ public enum MessageLayout {
     public static let fold = 40
 
     public static func lay(_ m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet,
-                           me: Set<String>, pictures: (any ThumbnailSource)? = nil) -> Laid
+                           me: Set<String>) -> Laid
     {
-        var b = Builder(m: m, width: max(width, 160), context: context, style: style, fonts: fonts, me: me, pictures: pictures)
+        var b = Builder(m: m, width: max(width, 160), context: context, style: style, fonts: fonts, me: me)
         return b.build()
     }
 
@@ -323,8 +309,6 @@ public enum MessageLayout {
         let style: Style
         let fonts: FontSet
         let me: Set<String>
-        /// Where the message's pictures are read from, by the paths jawd sends.
-        let pictures: (any ThumbnailSource)?
         let metrics: Metrics
         let roles: Roles
         var parts: [Laid.Part] = []
@@ -336,16 +320,13 @@ public enum MessageLayout {
         var drawingOver = false
         var y: CGFloat = 0
 
-        init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>,
-             pictures: (any ThumbnailSource)? = nil)
-        {
+        init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>) {
             self.m = m
             self.width = width
             self.context = context
             self.style = style
             self.fonts = fonts
             self.me = me
-            self.pictures = pictures
             metrics = Metrics(style)
             roles = style.roles
         }

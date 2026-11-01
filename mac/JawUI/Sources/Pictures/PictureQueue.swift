@@ -25,6 +25,9 @@ public final class PictureQueue: Sendable {
 
     let mode: Mode
     let cache: PictureCache
+    /// How long a picture that couldn't be read is left before it's tried again, so one jawd keeps
+    /// later, as it may a link's thumbnail, is read then; a file that's broken costs one try a while.
+    let retry: Duration
     let state: Mutex<State>
     let workers = DispatchQueue(label: "dev.badcoffee.jaw.pictures", qos: .userInitiated, attributes: .concurrent)
 
@@ -33,7 +36,8 @@ public final class PictureQueue: Sendable {
         var jobs: [PictureKey: Job] = [:]
         var waiting: [PictureKey] = []
         var running = 0
-        var failed: Set<PictureKey> = []
+        /// What couldn't be read, and when: not asked of a file again until `retry` has passed.
+        var failed: [PictureKey: ContinuousClock.Instant] = [:]
         var next: UInt64 = 0
         var counts = Counts()
         /// Who's told of what's been decoded since the main thread was last asked to tell them.
@@ -58,9 +62,10 @@ public final class PictureQueue: Sendable {
         public var mostAtOnce = 0
     }
 
-    public init(cache: PictureCache, mode: Mode = .queued(PictureQueue.most)) {
+    public init(cache: PictureCache, mode: Mode = .queued(PictureQueue.most), retry: Duration = .seconds(10)) {
         self.cache = cache
         self.mode = mode
+        self.retry = retry
         state = Mutex(State())
     }
 
@@ -84,7 +89,15 @@ public final class PictureQueue: Sendable {
 
     /// Whether the picture couldn't be read, so its slot draws from the next it has.
     public func failed(_ key: PictureKey) -> Bool {
-        state.withLock { $0.failed.contains(key) }
+        state.withLock { Self.failed(key, in: &$0, retry: retry) }
+    }
+
+    /// Whether `key` failed less than `retry` ago; one that failed longer ago is forgotten.
+    static func failed(_ key: PictureKey, in s: inout State, retry: Duration) -> Bool {
+        guard let at = s.failed[key] else { return false }
+        if ContinuousClock.now - at < retry { return true }
+        s.failed[key] = nil
+        return false
     }
 
     public var counts: Counts {
@@ -108,7 +121,7 @@ public final class PictureQueue: Sendable {
             return
         }
         let asked = state.withLock { s -> Bool in
-            guard !s.failed.contains(key) else { return false }
+            guard !Self.failed(key, in: &s, retry: retry) else { return false }
             s.counts.asked += 1
             if s.jobs[key] == nil {
                 s.jobs[key] = Job()
@@ -186,7 +199,7 @@ public final class PictureQueue: Sendable {
             if started { s.running -= 1 }
             if image == nil {
                 if s.failed.count > 4096 { s.failed.removeAll() }
-                s.failed.insert(key)
+                s.failed[key] = .now
                 s.counts.failed += 1
             } else {
                 s.counts.decoded += 1

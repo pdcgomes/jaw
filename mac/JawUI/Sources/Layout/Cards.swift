@@ -627,13 +627,12 @@ extension MessageLayout.Builder {
         guard let link = m.link else { return }
         parts.append(.fill(r, well.cgColor, Radius.control))
         if let path = link.preview {
+            // Its well until the image queue has it, and where it can't be read: jawd keeps it as the
+            // JPEG it came as, so nothing else is decoded.
             let thumb = CGRect(x: r.minX + 6, y: (r.midY - Self.thumbnail / 2).rounded(), width: Self.thumbnail, height: Self.thumbnail)
-            if let image = pictures?.picture(path, pixels: Int(Self.thumbnail * 2)) {
-                parts.append(.picture(image, thumb, Radius.small))
-            } else {
-                parts.append(.fill(thumb, well.cgColor, Radius.small))
-                symbol("link", 18, roles.secondary, centredIn: thumb)
-            }
+            parts.append(.fill(thumb, well.cgColor, Radius.small))
+            symbol("link", 18, roles.secondary, centredIn: thumb)
+            slots.append(PictureSlot(rect: thumb, radius: Radius.small, source: PictureSource(small: path, jpeg: true), message: m.id))
         } else {
             parts.append(.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height), roles.accent.cgColor, 1.5))
         }

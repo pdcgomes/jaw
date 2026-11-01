@@ -9,8 +9,8 @@ import Testing
 import UniformTypeIdentifiers
 
 /// A link's preview: under its text, with its thumbnail, its title, two lines of its description at
-/// most and its host, in both looks, for messages received and sent; and jawd's folder giving a
-/// thumbnail by its path.
+/// most and its host, in both looks, for messages received and sent; its thumbnail a picture slot the
+/// image queue fills from jawd's folder by its path, a JPEG alone, decoded to fill its square.
 
 func sampleLink(_ id: String) -> MessageRow {
     Samples.links.first { $0.id == id }!
@@ -18,7 +18,7 @@ func sampleLink(_ id: String) -> MessageRow {
 
 func laid(_ m: MessageRow, _ s: LayoutSpec, width: CGFloat = 640) -> Laid {
     MessageLayout.lay(m, width: width, context: MessageContext(group: true, firstOfRun: true, showTime: true, day: nil),
-                      style: s.style, fonts: s.fonts, me: s.me, pictures: s.pictures)
+                      style: s.style, fonts: s.fonts, me: s.me)
 }
 
 /// The card a click opens a link from: where it is, and what it opens.
@@ -29,8 +29,9 @@ func linkCard(_ l: Laid) -> (rect: CGRect, url: String)? {
     return nil
 }
 
+/// The thumbnails it shows: its picture slots, as a link's card has no other.
 func pictureParts(_ l: Laid) -> Int {
-    l.parts.count { if case .picture = $0 { true } else { false } }
+    l.pictures.count
 }
 
 @Test func `a link's preview sits under its text, with its thumbnail, title, two lines of description and host`() throws {
@@ -59,7 +60,7 @@ func pictureParts(_ l: Laid) -> Int {
 @Test func `a link's description runs to two lines at most, cut with an ellipsis`() {
     let s = spec(.bubbles, dark: true)
     let b = MessageLayout.Builder(m: sampleLink("L3"), width: 640, context: MessageContext(group: true, firstOfRun: true, showTime: true, day: nil),
-                                  style: s.style, fonts: s.fonts, me: s.me, pictures: s.pictures)
+                                  style: s.style, fonts: s.fonts, me: s.me)
     let long = sampleLink("L3").link!
     let lines = b.descriptionLines(long, width: 200)
     #expect(lines.count == 2)
@@ -72,34 +73,48 @@ func pictureParts(_ l: Laid) -> Int {
     #expect(words == b.lineHeight(s.fonts.name) + 3 * b.lineHeight(s.fonts.small), "a title, two lines and the host")
 }
 
-@Test func `a preview with neither title nor description has no card, and one whose thumbnail can't be read keeps its place`() throws {
+@MainActor @Test func `a preview with neither title nor description has no card, and one whose thumbnail can't be read keeps its place`() throws {
     let s = spec(.bubbles, dark: true)
     var bare = sampleLink("L1")
     bare.link = LinkPreview(url: "https://www.ipma.pt/")
     #expect(linkCard(laid(bare, s)) == nil)
-    let unread = LayoutSpec(style: s.style, me: s.me)
-    let read = laid(sampleLink("L1"), s), without = laid(sampleLink("L1"), unread)
-    #expect(pictureParts(without) == 0, "nothing to draw it from")
-    #expect(without.height == read.height && linkCard(without)?.rect == linkCard(read)?.rect, "nothing moves when it's read")
+    let read = laid(sampleLink("L1"), s)
+    let slot = try #require(read.pictures.first)
+    #expect(slot.source == PictureSource(small: "media/links/ipma.jpg", jpeg: true) && slot.rect.size == CGSize(width: 70, height: 70)
+        && slot.fit == .fill, "its thumbnail a slot of its own, filled from its centre")
+    #expect(linkCard(read).map { $0.rect.contains(slot.rect) } == true)
+    #expect(read.parts.contains { if case let .fill(rect, _, _) = $0 { rect == slot.rect } else { false } },
+            "its well under it, which shows until it's decoded, and where it can't be")
+    #expect(MessagePictures().drawable(slot, scale: 2) == nil, "nothing to draw it from yet: its place is the row's, so nothing moves when it's read")
+    #expect(!read.regions.contains { if case .media = $0.1 { true } else { false } }, "a click opens the link, not the picture")
     #expect(MessageLayout.Builder.spoken(sampleLink("L1")) == "link: Previsão para Sintra · IPMA, ipma.pt")
     #expect(MessageLayout.Builder.spoken(bare) == nil)
 }
 
-@Test func `jawd's folder gives a thumbnail by its path, and one jawd keeps later is read then`() throws {
-    let root = "/tmp/jawp-\(UInt32.random(in: 0 ... .max))"
-    try FileManager.default.createDirectory(atPath: root + "/media/links", withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(atPath: root) }
-    let folder = FolderPictures(root: root)
-    #expect(folder.id == root)
-    #expect(folder.picture("media/links/ipma.jpg", pixels: 140) == nil, "not kept yet")
-    let drawn = try #require(Samples.thumbnails.picture("media/links/ipma.jpg", pixels: 140))
-    let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: root + "/media/links/ipma.jpg") as CFURL,
-                                                                   UTType.jpeg.identifier as CFString, 1, nil))
-    CGImageDestinationAddImage(destination, drawn, nil)
-    #expect(CGImageDestinationFinalize(destination))
-    let read = try #require(folder.picture("media/links/ipma.jpg", pixels: 140), "read once it's there")
+@MainActor @Test func `jawd's folder gives a thumbnail by its path, and one jawd keeps later is read then`() async throws {
+    let (root, done) = try pictureFolder()
+    defer { done() }
+    let queue = PictureQueue(cache: PictureCache(), retry: .milliseconds(100))
+    queue.files = .folder(root)
+    let slot = try #require(laid(sampleLink("L1"), spec(.bubbles, dark: true)).pictures.first)
+    let key = try #require(slot.keys(2).previews.first)
+    #expect(key == PictureKey(path: "media/links/ipma.jpg", width: 140, height: 140, fit: .fill, blurred: false, jpeg: true),
+            "at its square's pixels, a JPEG alone")
+    let token = queue.token()
+    queue.ask(key, for: token) { _ in }
+    #expect(await eventually { queue.failed(key) }, "not kept yet")
+    try #require(SamplePictures.files["media/links/ipma.jpg"]).write(to: URL(fileURLWithPath: root + "/media/links/ipma.jpg"))
+    queue.ask(key, for: token) { _ in }
+    #expect(queue.failed(key) && !queue.busy, "tried once, for a while")
+    try await Task.sleep(for: .milliseconds(150))
+    final class Came: @unchecked Sendable {
+        var n = 0
+    }
+    let came = Came()
+    queue.ask(key, for: token) { _ in came.n += 1 }
+    #expect(await eventually { came.n == 1 }, "read once it's there, a while later")
+    let read = try #require(queue.cache.image(key))
     #expect(read.width == 140 && read.height == 140)
-    #expect(folder.picture("media/links/ipma.jpg", pixels: 140) === read, "and kept")
 }
 
 /// A folder for a test's pictures, as jawd's root is, removed by `done`.
@@ -121,67 +136,48 @@ func writeJPEG(_ path: String, _ w: Int, _ h: Int) throws {
     #expect(CGImageDestinationFinalize(destination))
 }
 
-@Test func `jawd's folder decodes a picture so its short side fills its square, and never larger than it is`() throws {
-    #expect(FolderPictures.longSide(400, 400, short: 140) == 140)
-    #expect(FolderPictures.longSide(1000, 523, short: 140) == 268, "a page's wide picture, 140 high")
-    #expect(FolderPictures.longSide(140, 73, short: 140) == 140, "one jawd made, as it is")
-    #expect(FolderPictures.longSide(4000, 400, short: 140) == 560, "a strip, at four times its square")
+/// A link's thumbnail at its square's pixels at 2x, from jawd's folder at `root`, a JPEG alone unless
+/// `jpeg` says otherwise.
+func thumbnail(_ path: String, in root: String, jpeg: Bool = true) -> CGImage? {
+    Decode.picture(PictureKey(path: path, width: 140, height: 140, fit: .fill, blurred: false, jpeg: jpeg), from: .folder(root))
+}
+
+@Test func `a thumbnail is decoded so its short side fills its square, never larger than it is, a strip at four times its square`() throws {
+    let square = PictureKey(path: "", width: 140, height: 140, fit: .fill, blurred: false, jpeg: true)
+    #expect(Decode.longSide(400, 400, square) == 140)
+    #expect(Decode.longSide(1000, 523, square) == 268, "a page's wide picture, 140 high")
+    #expect(Decode.longSide(560, 280, square) == 280 && Decode.longSide(280, 560, square) == 280)
+    #expect(Decode.longSide(140, 73, square) == 140, "one jawd made, as it is")
+    #expect(Decode.longSide(96, 96, square) == 96, "and one smaller than its square")
+    #expect(Decode.longSide(4000, 400, square) == 560, "a strip, at four times its square")
     let (root, done) = try pictureFolder()
     defer { done() }
-    let folder = FolderPictures(root: root)
-    for (w, h, decoded) in [(400, 400, [140, 140]), (560, 280, [280, 140]), (280, 560, [140, 280]), (140, 73, [140, 73]), (96, 96, [96, 96])] {
+    for (w, h) in [(400, 400), (560, 280), (280, 560), (140, 73), (96, 96)] {
         try writeJPEG("\(root)/media/links/\(w)x\(h).jpg", w, h)
-        let image = try #require(folder.picture("media/links/\(w)x\(h).jpg", pixels: 140))
-        #expect([image.width, image.height] == decoded, "\(w)×\(h)")
+        let image = try #require(thumbnail("media/links/\(w)x\(h).jpg", in: root))
+        let drawn = pixels(image)
+        #expect([image.width, image.height] == [140, 140] && drawn[3] == 255 && drawn[(140 * 140 - 1) * 4 + 3] == 255,
+                "\(w)×\(h): drawn at its square's pixels, filling it to its corners")
     }
 }
 
-@Test func `jawd's folder decodes only a JPEG, as the protocol says a link's thumbnail is`() throws {
+@Test func `only a JPEG is decoded for a link's thumbnail, as the protocol says one is`() throws {
     let (root, done) = try pictureFolder()
     defer { done() }
     try writeJPEG("\(root)/media/links/a.jpg", 140, 140)
-    let drawn = try #require(Samples.thumbnails.picture("media/links/ipma.jpg", pixels: 140))
+    let ipma = try #require(SamplePictures.files["media/links/ipma.jpg"])
+    let source = try #require(CGImageSourceCreateWithData(ipma as CFData, nil))
+    let drawn = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
     for (name, type) in [("b", UTType.png), ("c", UTType.tiff)] {
         let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: "\(root)/media/links/\(name).jpg") as CFURL,
                                                                        type.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(destination, drawn, nil)
         #expect(CGImageDestinationFinalize(destination))
     }
-    let folder = FolderPictures(root: root)
-    #expect(folder.picture("media/links/a.jpg", pixels: 140) != nil)
-    #expect(folder.picture("media/links/b.jpg", pixels: 140) == nil, "a PNG under a JPEG's name")
-    #expect(folder.picture("media/links/c.jpg", pixels: 140) == nil, "nor a TIFF, though ImageIO reads both")
-}
-
-@Test func `jawd's folder keeps the pictures drawn last within its bytes, and reads again one it let go`() throws {
-    let (root, done) = try pictureFolder()
-    defer { done() }
-    let paths = (0 ..< 4).map { "media/links/\($0).jpg" }
-    for path in paths {
-        try writeJPEG("\(root)/\(path)", 140, 140)
-    }
-    let probe = try #require(FolderPictures(root: root).picture(paths[0], pixels: 140))
-    let one = probe.bytesPerRow * probe.height
-    let folder = FolderPictures(root: root, most: 3 * one)
-    let first = try paths.prefix(3).map { try #require(folder.picture($0, pixels: 140)) }
-    #expect(folder.kept.withLock { $0.bytes } == 3 * one, "three fill it")
-    #expect(folder.picture(paths[0], pixels: 140) === first[0], "the first, drawn again")
-    let fourth = try #require(folder.picture(paths[3], pixels: 140), "a fourth, past its bound")
-    #expect(folder.kept.withLock { $0.bytes } == 3 * one && folder.kept.withLock { $0.pictures.count } == 3, "still within its bytes")
-    #expect(folder.picture(paths[0], pixels: 140) === first[0] && folder.picture(paths[2], pixels: 140) === first[2],
-            "those drawn last are kept")
-    let again = try #require(folder.picture(paths[1], pixels: 140), "the one drawn longest ago is read again")
-    #expect(again !== first[1] && again.width == 140 && again.height == 140)
-    #expect(folder.picture(paths[3], pixels: 140) !== fourth, "and then the fourth, drawn longest ago, went")
-    #expect(folder.kept.withLock { $0.bytes } <= 3 * one)
-    let small = FolderPictures(root: root, most: one - 1)
-    #expect(small.picture(paths[0], pixels: 140) != nil && small.kept.withLock { $0.pictures.isEmpty }, "one larger than its bound is drawn, not kept")
-}
-
-@Test func `a picture fills its rect from the centre, keeping its shape`() {
-    let square = CGRect(x: 10, y: 20, width: 70, height: 70)
-    #expect(Fill.rect(CGSize(width: 280, height: 140), filling: square) == CGRect(x: -25, y: 20, width: 140, height: 70))
-    #expect(Fill.rect(CGSize(width: 96, height: 96), filling: square) == square)
+    #expect(thumbnail("media/links/a.jpg", in: root) != nil)
+    #expect(thumbnail("media/links/b.jpg", in: root) == nil, "a PNG under a JPEG's name")
+    #expect(thumbnail("media/links/c.jpg", in: root) == nil, "nor a TIFF, though ImageIO reads both")
+    #expect(thumbnail("media/links/b.jpg", in: root, jpeg: false) != nil, "as a photo's preview, which may be a PNG, is read")
 }
 
 @Test func `every link preview draws as its reference, in both looks, dark and light`() throws {

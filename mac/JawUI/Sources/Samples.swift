@@ -199,10 +199,6 @@ public enum Samples {
         return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
     }
 
-    /// The samples' link thumbnails, drawn here rather than read from jawd's folder, so the harness and
-    /// the tests draw what the app would without a file.
-    public static let thumbnails: any ThumbnailSource = SampleThumbnails()
-
 
     /// A chat of pictures, as jawd sends each once it's here: photos of every shape, one with an HD
     /// copy, albums of two, three, four and eight, a sticker, a video's, a GIF's and a video message's
@@ -287,42 +283,5 @@ public enum Samples {
     /// The window update a watch of `rows`, opened at the newest, returns.
     public static func update(of rows: [MessageRow]) -> Update<MessageRow> {
         Update(seq: 200, upsert: rows, total: UInt64(rows.count), older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0))
-    }
-}
-
-/// Each sample link's thumbnail, 140 pixels square as jawd keeps one: a sky, a hill in front of it,
-/// and a sun for the forecast.
-struct SampleThumbnails: ThumbnailSource {
-    static let drawn: [String: (sky: UInt32, hill: UInt32, sun: Bool)] = [
-        "media/links/ipma.jpg": (0x7AA2F7, 0x9ECE6A, true),
-        "media/links/sintra.jpg": (0xBB9AF7, 0x414868, false),
-        "media/links/pena.jpg": (0xFF9E64, 0xF7768E, false),
-    ]
-
-    var id: String {
-        "samples"
-    }
-
-    func picture(_ path: String, pixels _: Int) -> CGImage? {
-        guard let drawn = Self.drawn[path] else { return nil }
-        let side = 140
-        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return nil }
-        ctx.setFillColor(RGBA(drawn.sky).cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
-        if drawn.sun {
-            ctx.setFillColor(RGBA(0xE0AF68).cgColor)
-            ctx.fillEllipse(in: CGRect(x: 86, y: 84, width: 32, height: 32))
-        }
-        ctx.setFillColor(RGBA(drawn.hill).cgColor)
-        ctx.move(to: CGPoint(x: 0, y: 0))
-        ctx.addLine(to: CGPoint(x: 0, y: 52))
-        ctx.addLine(to: CGPoint(x: 58, y: 92))
-        ctx.addLine(to: CGPoint(x: 140, y: 36))
-        ctx.addLine(to: CGPoint(x: 140, y: 0))
-        ctx.closePath()
-        ctx.fillPath()
-        return ctx.makeImage()
     }
 }
