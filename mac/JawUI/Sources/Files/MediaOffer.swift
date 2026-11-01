@@ -48,6 +48,26 @@ public struct MediaOffer: Sendable, Hashable {
         return MediaOffer(message: m.id, chat: m.chat, item: nil, kind: m.kind, media: media)
     }
 
+    /// The file of a library item: a photo's or a video's, as its message's row has it, or a file's
+    /// from what the library says of it, named with its type's extension when its name has none, as
+    /// an audio file's line, "Audio, 3:02", hasn't; nil for a voice message or a link.
+    public static func of(_ item: LibraryRow) -> MediaOffer? {
+        switch item.kind {
+        case .photo, .video:
+            guard let media = item.media else { return nil }
+            return MediaOffer(message: item.message, chat: item.chat, item: nil, kind: item.kind == .video ? .video : .image, media: media)
+        case .file:
+            guard let f = item.file else { return nil }
+            let ext = f.path.map { ($0 as NSString).pathExtension }.flatMap { $0.isEmpty ? nil : $0 } ?? f.type?.lowercased()
+            let name = (f.name as NSString).pathExtension.isEmpty ? ext.map { "\(f.name).\($0)" } ?? f.name : f.name
+            let media = Media(bytes: f.bytes, name: name, pages: f.pages, path: f.path, state: f.state ?? (f.path == nil ? .remote : .local),
+                              progress: f.progress, error: f.error)
+            return MediaOffer(message: item.message, chat: item.chat, item: nil, kind: .document, media: media)
+        case .voice, .link, .other:
+            return nil
+        }
+    }
+
     /// Every file a message brings: an album's each, or its one.
     public static func all(_ m: MessageRow) -> [MediaOffer] {
         if m.kind == .album {

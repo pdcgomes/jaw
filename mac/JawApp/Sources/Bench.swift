@@ -154,7 +154,11 @@ enum Bench {
                                             windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
             {
-                NSApp.sendEvent(event)
+                // AppKit offers a key with ⌘ to the key window's views before the menu bar, as the
+                // library's ⌘↩ is taken; the build Mac runs the app inactive, with no key window, so
+                // that's done here first.
+                let window = NSApp.keyWindow ?? model.window?.window
+                if !(mods.contains(.command) && window?.performKeyEquivalent(with: event) == true) { NSApp.sendEvent(event) }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + (key.hasPrefix("vote:") || key.hasPrefix("poll:") ? 0.8 : 0.3)) {
                 if key.hasPrefix("menu:") {
@@ -178,7 +182,7 @@ enum Bench {
                         (item.previewItemTitle ?? "") + handedOver(item.previewItemURL)
                     }.joined(separator: ", ")
                     let library = model.libraries.sorted { $0.key < $1.key }.map { id, l in
-                        " · \(id) showing \(l.kind?.rawValue ?? "every kind") (\(l.window.count) items)"
+                        " · \(id) showing \(l.kind?.rawValue ?? "every kind") (\(l.window.count) items)\(l.hasKeys ? ", with the keys" : "")"
                             + (l.selectedItem.map { " selected \($0.kind.rawValue) \($0.id)" } ?? "")
                     }.joined()
                     let said = palette + glance + form + selected + library + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")

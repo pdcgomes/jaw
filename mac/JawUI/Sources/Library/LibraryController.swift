@@ -33,6 +33,8 @@ public protocol LibraryHost: AnyObject {
     func library(_ l: LibraryController, goTo item: LibraryRow)
     /// The items on screen, by id, in order, as they change.
     func library(_ l: LibraryController, shown items: [String])
+    /// What an item's menu does with its file: saved to Downloads, or shown in the Finder.
+    func library(_ l: LibraryController, media act: MediaOffer.Act, item: LibraryRow)
     /// Esc: the pane closes.
     func libraryClose(_ l: LibraryController)
     /// The pane was clicked or typed in: it takes the keys.
@@ -43,6 +45,7 @@ public extension LibraryHost {
     func library(_: LibraryController, open _: LibraryRow, among _: [LibraryRow]) {}
     func library(_: LibraryController, goTo _: LibraryRow) {}
     func library(_: LibraryController, shown _: [String]) {}
+    func library(_: LibraryController, media _: MediaOffer.Act, item _: LibraryRow) {}
     func libraryClose(_: LibraryController) {}
     func libraryFocused(_: LibraryController) {}
 }
@@ -445,6 +448,54 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         if case let .heading(_, _, kind?)? = cell.element { return choose(kind) }
         guard let id = cell.item?.id else { return }
         select(id)
+        if clicks >= 2 { openSelected() }
+    }
+
+    /// ⌘↩ on the selected item: its message, in its chat.
+    public func goToSelected() {
+        guard let item = selectedItem else { return }
+        host?.library(self, goTo: item)
+    }
+
+    /// Whether the pane has the keys: its search line, or its own view.
+    public var hasKeys: Bool {
+        guard let first = view.window?.firstResponder as? NSView else { return false }
+        return first === root || first.isDescendant(of: root)
+    }
+
+    /// An item's menu: Open, Go to Message, and for a file what's done with it, or a link's address.
+    func menu(for cell: LibraryCell) -> NSMenu? {
+        guard let item = cell.item else { return nil }
+        host?.libraryFocused(self)
+        select(item.id)
+        let menu = NSMenu()
+        func add(_ title: String, _ key: String = "", _ mods: NSEvent.ModifierFlags = [], _ run: @escaping () -> Void) {
+            let i = ClosureItem(title: title, run: run)
+            i.keyEquivalent = key
+            i.keyEquivalentModifierMask = mods
+            menu.addItem(i)
+        }
+        add(item.kind == .link ? "Open in Browser" : item.kind == .voice ? "Play" : "Quick Look", "\r", []) { [weak self] in self?.openSelected() }
+        add("Go to Message", "\r", .command) { [weak self] in self?.goToSelected() }
+        if MediaOffer.of(item) != nil {
+            menu.addItem(.separator())
+            add("Save to Downloads") { [weak self] in
+                guard let self else { return }
+                host?.library(self, media: .save, item: item)
+            }
+            add("Show in Finder") { [weak self] in
+                guard let self else { return }
+                host?.library(self, media: .reveal, item: item)
+            }
+        }
+        if let url = item.link?.url {
+            menu.addItem(.separator())
+            add("Copy Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+            }
+        }
+        return menu
     }
 
     // MARK: - The header and the strip
@@ -489,6 +540,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         let row = element.item.flatMap { index[$0] }.map { items[$0] }
         cell.pictures = pictures
         cell.clicked = { [weak self] cell, clicks in self?.clicked(cell, clicks) }
+        cell.menuFor = { [weak self] cell in self?.menu(for: cell) }
         cell.show(element.what, item: row, context: context, selected: row != nil && row?.id == selected)
         return item
     }
@@ -637,10 +689,20 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
                 bar.tokens = search.tokens
                 ask(keeping: true)
             }
+        case Selector(("noop:")) where Self.commandReturn(NSApp.currentEvent):
+            // ⌘↩, which no key binding names: the field hands it on as noop when the app isn't
+            // active and the window's views weren't asked for it as a key equivalent first.
+            goToSelected()
         default:
             return false
         }
         return true
+    }
+
+    /// Whether `event` is ⌘↩, and nothing else held.
+    static func commandReturn(_ event: NSEvent?) -> Bool {
+        guard let event, event.type == .keyDown, [36, 76].contains(event.keyCode) else { return false }
+        return event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command
     }
 
     /// Enter, or a double-click, on the selected item.
@@ -665,6 +727,14 @@ final class LibraryRootView: NSView {
     override func keyDown(with event: NSEvent) {
         if controller?.key(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    /// ⌘↩ goes to the selected item's message. A key with ⌘ goes down the window's views before the
+    /// menu bar and the search line's field see it, so it's taken here while the pane has the keys.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard LibraryController.commandReturn(event), let controller, controller.hasKeys else { return super.performKeyEquivalent(with: event) }
+        controller.goToSelected()
+        return true
     }
 
     override func mouseDown(with event: NSEvent) {

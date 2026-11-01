@@ -21,6 +21,14 @@ public struct PendingOpen: Sendable, Hashable {
         v = row.v
     }
 
+    /// One asked from the library, of its item.
+    public init(_ act: MediaOffer.Act, _ offer: MediaOffer, of item: LibraryRow) {
+        row = item.id
+        message = offer.message
+        self.act = act
+        v = item.v
+    }
+
     public enum Next: Sendable, Hashable {
         /// It's still coming.
         case wait
@@ -38,6 +46,16 @@ public struct PendingOpen: Sendable, Hashable {
         if offers[at].isHere { return .open(offers, at: at) }
         let media = offers[at].media
         if came.v > v, media.error != nil, [.remote, .expired, .gone].contains(media.state) { return .stop }
+        return .wait
+    }
+
+    /// What a library item that came says to do, as a message's row does: its file here, it's looked
+    /// at or opened; once it can't come, it isn't.
+    public func next(_ came: LibraryRow) -> Next {
+        guard came.id == row else { return .wait }
+        guard let offer = MediaOffer.of(came) else { return .stop }
+        if offer.isHere { return .open([offer], at: 0) }
+        if came.v > v, offer.media.error != nil, [.remote, .expired, .gone].contains(offer.media.state) { return .stop }
         return .wait
     }
 }

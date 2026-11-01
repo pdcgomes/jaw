@@ -162,6 +162,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func windowDidBecomeKey(_: Notification) {
         model.updateFocus()
         model.windowShown()
+        // A panel that took the keys, as Quick Look's does, leaves the window with none of its own: a
+        // library pane with the focus takes them back, as a chat's box keeps them.
+        if let id = model.focusedChat, let library = model.libraries[id], !library.hasKeys { library.focus() }
     }
 
     func windowWillClose(_: Notification) {

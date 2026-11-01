@@ -194,6 +194,7 @@ final class AppModel {
             if pending != nil { cameFor(u.upsert) }
         case let .library(w, u):
             if let id = libraryWindows[w] { libraries[id]?.apply(u) }
+            if pending != nil { cameFor(items: u.upsert) }
         case let .typing(now):
             typing = now
             ConversationController.give(now, to: panes.values)
@@ -879,6 +880,77 @@ extension AppModel: LibraryHost {
     func libraryFocused(_ l: LibraryController) {
         if let id = paneID(of: l), let slot = grid?.slot(showing: id), slot.id != focusedSlot { focus(slot: slot.id) }
     }
+
+    /// Enter on an item, as 2.3 opens a message's: a photo or a video looked at with Quick Look, the
+    /// photos and videos here around it paged through in the library's order; a file looked at; a
+    /// link in the browser; one not here asked for and looked at once it is.
+    func library(_: LibraryController, open item: LibraryRow, among: [LibraryRow]) {
+        switch item.kind {
+        case .photo, .video:
+            let looks = among.filter { $0.kind == .photo || $0.kind == .video }
+            guard let at = looks.firstIndex(where: { $0.id == item.id }) else { return }
+            // Quick Look pages through those near it, so a long library isn't cloned whole.
+            let near = Array(looks[max(at - 50, 0) ..< min(at + 51, looks.count)])
+            let offers = near.compactMap(MediaOffer.of)
+            guard let i = offers.firstIndex(where: { $0.message == item.message }) else { return say("there's nothing to look at in this one") }
+            look(offers, at: i, item: item)
+        case .file:
+            guard let offer = MediaOffer.of(item) else { return }
+            look([offer], at: 0, item: item)
+        case .link:
+            if let url = item.link?.url { openLink(url) }
+        case .voice:
+            say("playing voice messages comes with jawd's M5")
+        case .other:
+            break
+        }
+    }
+
+    /// Looks at `offers` from the one at `at`, or asks for it and looks once it's here.
+    func look(_ offers: [MediaOffer], at: Int, item: LibraryRow) {
+        let offer = offers[at]
+        guard offer.isHere else {
+            if offer.media.state != .downloading, offer.media.state != .waitingForPhone { jawd.fetch(chat: offer.chat, message: offer.message) }
+            pending = PendingOpen(.look, offer, of: item)
+            return say(offer.waitingWords)
+        }
+        pending = nil
+        hand(.look, offers, at: at)
+    }
+
+    /// ⌘↩ on an item: its message, in the pane that shows its chat, the library staying beside it;
+    /// or its chat in a new pane beside the library, or in the library's place with no room, as the
+    /// terminal's Ctrl-G closes its library.
+    func library(_ l: LibraryController, goTo item: LibraryRow) {
+        if let slot = grid?.slot(showing: item.chat), let c = panes[item.chat] {
+            focus(slot: slot.id)
+            c.go(to: item.message)
+            return
+        }
+        guard let row = window?.chatList.row(item.chat) else { return say("that chat isn't in the list yet") }
+        if let grid, let at = focusedSlot, case let .success((g, new)) = grid.splitting(at, .across, chat: row.id, size: gridSize) {
+            _ = makePane(row, place: .around(item.message, before: ConversationController.rowsAround, after: ConversationController.rowsAround))
+            self.grid = g
+            focus(slot: new)
+            jawd.opened(row.id)
+            panes[row.id]?.select(item.message)
+            savePanes()
+        } else {
+            if let id = paneID(of: l) { libraryCameFrom[id] = nil }
+            open(row, opened: true, around: item.message)
+        }
+    }
+
+    /// An item's menu's Save to Downloads and Show in Finder, as a message's are.
+    func library(_: LibraryController, media act: MediaOffer.Act, item: LibraryRow) {
+        guard let offer = MediaOffer.of(item) else { return }
+        switch act {
+        case .look, .open, .openWith:
+            look([offer], at: 0, item: item)
+        default:
+            fileAct(act, offer)
+        }
+    }
 }
 
 extension AppModel: ConversationHost {
@@ -1016,6 +1088,15 @@ extension AppModel {
             }
             pending = nil
             hand(act, offers, at: at)
+        case .save, .saveHD, .reveal, .fetch, .stop:
+            fileAct(act, offer)
+        }
+    }
+
+    /// What's done with a file that needn't be here first: saved to Downloads, shown in the Finder,
+    /// asked for, or stopped.
+    func fileAct(_ act: MediaOffer.Act, _ offer: MediaOffer) {
+        switch act {
         case .save, .saveHD:
             let ticket = jawd.save(chat: offer.chat, message: offer.message, to: launch.downloads, variant: offer.variant(act))
             saving[ticket] = (offer.message, false, nil)
@@ -1032,6 +1113,8 @@ extension AppModel {
         case .stop:
             if pending?.message == offer.message { pending = nil }
             jawd.cancel(chat: offer.chat, message: offer.message)
+        case .look, .open, .openWith:
+            break
         }
     }
 
@@ -1065,6 +1148,24 @@ extension AppModel {
                     }
                 }
             }
+        }
+    }
+
+    /// Library items that came while one's file waited to be looked at: once it's here it is, and
+    /// once it can't come it isn't.
+    func cameFor(items: [LibraryRow]) {
+        guard let p = pending else { return }
+        for item in items {
+            switch p.next(item) {
+            case .wait:
+                continue
+            case let .open(offers, at):
+                pending = nil
+                hand(p.act, offers, at: at)
+            case .stop:
+                pending = nil
+            }
+            return
         }
     }
 
