@@ -99,6 +99,8 @@ What the designs leave open, each with its options and the lean built; none bloc
 
 ### Task 4: A card from the box's + menu
 
+Amended after its review: a card carries a contact's names, organisation, numbers and emails alone, as the owner chose on 1 November, written by `CNContactVCardSerialization` from a new `CNMutableContact` holding only those, where the plan's card, the whole contact but its photo, carried everything else Contacts writes of it too, its addresses, birthday, relations and social profiles among them, which the form doesn't show. So `ContactForm.keys` lists only those fields, and Contacts is asked for a contact only when the picker gives less of it.
+
 **Interfaces:**
 - `@Observable public final class ContactForm`: `chat` (the name it's to), `cards`, `said` (jawd's words after a refusal), `problem` (what's in the way, in jaw's words), `ready`, `add`, `remove`; `ContactForm.card(_: CNContact)`: the name by `CNContactFormatter` or the organisation, and the vCard from `CNContactVCardSerialization` without the photo. `ContactFormView`: the sheet, its cards each with an ×, Add a Contact…, the problem or jawd's words, Cancel and Send; Return sends, Esc cancels.
 - `attach.contact` (Contact… in the + menu, Send a contact in the palette) opens it for the focused pane's chat and shows the system's picker under Add a Contact…; `ContactPicking` asks for Contacts once and fetches the picked contact with what a vCard needs; Send asks `jawd.sendContact` with a key made for it; `.contactUnsent` opens it again as it was with jawd's words. `Project.swift` gives the app `NSContactsUsageDescription` and the hardened runtime's address-book entitlement.

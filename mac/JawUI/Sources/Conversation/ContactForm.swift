@@ -6,10 +6,10 @@ import Observation
 import SwiftUI
 
 /// The box's Contact…: the cards to send to a chat in one message, each made from one of the Mac's
-/// contacts as Contacts exports it, without its photo, and shown as its message will draw it once
-/// jawd's row has it; what's in the way of sending them, counted as jawd counts; and, when jawd turns
-/// them down, its words, the form opening again as it was. ↑ and ↓ choose a card, ⌫ takes it out,
-/// Return sends and Esc cancels.
+/// contacts, of its names, organisation, numbers and emails alone, and shown as its message will
+/// draw it once jawd's row has it; what's in the way of sending them, counted as jawd counts; and,
+/// when jawd turns them down, its words, the form opening again as it was. ↑ and ↓ choose a card,
+/// ⌫ takes it out, Return sends and Esc cancels.
 @MainActor @Observable
 public final class ContactForm {
     /// A card on the form: as it's sent, and as its message will draw it, read from its vCard as
@@ -125,25 +125,36 @@ public final class ContactForm {
         case unfetched
     }
 
-    /// What a contact's card is made from, as Contacts is asked for it: what its vCard needs, and
-    /// what its name is made from.
+    /// What a contact's card is made from, as Contacts is asked for it: its names, its organisation,
+    /// its numbers and its emails.
     public nonisolated static var keys: [any CNKeyDescriptor] {
-        [CNContactVCardSerialization.descriptorForRequiredKeys(), CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]
+        [CNContactTypeKey, CNContactNamePrefixKey, CNContactGivenNameKey, CNContactMiddleNameKey, CNContactFamilyNameKey,
+         CNContactNameSuffixKey, CNContactOrganizationNameKey, CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [any CNKeyDescriptor]
     }
 
-    /// A contact's card as Contacts exports it, a vCard 3.0, without its photo, which keeps it small,
-    /// as WhatsApp's phones send theirs; named as Contacts names it, or failing that by its
-    /// organisation, its first number or its first email.
+    /// A contact's card: a vCard 3.0 Contacts writes of a new contact holding only its names, its
+    /// organisation, its numbers and its emails, so the card carries nothing else of it, no photo,
+    /// address, birthday or note; named as Contacts names it, or failing that by its organisation,
+    /// its first number or its first email.
     public nonisolated static func made(_ contact: CNContact) -> Made {
-        guard contact.areKeysAvailable(keys), let copy = contact.mutableCopy() as? CNMutableContact else { return .unfetched }
-        let names = [CNContactFormatter.string(from: contact, style: .fullName), contact.organizationName,
-                     contact.phoneNumbers.first?.value.stringValue, contact.emailAddresses.first.map { $0.value as String }]
+        guard contact.areKeysAvailable(keys) else { return .unfetched }
+        let card = CNMutableContact()
+        card.contactType = contact.contactType
+        card.namePrefix = contact.namePrefix
+        card.givenName = contact.givenName
+        card.middleName = contact.middleName
+        card.familyName = contact.familyName
+        card.nameSuffix = contact.nameSuffix
+        card.organizationName = contact.organizationName
+        card.phoneNumbers = contact.phoneNumbers
+        card.emailAddresses = contact.emailAddresses
+        let names = [CNContactFormatter.string(from: card, style: .fullName), card.organizationName,
+                     card.phoneNumbers.first?.value.stringValue, card.emailAddresses.first.map { $0.value as String }]
         guard let name = names.compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) }).first(where: { !$0.isEmpty }) else {
             return .unadded("that contact has no name, number or email to send")
         }
-        copy.imageData = nil
         do {
-            let data = try CNContactVCardSerialization.data(with: [copy])
+            let data = try CNContactVCardSerialization.data(with: [card])
             guard let vcard = String(data: data, encoding: .utf8) else { return .unadded(unwritten) }
             return .card(Card(name: name, vcard: vcard))
         } catch {

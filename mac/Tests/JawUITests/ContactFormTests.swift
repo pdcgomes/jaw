@@ -6,12 +6,13 @@ import JawThemes
 import SwiftUI
 import Testing
 
-/// The contact form: a contact's card as Contacts exports it, without its photo, named as Contacts
-/// names it; what's in the way of sending, counted as jawd counts; choosing and taking cards out; a
-/// form jawd turns down opening again as it was; the card it sends drawn as yours in both looks once
-/// jawd's row has it; and the form in each of its states drawn as its reference, dark and light.
+/// The contact form: a contact's card of its names, organisation, numbers and emails alone, named
+/// as Contacts names it; what's in the way of sending, counted as jawd counts; choosing and taking
+/// cards out; a form jawd turns down opening again as it was; the card it sends drawn as yours in
+/// both looks once jawd's row has it; and the form in each of its states drawn as its reference,
+/// dark and light.
 
-/// A made-up contact, which has every key a vCard needs, as one Contacts fetches for it does.
+/// A made-up contact, which has every key its card is made from, as one Contacts fetches for it does.
 func madeUp(_ given: String, _ family: String, numbers: [String], email: String? = nil, photo: Bool = false) -> CNMutableContact {
     let c = CNMutableContact()
     c.givenName = given
@@ -39,6 +40,40 @@ let refusedWords = "40 wait to send, 2 failed; it can go once some have"
     #expect(card.shown.name == "Marta Lopes" && card.shown.phones.map(\.number) == ["+351 213 456 789", "21 000 00 00"])
     #expect(card.shown.picture == nil && card.name == "Marta Lopes")
     #expect(SendContact.refusal([card.sent]) == nil, "jawd takes it")
+}
+
+@Test func `a contact's card carries its names, organisation, numbers and emails, and nothing else Contacts holds of it`() throws {
+    let marta = madeUp("Marta", "Lopes", numbers: ["+351 213 456 789", "21 000 00 00"], email: "marta@sorriso.pt", photo: true)
+    marta.namePrefix = "Dr.ª"
+    marta.organizationName = "Clínica Sorriso"
+    marta.departmentName = "Ortodontia"
+    marta.jobTitle = "Dentista"
+    marta.nickname = "Martinha"
+    marta.note = "the children's dentist too"
+    marta.birthday = DateComponents(year: 1980, month: 5, day: 17)
+    let home = CNMutablePostalAddress()
+    home.street = "Rua Augusta 100"
+    home.city = "Lisboa"
+    marta.postalAddresses = [CNLabeledValue(label: CNLabelHome, value: home)]
+    marta.contactRelations = [CNLabeledValue(label: CNLabelContactRelationSpouse, value: CNContactRelation(name: "Rui Lopes"))]
+    marta.socialProfiles = [CNLabeledValue(label: nil, value: CNSocialProfile(urlString: nil, username: "martalopes", userIdentifier: nil,
+                                                                                service: CNSocialProfileServiceTwitter))]
+    marta.urlAddresses = [CNLabeledValue(label: CNLabelWork, value: "https://sorriso.pt" as NSString)]
+    marta.instantMessageAddresses = [CNLabeledValue(label: nil, value: CNInstantMessageAddress(username: "marta.lopes",
+                                                                                                service: CNInstantMessageServiceJabber))]
+    let card = try #require(ContactForm.card(marta))
+    let vcard = card.sent.vcard
+    let properties = Set(vcard.split(whereSeparator: \.isNewline).map { line in
+        line.prefix { $0 != ":" && $0 != ";" }.split(separator: ".").last.map { $0.uppercased() } ?? ""
+    })
+    #expect(properties.isSuperset(of: ["N", "FN", "ORG", "TEL", "EMAIL"]), "\(vcard)")
+    #expect(properties.isDisjoint(with: ["PHOTO", "ADR", "BDAY", "NOTE", "NICKNAME", "TITLE", "URL", "IMPP", "X-ABRELATEDNAMES", "X-SOCIALPROFILE"]),
+            "\(vcard)")
+    for left in ["Ortodontia", "Dentista", "Martinha", "dentist too", "Augusta", "1980", "Rui Lopes", "martalopes", "https://sorriso.pt", "marta.lopes"] {
+        #expect(!vcard.contains(left), "\(left) left out")
+    }
+    #expect(card.sent.name == "Dr.ª Marta Lopes" && card.shown.name == "Dr.ª Marta Lopes" && vcard.contains("marta@sorriso.pt"))
+    #expect(card.shown.phones.map(\.number) == ["+351 213 456 789", "21 000 00 00"])
 }
 
 @Test func `a contact with only an organisation is named by it, one with only a number by its number, and one with nothing makes no card`() {
