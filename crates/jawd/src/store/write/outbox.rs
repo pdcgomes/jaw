@@ -3794,4 +3794,144 @@ mod tests {
         assert!(matches!(written.take(), Some(Enqueued::Many(_))));
         assert_eq!(counted().await, 1_000);
     }
+
+    /// Audit round three: under her LID, a photo of yours still to go, its copy on its way; under
+    /// her number, the same message, delivered, as history brings it. The merge's fold leaves
+    /// nothing of the LID copy's send, nor of its copy, and says so, for whatever makes, uploads or
+    /// waits for that copy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_r3_a_fold_that_takes_a_sends_copy_on_its_way_says_so() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![
+            Change::Remember { key: "me".into(), value: ME_JID.into() },
+            Change::Message(from_ana(ANA_LID, "l1", 1_000)),
+            attached(ANA_LID, "p1", None, 4_000).0,
+            Change::Message(Message {
+                chat: ANA.into(),
+                live: false,
+                status: Some("delivered"),
+                kind: "image",
+                ..mine("p1", 4_000)
+            }),
+        ])
+        .await
+        .unwrap();
+        let copies = on(&store, |db| Ok(db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get(0))?)).await;
+        assert_eq!(copies, 1, "the LID copy's copy on its way");
+        one_person(&store).await;
+        let mut taken = store.copies_taken();
+        taken.mark_unchanged();
+        merged(&store).await;
+        let left = on(&store, |db| {
+            Ok(db.query_row(
+                "SELECT (SELECT count(*) FROM outbox WHERE kind <> 'app_state') + (SELECT count(*) FROM outgoing)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await;
+        assert_eq!(left, 0, "the copy kept reached the server, so nothing of the LID copy's send is left");
+        assert!(taken.has_changed().unwrap(), "the fold that took the send's copy says so");
+    }
+
+    /// Audit round three: one live write of two changes, a deletion for everyone from your phone
+    /// that takes an HD copy on its way, then a change jaw.db can't keep, rolled back to its
+    /// savepoint and kept in quarantine: what the first took is still said.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_r3_a_change_quarantined_after_one_that_took_copies_leaves_that_said() {
+        use crate::store::{Amend, Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![
+            Change::Remember { key: "me".into(), value: ME_JID.into() },
+            Change::Message(from_ana(ANA, "l1", 1_000)),
+            attaching(ANA, "p1", "h1", 4_000),
+        ])
+        .await
+        .unwrap();
+        let p1 = row_of(&store, "p1").await;
+        apply(vec![Change::Outbox(Step::Sent { outbox: p1 })]).await.unwrap();
+        assert_eq!(hd_left(&store).await, 2, "the HD copy's row and its copy on its way");
+        let side = Connection::open(home.path().join("jaw.db")).unwrap();
+        side.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        side.execute_batch(
+            "CREATE TRIGGER audit_refused BEFORE INSERT ON messages WHEN new.id = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'refused by the audit'); END;",
+        )
+        .unwrap();
+        let mut taken = store.copies_taken();
+        taken.mark_unchanged();
+        let revoke = Change::Amend(Amend {
+            chat: ANA.into(),
+            target: "p1".into(),
+            sender: None,
+            mine: true,
+            at: 5_000,
+            what: Amendment::Revoke,
+            raw: None,
+        });
+        let applied = apply(vec![revoke, Change::Message(from_ana(ANA, "boom", 6_000))]).await.unwrap();
+        assert_eq!(applied.quarantined, 1, "the second change is kept in quarantine");
+        assert_eq!(hd_left(&store).await, 0, "the deletion took the HD copy");
+        assert!(taken.has_changed().unwrap(), "and says so, though a change after it was rolled back");
+    }
+
+    /// Audit round three: your photo in HD sent in her number's chat, its HD copy on its way, and
+    /// the same message under her LID, as history brings it; before her chats are known to be one,
+    /// it's deleted for everyone in her LID's chat, from jaw or from your phone. Once the merge is
+    /// known, the HD copy, of the message's copy in the chat kept, never goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_r3_an_hd_copy_in_the_chat_kept_never_goes_once_the_copy_merging_into_it_is_deleted() {
+        use crate::store::{Amend, Change, Lane, Store};
+        for from in ["jaw", "your phone"] {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+            apply(vec![
+                Change::Remember { key: "me".into(), value: ME_JID.into() },
+                Change::Message(from_ana(ANA, "l1", 1_000)),
+                attaching(ANA, "p1", "h1", 4_000),
+                Change::Message(Message {
+                    chat: ANA_LID.into(),
+                    live: false,
+                    status: Some("delivered"),
+                    kind: "image",
+                    ..mine("p1", 4_000)
+                }),
+            ])
+            .await
+            .unwrap();
+            let p1 = row_of(&store, "p1").await;
+            apply(vec![Change::Outbox(Step::Sent { outbox: p1 })]).await.unwrap();
+            let h1 = row_of(&store, "h1").await;
+            let deletion = if from == "jaw" {
+                acting(ANA_LID, "p1", "x1", Amendment::Revoke, 5_000)
+            } else {
+                Change::Amend(Amend {
+                    chat: ANA_LID.into(),
+                    target: "p1".into(),
+                    sender: None,
+                    mine: true,
+                    at: 5_000,
+                    what: Amendment::Revoke,
+                    raw: None,
+                })
+            };
+            apply(vec![deletion]).await.unwrap();
+            assert_eq!(hd_left(&store).await, 2, "from {from}: the copy deleted isn't the one the HD copy goes after");
+            assert_eq!(withdraws(&store, h1).await, Some(false), "from {from}: nothing says the two chats are one yet");
+            one_person(&store).await;
+            assert_eq!(
+                withdraws(&store, h1).await,
+                Some(true),
+                "from {from}: once the merge is known, the sender withdraws the HD copy of the copy kept"
+            );
+            merged(&store).await;
+            assert_eq!(hd_left(&store).await, 0, "from {from}: nothing of the HD copy is left after the fold");
+        }
+    }
 }
