@@ -873,6 +873,10 @@ extension AppModel: LibraryHost {
         jawd.move(w, place)
     }
 
+    func library(_: LibraryController, shown items: [String]) {
+        jawd.shown(items)
+    }
+
     func libraryClose(_ l: LibraryController) {
         if let id = paneID(of: l) { closeLibrary(id) }
     }

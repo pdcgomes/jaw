@@ -242,6 +242,20 @@ struct LiveTests {
         #expect(await until { moves == 1 }, "the page around the lake lands")
         #expect(photos.place == .around(lake, before: 0, after: 120) && photos.list.map(\.id) == [lake] && !photos.older,
                 "the lake and what's older, none twice: \(photos.list.map(\.id))")
+
+        guard case let .success(asked) = jawd.client.request("library.shown", LibraryShown(items: [lake, "3EB0NOTANITEM000"])) else {
+            Issue.record("library.shown wasn't sent")
+            return
+        }
+        var answer: Result<Reply, Failure>?
+        let end = Date().addingTimeInterval(10)
+        while answer == nil, Date() < end {
+            for case let .reply(id, outcome) in jawd.client.drain().events where id == asked {
+                answer = outcome
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        if case .success? = answer {} else { Issue.record("library.shown, an id that names no item passed over: \(String(describing: answer))") }
     }
 
     @Test func `find answers from a real jawd's index`() async throws {

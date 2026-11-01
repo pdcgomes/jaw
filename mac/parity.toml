@@ -15,7 +15,6 @@
 "folder.add" = "2.1"
 "folder.remove" = "2.1"
 "favourite.set" = "2.1"
-"library.shown" = { step = "2.4", from = "library" }
 "send.media" = "2.5"
 "send.contact" = "3.9"
 "voice.play" = "2.6"

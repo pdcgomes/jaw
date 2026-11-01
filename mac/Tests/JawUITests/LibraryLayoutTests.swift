@@ -259,3 +259,24 @@ func photos(_ n: Int, from: Int = 0) -> [LibraryRow] {
         }
     }
 }
+
+@MainActor @Test func `the items on screen are named to jawd as the terminal names them: in order, as they change, and not while the window's closed`() async throws {
+    let (c, asked, w) = pane(.photo, height: 400)
+    defer { w.close() }
+    let visible = c.scroll.contentView.bounds
+    let expected = c.laid.elements.filter { $0.item != nil && $0.frame.maxY >= visible.minY && $0.frame.minY <= visible.maxY }.map(\.item!)
+    #expect(asked.shown.last == expected && !expected.isEmpty && c.onScreen == expected, "\(asked.shown) of \(expected)")
+    try await Task.sleep(for: .milliseconds(250))
+    c.nameShown()
+    #expect(asked.shown.count == 1, "the same items aren't named again")
+    c.scroll(to: c.laid.height)
+    #expect(await eventually { asked.shown.count == 2 })
+    #expect(asked.shown.last == c.onScreen && asked.shown.last != expected, "named again once they change")
+    c.letGoOfPictures()
+    c.scroll(to: 0)
+    try await Task.sleep(for: .milliseconds(250))
+    c.nameShown()
+    #expect(asked.shown.count == 2, "nothing named while the window's closed")
+    c.askPicturesAgain()
+    #expect(asked.shown.count == 3 && asked.shown.last == expected, "and what's on screen once it's back")
+}

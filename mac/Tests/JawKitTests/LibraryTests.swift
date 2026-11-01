@@ -14,6 +14,12 @@ import Testing
     #expect(all["kind"]?.string == "all" && all["text"] == nil && all["chat"] == nil, "every kind, and no filter left in: \(all)")
 }
 
+@Test func `library.shown is written as its fixture`() throws {
+    let shown = LibraryShown(items: ["3EB0A1B2C3D4E5F6", "3EB0C7D8E9F0A1B2", "3EB0D4E5F6A7B8C9"])
+    #expect(try written(id: 61, "library.shown", shown) == JSONValue.parse(fixture("library.shown.request.json")))
+    #expect(LibraryShown.most == 200)
+}
+
 @Test func `a library window's answer reads as its items, the photo here with its previews`() throws {
     guard case let .library(id, watched) = try incoming("library.watch.result.json", .library) else {
         Issue.record("not a library window")
@@ -186,6 +192,18 @@ func library(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
         fake.send(#"{"method":"resync","params":{"watch":"w5"}}"#)
         #expect(await eventually { requests(fake, "library.watch").count == 3 })
         #expect(jawd.client.stats.resyncs == 1)
+    }
+
+    @Test func `the items on screen are named to jawd, 200 at most`() async throws {
+        let fake = try FakeJawd(script: library)
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.shown((0 ..< 250).map { "P\($0)" })
+        #expect(await eventually { requests(fake, "library.shown").count == 1 })
+        let items = requests(fake, "library.shown").first?["items"]?.array?.compactMap(\.string)
+        #expect(items?.count == 200 && items?.first == "P0" && items?.last == "P199", "the first 200, in their order")
     }
 
     @Test func `once a library window is unwatched, its pushes are let go`() async throws {

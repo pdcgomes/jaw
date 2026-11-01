@@ -97,6 +97,11 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     var askedPlace: Place?
     /// What's prefetched, by item: the claim on its picture.
     var prefetched: [String: PictureToken] = [:]
+    /// The items last named to jawd as on screen; whether naming waits for its pause to end; and
+    /// whether the window's closed, when nothing's named.
+    var named: [String] = []
+    var naming = false
+    var paused = false
 
     let root = LibraryRootView()
     let header = LibraryHeader()
@@ -265,6 +270,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         rebuild()
         restore(anchor)
         settle()
+        nameShown()
     }
 
     /// jawd refused the pane's window, in its words.
@@ -346,7 +352,32 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
 
     @objc func scrolled() {
         settle()
+        nameShown()
     }
+
+    /// The items on screen, by id, in their order, as many as `library.shown` names.
+    public var onScreen: [String] {
+        Array(laid.indices(in: scroll.contentView.bounds).compactMap { laid.elements[$0].item }.prefix(LibraryShown.most))
+    }
+
+    /// Names the items on screen to jawd as they change, as the terminal does, so it asks media for
+    /// what they lack: at once, then at most once in 150 ms while they go on changing, as in a
+    /// scroll, the last always named; and never again while they're the same, nor while the window's
+    /// closed.
+    func nameShown() {
+        guard !paused, !naming, window.loaded else { return }
+        let now = onScreen
+        guard now != named else { return }
+        named = now
+        host?.library(self, shown: now)
+        naming = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.namingPause) { [weak self] in
+            self?.naming = false
+            self?.nameShown()
+        }
+    }
+
+    nonisolated static let namingPause = 0.15
 
     /// Whether the window holds the kind's newest: watched from the top, or around an item with
     /// fewer newer than it asked for.
@@ -577,8 +608,10 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         (item as? LibraryGridItem)?.cell.letGo()
     }
 
-    /// As the window closes, the cells let go of what they asked for, and what was prefetched.
+    /// As the window closes, the cells let go of what they asked for, and what was prefetched, and
+    /// nothing's named on screen until it's back.
     public func letGoOfPictures() {
+        paused = true
         for case let item as LibraryGridItem in collection.visibleItems() {
             item.cell.letGo()
         }
@@ -588,11 +621,15 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         prefetched.removeAll()
     }
 
-    /// Once the window's back, the cells on screen ask for their pictures again.
+    /// Once the window's back, the cells on screen ask for their pictures again, and what's on
+    /// screen is named.
     public func askPicturesAgain() {
+        paused = false
         for case let item as LibraryGridItem in collection.visibleItems() {
             item.cell.askPictures()
         }
+        named = []
+        nameShown()
     }
 
     /// Gives the pane the keys: its search line takes them.

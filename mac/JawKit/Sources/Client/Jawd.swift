@@ -56,6 +56,12 @@ public final class Jawd {
         client.watchLibrary(filter, place)
     }
 
+    /// Names the library's items on screen, by `id`, 200 at most, so jawd asks media for what they
+    /// lack, as it does for a messages window's rows: their thumbnails, previews and files.
+    public func shown(_ items: [String]) {
+        ask("library.shown", LibraryShown(items: Array(items.prefix(LibraryShown.most))), .quiet)
+    }
+
     public func move(_ window: WindowID, _ place: Place) {
         client.move(window, place)
     }
