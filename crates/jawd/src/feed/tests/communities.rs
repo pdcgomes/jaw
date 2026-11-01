@@ -717,6 +717,30 @@ async fn a_pinned_community_sits_among_the_pinned_at_its_own_place_above_its_gro
     assert!(all.row(BAIRRO)["sort"].as_str().unwrap().starts_with("1~"), "{}", all.row(BAIRRO)["sort"]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_community_a_list_doesnt_hold_sits_where_the_groups_of_it_there_do_though_its_own_message_is_newer() {
+    let bed = Bed::new(brisk());
+    let family = bairro(&bed).await;
+    // A line in Bairro's own chat, read, newer than every group's message: All holds Bairro, the
+    // other lists only groups of it.
+    bed.apply(vec![said(BAIRRO, "k1", AT + 50)]).await;
+    bed.apply(vec![read_up_to(BAIRRO, "k1")]).await;
+    let mut watcher = bed.watcher(64);
+    let mentions = smart(&mut watcher, "Mentions me").await;
+    let lists: [(&str, &[&str]); 5] = [
+        ("all", &["Bairro 3/1", "  Avisos", "  Festa", "  Xadrez", "Ana", "Regata", "Rui"]),
+        ("unread", &["Ana", "Bairro 3/1", "  Avisos", "  Festa", "Regata"]),
+        ("groups", &["Bairro 3/1", "  Avisos", "  Festa", "  Xadrez", "Regata"]),
+        (&family, &["Ana", "Bairro 2/1", "  Festa"]),
+        (&mentions, &["Bairro 2/1", "  Festa"]),
+    ];
+    for (folder, want) in lists {
+        let held = Held::top(&mut watcher, folder).await;
+        assert_eq!(shape(&held.model), want, "{folder}: Bairro, and the groups of it there");
+        summed(&held.model, folder);
+    }
+}
+
 /// A copy of jaw.db as a kill now would leave it, every commit so far and nothing more.
 fn killed(home: &Path) -> tempfile::TempDir {
     let copy = tempfile::tempdir().unwrap();
