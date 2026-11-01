@@ -54,7 +54,7 @@ public enum ChatMenu {
             .command("swap.left", title: "Left"), .command("swap.right", title: "Right"),
             .command("swap.up", title: "Up"), .command("swap.down", title: "Down"),
         ])
-        return splits + [swap, .separator] + actions(chat) + [.separator, .command("search.chat")]
+        return splits + [swap, .separator] + actions(chat) + [.separator, .command("search.chat"), .command("chat.library")]
     }
 
     /// Pin, Mute, Archive and Mark as Read or Unread, as the chat stands.

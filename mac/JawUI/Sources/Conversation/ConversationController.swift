@@ -32,9 +32,13 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of row: MessageRow)
     /// What a file drags out as: its clone once it's here, a promise kept by saving it before.
     func conversation(_ c: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting?
+    /// The header's Library button: the chat's library, beside its pane.
+    func conversationLibrary(_ c: ConversationController)
 }
 
 public extension ConversationHost {
+    func conversationLibrary(_: ConversationController) {}
+
     func conversation(_: ConversationController, media _: MediaOffer.Act, _: [MediaOffer], at _: Int, of _: MessageRow) {}
 
     func conversation(_: ConversationController, dragging _: MediaOffer) -> NSPasteboardWriting? {
@@ -225,6 +229,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             host?.conversationFocused(self)
         }
         header.menuFor = { [weak self] in self?.paneMenuShown() }
+        header.libraryAsked = { [weak self] in
+            guard let self else { return }
+            host?.conversationLibrary(self)
+        }
         table.menuFor = { [weak self] in self?.paneMenuShown() }
         applyTheme()
         header.show(chat)
@@ -1327,6 +1335,11 @@ final class HeaderView: NSView {
     /// The pane's menu, asked for as a right click opens it.
     var menuFor: (() -> NSMenu?)?
     var popUp = MenuPopUp()
+    /// The chat's library, beside its pane: the button shown while the pointer is over the header,
+    /// as the pane's close button is, left of where that sits.
+    var libraryAsked: (() -> Void)?
+    lazy var library = IconButton(symbol: "photo.on.rectangle.angled", label: "This Chat's Library", shortcut: Shortcut("l", [.command, .option]),
+                                  size: .small) { [weak self] in self?.libraryAsked?() }
 
     override func menu(for _: NSEvent) -> NSMenu? {
         menuFor?()
@@ -1355,6 +1368,9 @@ final class HeaderView: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        library.isHidden = true
+        addSubview(library)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
         let side: CGFloat = 28
         NSLayoutConstraint.activate([
             blur.topAnchor.constraint(equalTo: topAnchor), blur.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -1371,7 +1387,17 @@ final class HeaderView: NSView {
             stack.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Self.stackGap),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.trailing),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            library.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.closing),
+            library.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+    }
+
+    override func mouseEntered(with _: NSEvent) {
+        library.isHidden = false
+    }
+
+    override func mouseExited(with _: NSEvent) {
+        library.isHidden = true
     }
 
     @available(*, unavailable)
@@ -1388,8 +1414,10 @@ final class HeaderView: NSView {
 
     /// Where the name and how the chat is start, after the picture.
     static let stackGap = Space.m + 2
-    /// What's kept clear at the header's right, for the pane's buttons.
-    static let trailing = Space.xxl + Space.xl
+    /// What's kept clear at the header's right, for the pane's buttons: the library's, left of where
+    /// the pane's close button sits.
+    static let closing = Space.xxl + Space.xl
+    static let trailing = closing + 22 + Space.xs
 
     /// Who's typing gets the room the header has after its picture, its names cut short to fit.
     override func layout() {
@@ -1445,6 +1473,7 @@ final class HeaderView: NSView {
         name.textColor = roles.text.nsColor
         detail.textColor = !typing.isEmpty || online ? roles.online.nsColor : roles.secondary.nsColor
         typingLabel.colour = roles.online
+        library.roles = roles
     }
 }
 

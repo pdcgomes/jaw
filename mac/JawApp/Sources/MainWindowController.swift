@@ -119,9 +119,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         var views: [Int: NSView] = [:]
         for slot in grid.slots {
             if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
+            if let id = slot.chat, let l = model.libraries[id] { views[slot.id] = l.view }
         }
+        let library = model.focusedChat.map(LibraryPane.isLibrary) ?? false
         return WindowContent.Panes(grid: grid, views: views, unopened: model.unopened, focused: model.focusedSlot,
-                                   box: model.conversation?.composer.view, look: model.preferences.paneLook(model.roles))
+                                   box: model.conversation?.composer.view, boxSays: library ? LibraryController.keys : nil,
+                                   look: model.preferences.paneLook(model.roles))
     }
 
     /// Lays the panes out as the model's layout has them, the focused one outlined.
@@ -153,7 +156,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidResize(_: Notification) {
-        content.fold(chatOpen: model.conversation != nil)
+        content.fold(chatOpen: model.focusedChat != nil)
     }
 
     func windowDidBecomeKey(_: Notification) {

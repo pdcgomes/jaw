@@ -12,6 +12,8 @@ struct Screen {
     var chats: [ChatRow] = Samples.chats
     var typing: Typists = Samples.typing
     var open: [ChatRow] = []
+    /// A library in a pane after the open chats', with the keys, as ⌘L or a chat's header opens it.
+    var library: LibraryScope?
     var layout = "Unsaved Panes"
     var focusMode = false
     var width: CGFloat = 1180
@@ -55,12 +57,14 @@ struct Screen {
         return Bar(height: window.frame.height - window.contentLayoutRect.height, buttons: buttons, sidebar: measured(sidebar))
     }()
 
-    /// The open chats side by side on a grid of one row, each in a slot numbered from 1.
+    /// The open chats side by side on a grid of one row, each in a slot numbered from 1, then the
+    /// library's.
     var grid: PaneGrid? {
-        guard !open.isEmpty else { return nil }
-        let n = Double(open.count)
-        return PaneGrid(cols: (0 ... open.count).map { Double($0) / n }, rows: [0, 1],
-                        slots: open.enumerated().map { PaneGrid.Slot(id: $0.offset + 1, c0: $0.offset, c1: $0.offset + 1, r0: 0, r1: 1, chat: $0.element.id) })
+        let ids = open.map(\.id) + (library.map { [LibraryPane.id($0)] } ?? [])
+        guard !ids.isEmpty else { return nil }
+        let n = Double(ids.count)
+        return PaneGrid(cols: (0 ... ids.count).map { Double($0) / n }, rows: [0, 1],
+                        slots: ids.enumerated().map { PaneGrid.Slot(id: $0.offset + 1, c0: $0.offset, c1: $0.offset + 1, r0: 0, r1: 1, chat: $0.element) })
     }
 
     /// The window's content made from this screen in `conditions`: the sidebar; the chat list holding
@@ -106,10 +110,25 @@ struct Screen {
                 list.select(chat.id)
             }
         }
+        var focused = 1
+        var says: String?
+        if let library {
+            let l = LibraryController(scope: library, style: conditions.style)
+            l.pictures = pictures
+            content.addChild(l)
+            _ = l.view
+            let items = Samples.library.filter { library.chat == nil || $0.chat == library.chat }
+            l.apply(Samples.libraryUpdate(of: items, kind: nil, counts: Samples.counts(of: items)))
+            focused = open.count + 1
+            views[focused] = l.view
+            box = nil
+            says = LibraryController.keys
+        }
         content.bar.restyle(roles)
         content.bar.show(layout: layout, edited: false)
         content.show(situation, chats: chats, typing: typing, focused: open.first,
-                     panes: grid.map { WindowContent.Panes(grid: $0, views: views, focused: 1, box: box, look: PaneLook(outline: roles.accent)) },
+                     panes: grid.map { WindowContent.Panes(grid: $0, views: views, focused: focused, box: box, boxSays: says,
+                                                           look: PaneLook(outline: roles.accent)) },
                      roles: roles, now: Date(timeIntervalSince1970: Double(Samples.now) / 1000), actions: WindowContent.Actions())
         content.fold(chatOpen: !open.isEmpty, animated: false)
         if focusMode { content.focusMode(true, animated: false) }

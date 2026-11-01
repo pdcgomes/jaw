@@ -53,7 +53,7 @@ func emptyChatList(_ bands: [Note], width: CGFloat) -> HarnessScene {
             "roles", "mimic", "chat-list", "conversation", "link-previews", "polls", "pictures", "download-states", "library-grid", "library-rows",
             "library-all", "library-kinds", "library-search", "palette", "poll-form", "states",
             "screens-jawd", "screens-connection", "screens-linking", "screens-empty",
-            "screens-chat", "screens-panes", "screens-focus", "screens-folded", "screens-overlays",
+            "screens-chat", "screens-panes", "screens-library", "screens-focus", "screens-folded", "screens-overlays",
         ])
         for scene in HarnessCatalog.shared.scenes {
             let drawn = try await Pictures.draw(scene, scene.variants[0].applied(to: Conditions()))

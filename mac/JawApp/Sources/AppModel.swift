@@ -33,6 +33,11 @@ final class AppModel {
     /// Each pane's conversation, by the chat it shows; a chat shows in one pane at most.
     var panes: [String: ConversationController] = [:]
     var paneWindows: [WindowID: String] = [:]
+    /// Each library pane, by its slot's chat (`LibraryPane`), its window, and the chat each was opened
+    /// from, which takes its place when it closes with no other pane.
+    var libraries: [String: LibraryController] = [:]
+    var libraryWindows: [WindowID: String] = [:]
+    var libraryCameFrom: [String: String] = [:]
     /// The named layouts and the one on screen.
     var book = LayoutBook()
     /// The kept layouts couldn't be read, so they're left as they are rather than written over.
@@ -187,6 +192,8 @@ final class AppModel {
         case let .messages(w, u):
             if let chat = paneWindows[w] { panes[chat]?.apply(u) } else { glance.apply(w, u) }
             if pending != nil { cameFor(u.upsert) }
+        case let .library(w, u):
+            if let id = libraryWindows[w] { libraries[id]?.apply(u) }
         case let .typing(now):
             typing = now
             ConversationController.give(now, to: panes.values)
@@ -223,8 +230,8 @@ final class AppModel {
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
-        case let .windowFailed(_, why):
-            say("a window couldn't be watched: \(why)", warn: true)
+        case let .windowFailed(w, why):
+            if let id = libraryWindows[w] { libraries[id]?.refuse(why) } else { say("a window couldn't be watched: \(why)", warn: true) }
         case let .layout(kept) where kept.interface == TerminalPanes.interface:
             terminalPanes(kept)
         case let .looked(chat, found):
@@ -234,7 +241,7 @@ final class AppModel {
             say("not downloaded: \(why)", warn: true)
         case let .saved(ticket, message, path, why):
             savedAnswer(ticket, message, path, why)
-        case .push, .chats, .layout, .library:
+        case .push, .chats, .layout:
             break
         }
     }
@@ -250,6 +257,9 @@ final class AppModel {
         for c in panes.values {
             c.spec = spec
             c.applyTheme()
+        }
+        for l in libraries.values {
+            l.style = style
         }
         window?.showPanes()
     }
@@ -349,8 +359,18 @@ final class AppModel {
         return c
     }
 
-    /// Lets a chat's pane go: its window unwatched, its draft kept by jawd.
+    /// Lets a chat's pane go: its window unwatched, its draft kept by jawd; or a library's.
     func closePane(_ chat: String) {
+        if let l = libraries.removeValue(forKey: chat) {
+            l.letGoOfPictures()
+            l.view.removeFromSuperview()
+            for (w, id) in libraryWindows where id == chat {
+                jawd.unwatch(w)
+                libraryWindows[w] = nil
+            }
+            libraryCameFrom[chat] = nil
+            return
+        }
         guard let c = panes.removeValue(forKey: chat) else { return }
         c.leave()
         c.view.removeFromSuperview()
@@ -370,7 +390,9 @@ final class AppModel {
             c.lookingChanged()
         }
         if changed || force { window?.showPanes() }
-        if let chat = slot.chat {
+        if let id = slot.chat, let l = libraries[id] {
+            l.focus()
+        } else if let chat = slot.chat {
             window?.chatList.select(chat)
             panes[chat]?.focusBox()
             panes[chat]?.readIfLooking()
@@ -554,9 +576,10 @@ final class AppModel {
         reconcile(focus: focusedSlot)
     }
 
-    /// A chat's name for the editor's panes.
+    /// A chat's name for the editor's panes, or a library's.
     func chatName(_ id: String) -> String {
-        window?.chatList.row(id)?.name ?? panes[id]?.chat.name ?? id
+        if let name = LibraryPane.name(id, chat: { chatName($0) }) { return name }
+        return window?.chatList.row(id)?.name ?? panes[id]?.chat.name ?? id
     }
 
     func renameLayout(_ old: String, to new: String) {
@@ -622,14 +645,16 @@ final class AppModel {
     /// pane made once jawd finds it (`lookedUp`), and a slot whose chat won't have one says why.
     func reconcile(focus at: Int?) {
         let shown = Set(grid?.chats ?? [])
-        for chat in panes.keys where !shown.contains(chat) {
+        for chat in Array(panes.keys) + Array(libraries.keys) where !shown.contains(chat) {
             closePane(chat)
         }
         let reading = grid?.reading ?? []
         var outside: [String] = []
         for slot in reading.filter({ $0.id == at }) + reading.filter({ $0.id != at }) {
-            guard let id = slot.chat, panes[id] == nil, !outside.contains(id) else { continue }
-            if let row = window?.chatList.row(id) {
+            guard let id = slot.chat, panes[id] == nil, libraries[id] == nil, !outside.contains(id) else { continue }
+            if let scope = LibraryPane.scope(of: id, name: chatName) {
+                _ = makeLibrary(id, scope)
+            } else if let row = window?.chatList.row(id) {
                 _ = makePane(row, place: ConversationController.place(for: row))
             } else {
                 outside.append(id)
@@ -754,11 +779,105 @@ final class AppModel {
     /// With no window open the decoded pictures go, as the design's "under 25 MB with no window
     /// open" asks; the panes' cells ask for theirs again once it's back.
     func windowClosed() {
+        for l in libraries.values {
+            l.letGoOfPictures()
+        }
         ConversationController.windowClosed(panes.values, pictures: pictures)
     }
 
     func windowShown() {
+        let closed = pictures.cache.isClosed
         ConversationController.windowShown(panes.values, pictures: pictures)
+        if closed {
+            for l in libraries.values {
+                l.askPicturesAgain()
+            }
+        }
+    }
+
+    // MARK: - The library
+
+    /// Opens the library of `scope` in a pane: the one that shows it, or beside the focused pane,
+    /// as `LibraryPane.open` says, taking the keys.
+    func openLibrary(_ scope: LibraryScope) {
+        let id = LibraryPane.id(scope)
+        switch LibraryPane.open(id, in: grid, focused: focusedSlot, size: gridSize) {
+        case let .shown(slot):
+            focus(slot: slot)
+        case let .into(g, slot, replacing):
+            let from = focusedChat.flatMap { LibraryPane.isLibrary($0) ? nil : $0 }
+            if let replacing { closePane(replacing) }
+            if libraries[id] == nil { _ = makeLibrary(id, scope) }
+            libraryCameFrom[id] = from
+            grid = g
+            focusedSlot = nil
+            focus(slot: slot, force: true)
+            savePanes()
+        }
+    }
+
+    /// A library pane, its window watched as it asks.
+    func makeLibrary(_ id: String, _ scope: LibraryScope) -> LibraryController {
+        let l = LibraryController(scope: scope, style: style)
+        l.pictures = pictures
+        l.host = self
+        l.chats = { [weak self] in (self?.window?.chatList.all ?? []).filter { $0.kind != .community }.map { (id: $0.id, name: $0.name) } }
+        l.people = { [weak self] in
+            guard let self else { return [] }
+            // Who the app knows by their person: the members of the chats open in panes.
+            var seen: Set<String> = []
+            return panes.values.flatMap(\.members).filter { !me.contains($0.person) && seen.insert($0.person).inserted }
+                .map { (id: $0.person, name: $0.name) }
+        }
+        _ = l.view
+        libraries[id] = l
+        l.ask()
+        return l
+    }
+
+    /// The library's slot closes, the keys going to the pane beside it, or the chat it came from
+    /// taking its place when it was alone.
+    func closeLibrary(_ id: String) {
+        guard let grid else { return }
+        let (g, next) = LibraryPane.close(id, in: grid, cameFrom: libraryCameFrom[id])
+        closePane(id)
+        self.grid = g
+        if let chat = next.flatMap({ g.slot($0)?.chat }), panes[chat] == nil, let row = window?.chatList.row(chat) {
+            _ = makePane(row, place: ConversationController.place(for: row))
+        }
+        focusedSlot = nil
+        if let next { focus(slot: next, force: true) }
+        window?.showPanes()
+        window?.refresh()
+        savePanes()
+    }
+
+    func paneID(of l: LibraryController) -> String? {
+        libraries.first { $0.value === l }?.key
+    }
+}
+
+extension AppModel: LibraryHost {
+    func library(_ l: LibraryController, watch filter: LibraryFilter, _ place: Place) {
+        guard let id = paneID(of: l) else { return }
+        for (w, pane) in libraryWindows where pane == id {
+            jawd.unwatch(w)
+            libraryWindows[w] = nil
+        }
+        libraryWindows[jawd.watchLibrary(filter, place)] = id
+    }
+
+    func library(_ l: LibraryController, move place: Place) {
+        guard let id = paneID(of: l), let w = libraryWindows.first(where: { $0.value == id })?.key else { return }
+        jawd.move(w, place)
+    }
+
+    func libraryClose(_ l: LibraryController) {
+        if let id = paneID(of: l) { closeLibrary(id) }
+    }
+
+    func libraryFocused(_ l: LibraryController) {
+        if let id = paneID(of: l), let slot = grid?.slot(showing: id), slot.id != focusedSlot { focus(slot: slot.id) }
     }
 }
 
@@ -840,6 +959,11 @@ extension AppModel: ConversationHost {
 
     func conversationFocused(_ c: ConversationController) {
         if focusedChat != c.chat.id { focus(c.chat.id) }
+    }
+
+    func conversationLibrary(_ c: ConversationController) {
+        focus(c.chat.id)
+        openLibrary(.chat(id: c.chat.id, name: c.chat.name))
     }
 
     func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of row: MessageRow) {

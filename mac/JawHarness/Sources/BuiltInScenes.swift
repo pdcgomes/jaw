@@ -26,6 +26,7 @@ enum BuiltInScenes {
         catalog.register(.screensEmpty)
         catalog.register(.screensChat)
         catalog.register(.screensPanes)
+        catalog.register(.screensLibrary)
         catalog.register(.screensFocus)
         catalog.register(.screensFolded)
         catalog.register(.screensOverlays)

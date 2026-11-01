@@ -104,6 +104,9 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     let collection = NSCollectionView()
     let grid = LibraryGridLayout()
 
+    /// What the box says while a library's pane has the keys, as the terminal's footer says them.
+    public nonisolated static let keys = "↩ opens · ⌘↩ goes to its message · ⇥ another kind · ⎋ closes the library"
+
     /// Items a kind's window holds each side of the item it's around, and from the top.
     public nonisolated static let side: UInt32 = 300
     public nonisolated static let page: UInt32 = 240

@@ -32,24 +32,24 @@ public final class DetailController: NSViewController {
         ])
     }
 
-    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles, PaneLook, [String: String])?
+    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles, PaneLook, [String: String], String?)?
 
     /// Lays the panes out with the focused chat's box under them, unless they're already so, with what
     /// `unopened` says for a slot whose chat won't have a pane.
     public func show(panes grid: PaneGrid, views: [Int: NSView], unopened: [String: String] = [:], focused: Int?,
-                     box composer: NSView?, roles: Roles, look: PaneLook, force: Bool = false)
+                     box composer: NSView?, boxSays: String? = nil, roles: Roles, look: PaneLook, force: Bool = false)
     {
         let ids = views.mapValues(ObjectIdentifier.init)
         let boxID = composer.map(ObjectIdentifier.init)
         if !force, shown === panesArea, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == boxID, drawn.4 == roles,
-           drawn.5 == look, drawn.6 == unopened
+           drawn.5 == look, drawn.6 == unopened, drawn.7 == boxSays
         {
             return
         }
         place(panesArea)
         panes.show(grid, views: views, unopened: unopened, focused: focused, roles: roles, look: look)
-        box.show(composer, roles: roles)
-        drawn = (grid, focused, ids, boxID, roles, look, unopened)
+        box.show(composer, says: boxSays, roles: roles)
+        drawn = (grid, focused, ids, boxID, roles, look, unopened, boxSays)
     }
 
     public func show(state kind: StateView.Kind, roles: Roles) {

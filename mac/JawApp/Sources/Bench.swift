@@ -143,7 +143,7 @@ enum Bench {
                 default: break
                 }
             }
-            let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "1": 18, "2": 19, "3": 20,
+            let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "l": 37, "1": 18, "2": 19, "3": 20,
                                            "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49]
             let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
                                          "down": NSDownArrowFunctionKey]
@@ -177,7 +177,11 @@ enum Bench {
                     let looking = QuickLook.shared.items.isEmpty ? "" : " · looking at " + QuickLook.shared.items.map { item in
                         (item.previewItemTitle ?? "") + handedOver(item.previewItemURL)
                     }.joined(separator: ", ")
-                    let said = palette + glance + form + selected + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                    let library = model.libraries.sorted { $0.key < $1.key }.map { id, l in
+                        " · \(id) showing \(l.kind?.rawValue ?? "every kind") (\(l.window.count) items)"
+                            + (l.selectedItem.map { " selected \($0.kind.rawValue) \($0.id)" } ?? "")
+                    }.joined()
+                    let said = palette + glance + form + selected + library + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 }

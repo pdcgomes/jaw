@@ -33,16 +33,19 @@ public final class WindowContent: NSViewController {
         public var unopened: [String: String]
         public var focused: Int?
         public var box: NSView?
+        /// What the box says in place of a composer: a library's keys while its pane has them.
+        public var boxSays: String?
         public var look: PaneLook
 
         public init(grid: PaneGrid, views: [Int: NSView], unopened: [String: String] = [:], focused: Int?, box: NSView?,
-                    look: PaneLook)
+                    boxSays: String? = nil, look: PaneLook)
         {
             self.grid = grid
             self.views = views
             self.unopened = unopened
             self.focused = focused
             self.box = box
+            self.boxSays = boxSays
             self.look = look
         }
     }
@@ -184,6 +187,6 @@ public final class WindowContent: NSViewController {
     /// Lays the panes out in the panes' place, with the focused chat's box under them.
     public func show(_ panes: Panes, roles: Roles) {
         detail.show(panes: panes.grid, views: panes.views, unopened: panes.unopened, focused: panes.focused, box: panes.box,
-                    roles: roles, look: panes.look)
+                    boxSays: panes.boxSays, roles: roles, look: panes.look)
     }
 }

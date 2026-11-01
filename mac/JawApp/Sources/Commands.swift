@@ -99,8 +99,14 @@ extension AppModel {
                     group: 3, enabled: isChat) { [weak self] in self?.say("GIF search comes with jawd's gif.search") })
         add(Command("record", "Record a Voice Message", phrase: "Record a voice message", detail: "comes with jawd's M5", key: Shortcut("r"),
                     place: .chat, group: 3) { [weak self] in self?.say("recording comes with jawd's M5") })
-        add(Command("library", "Library", phrase: "Library", detail: "comes with jawd's M3", key: Shortcut("l"), place: .chat, group: 3)
-            { [weak self] in self?.say("the library comes with jawd's M3") })
+        add(Command("library", "Library", phrase: "Library", detail: "everything shared, in every chat", symbol: "photo.on.rectangle.angled",
+                    key: Shortcut("l"), place: .chat, group: 3) { [weak self] in self?.openLibrary(.every) })
+        add(Command("chat.library", "This Chat's Library", phrase: "This chat's library", detail: "everything shared in it",
+                    key: Shortcut("l", [.command, .option]), place: .chat, group: 3, enabled: isChat)
+            { [weak self] in
+                guard let self, let c = conversation else { return }
+                openLibrary(.chat(id: c.chat.id, name: c.chat.name))
+            })
 
         // Message: keys the conversation takes itself while a message is selected.
         for (id, title, phrase, key) in [

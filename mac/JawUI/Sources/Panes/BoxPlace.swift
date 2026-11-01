@@ -2,14 +2,16 @@ import AppKit
 import JawThemes
 
 /// The window's one box, under the panes and as wide as them: the focused chat's composer, or,
-/// when the focused pane has no chat, a box that says how to give it one. Each chat keeps its own
+/// when the focused pane has no chat, a box that says how to give it one, or what a pane that isn't
+/// a chat's takes, as a library's keys. Each chat keeps its own
 /// composer, with its draft, its reply or edit and what didn't send, so moving the focus loses
 /// nothing typed.
 @MainActor
 public final class BoxPlace: NSView {
     var shown: NSView?
     let none = Surface(.field, radius: Radius.field)
-    let noneSays = Labels.make("this pane has no chat: ⌘K to put one here", .body)
+    static let noChat = "this pane has no chat: ⌘K to put one here"
+    let noneSays = Labels.make(BoxPlace.noChat, .body)
 
     override public init(frame: NSRect) {
         super.init(frame: frame)
@@ -28,11 +30,13 @@ public final class BoxPlace: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Shows `composer`'s view, or the box for an empty pane.
-    public func show(_ composer: NSView?, roles: Roles) {
+    /// Shows `composer`'s view, or the box for an empty pane, saying `says` in place of how to give it
+    /// a chat.
+    public func show(_ composer: NSView?, says: String? = nil, roles: Roles) {
         layer?.backgroundColor = roles.ground.cgColor
         none.roles = roles
         Labels.style(noneSays, .tertiary, roles: roles)
+        noneSays.stringValue = says ?? Self.noChat
         let view = composer ?? none
         guard view !== shown else { return }
         shown?.removeFromSuperview()

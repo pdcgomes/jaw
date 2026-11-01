@@ -60,6 +60,16 @@ extension HarnessScene {
         ) { ThreePanesScene(conditions: $0) }
     }
 
+    static var screensLibrary: HarnessScene {
+        HarnessScene(
+            id: "screens-library", title: "A chat beside its library", symbol: "photo.on.rectangle.angled",
+            synopsis: "Lisbon Climbing with its library beside it in a pane of its own, as its header's button or ⌥⌘L opens it, the library with the keys",
+            section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
+                                        LibraryController.self, BottomBar.self, StatusLine.self],
+            width: 1180,
+        ) { LibraryScreenScene(conditions: $0) }
+    }
+
     static var screensFocus: HarnessScene {
         HarnessScene(
             id: "screens-focus", title: "Focus mode", symbol: "rectangle.center.inset.filled",
@@ -260,6 +270,20 @@ private struct ThreePanesScene: View {
             preconditionFailure("Samples.chats has no chat called Mãe for the three panes")
         }
         return mae
+    }
+}
+
+/// Lisbon Climbing beside its library.
+private struct LibraryScreenScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        ScreenBand(
+            title: "Lisbon Climbing beside its library",
+            note: "The library's pane has the keys, outlined in the accent, the chat's dimmed beside it; its header says Lisbon Climbing and how many it shared, the strip every kind with its count, and every kind's shelves hold only the group's items: its photos and videos, files, links and Inês's voice message, each saying who without saying where. The box under the panes says the library's keys in place of a composer.",
+            screen: Screen(open: [Samples.group], library: .chat(id: Samples.group.id, name: Samples.group.name)),
+            conditions: conditions,
+        )
     }
 }
 

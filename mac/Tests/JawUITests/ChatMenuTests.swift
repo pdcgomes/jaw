@@ -58,7 +58,7 @@ func titles(_ entries: [MenuEntry]) -> [String] {
     let chat = ChatRow(id: "ana", v: 1, sort: "1", name: "Ana")
     #expect(titles(ChatMenu.pane(chat)) == [
         "split.across", "split.down", "pane.close", "Swap ▸ Left, Right, Up, Down", "—",
-        "Pin", "Mute ▸ mute.8h, mute.week, mute.always", "Archive", "Mark as Unread", "—", "search.chat",
+        "Pin", "Mute ▸ mute.8h, mute.week, mute.always", "Archive", "Mark as Unread", "—", "search.chat", "chat.library",
     ])
     #expect(titles(ChatMenu.splits) == ["split.across", "split.down", "pane.close"], "a message's menu's end, an empty pane's menu")
 }
