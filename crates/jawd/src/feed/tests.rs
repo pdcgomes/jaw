@@ -5627,3 +5627,27 @@ async fn a_presence_push_that_finds_no_room_waits_for_it_and_goes_as_they_are_th
     assert_eq!(watcher.pushes.first().map(|(method, _)| method.as_str()), Some("messages"), "{:?}", watcher.pushes);
     assert_eq!(watcher.presence_told, [(OPEN.to_string(), online)], "her presence once there was room");
 }
+
+/// A library window shows nobody's presence, of a chat, of a person or across chats, so none has
+/// jawd follow anyone, while a conversation beside them shows its person's (the presence landing
+/// audit's T1).
+#[tokio::test(flavor = "multi_thread")]
+async fn library_windows_show_nobodys_presence_while_a_conversation_beside_them_shows_its_persons() {
+    let (bed, _typing, _hearing) = typing_bed(NEVER).await;
+    bed.apply(vec![
+        Change::Message(photo(OPEN, "p-ana", 11_000, OPEN)),
+        Change::Message(photo(GROUP, "p-rui", 12_000, &person(9))),
+    ])
+    .await;
+    bed.store.indexed().await.unwrap();
+    let mut watcher = bed.watcher(64);
+    watcher.watch("library.watch", ana_photos()).await;
+    watcher.watch("library.watch", every_photo()).await;
+    watcher.watch("library.watch", json!({"kind": "photo", "person": "person:1", "around": "top", "after": 10})).await;
+    assert_eq!(bed.feed.showing(), (Vec::new(), Vec::new()), "library windows show nobody's presence");
+    let conversation = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 5})).await;
+    let (open, listed) = bed.feed.showing();
+    assert_eq!((open.len(), listed), (1, Vec::new()), "a conversation beside them shows its person's alone");
+    watcher.call("unwatch", json!({"watch": conversation})).await.unwrap();
+    assert_eq!(bed.feed.showing(), (Vec::new(), Vec::new()), "and once it's closed, nobody's again");
+}
