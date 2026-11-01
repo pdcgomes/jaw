@@ -47,7 +47,9 @@ public enum Opened {
     }
 
     /// A clone made at once, as a drag starting needs, nil where it would take a copy: quarantined,
-    /// and left writable, as the Finder keeps a file's mode on the copy it makes of a drop.
+    /// and left writable, as the Finder keeps a file's mode on the copy it makes of a drop. An app
+    /// dropped on that opens the file where it is, as Preview's Dock icon does, edits this clone
+    /// itself, and what it saves is lost when Jaw quits or the file is dragged again.
     public static func clone(of file: URL, named name: String, for message: String, in folder: URL = Opened.folder) -> URL? {
         guard let target = try? place(message, name, in: folder.appending(path: "drag", directoryHint: .isDirectory)) else { return nil }
         if same(target, as: file) { return target }
