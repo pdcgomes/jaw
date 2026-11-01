@@ -11,7 +11,7 @@
 ## How the terminal is tracked
 
 - **`make check-parity`** (`scripts/check-parity.py`) reads which of jawd's requests each interface sends and which of its pushes it reads, from their source (the terminal's in `crates/jaw` and `crates/jaw-client`, the Mac's in `mac/`), and which requests jawd serves. Every one the terminal uses and the Mac doesn't is listed in [`mac/parity.toml`](../../mac/parity.toml) with the step below that brings it. The check fails on a gap the list doesn't have, and on one the Mac has closed that it still holds, so the list always says what's left and why.
-- **Ahead of main:** `make check-parity ARGS="--terminal <branch>"` reads a terminal branch against the Mac on main, so what's being built is queued before it lands. Rows from a branch whose names main's protocol doesn't have yet say which branch (`from`); `library.shown` and the `library` push are queued that way now.
+- **Ahead of main:** `make check-parity ARGS="--terminal <branch>"` reads a terminal branch against the Mac on main, so what's being built is queued before it lands. Rows from a branch whose names main's protocol doesn't have yet say which branch (`from`); `library.shown` and the `library` push were queued that way until the library landed.
 - **What a request can't show:** a feature that needs no new request, such as the terminal's folder keys or the IRC layout. Those come from each terminal branch's commits and the parity canvas, which is brought up to date whenever main moves; the canvas is the whole picture, and the check is the guard.
 - **When it runs:** whenever main moves, with each terminal or jawd branch that lands, and at the start and end of every Mac step. Something new from the terminal becomes a row in the list and a line in its step below, in the same commit.
 - **In CI** (Owner, 27 Oct): the check runs on every push, beside the data-audit check, once CI runs again; not in the pre-push hook, so the Mac never holds a terminal branch up.
@@ -90,8 +90,9 @@ The terminal's Enter opens a photo, a video or a file in its app, and s saves it
 The terminal's Ctrl-L has every photo, video, voice message, file and link, across chats or in one: the strip of kinds, `from:`, `in:`, `since:` and `until:`, Enter to open, Ctrl-G to the message. It runs on the made-up account, and on jawd's `library.watch` on `library`.
 
 - **The Mac's** is Mac-M2's step 7: in a pane, with ⌘L for every chat or from a chat's header for one; the kinds with their counts, the filters as tokens, the grid of previews, rows for voice, files and links, Enter to open and ⌘↩ to the message.
-- **Needs from jawd:** the library, on `library`, in audit and stacked on media in; links come with `m2-content`.
-- **The check:** `library.watch`, `library.shown` and the `library` push (both from `library`).
+- **Built** (`mac-library`, [the library plan](2026-11-01-jaw-mac-library-plan.md)): all of it, on jawd's `library.watch`. Enter looks at a photo, a video or a file with Quick Look, as 2.3's Enter does, the photos and videos near it paged through, the viewer coming after parity (Phase 4); a voice message plays once jawd plays voice (2.6). What jawd's library rows don't carry, a voice message's waveform, a file's download state and a link's thumbnail, is the Mac design's P14; until it's served they're drawn as even bars, "not downloaded" and the link's mark. `from:` offers you, the senders of the items held and the members of the chats open in panes until the Mac watches the roster (2.1).
+- **Needs from jawd:** the library, on main since 77d44257, links with it.
+- **The check:** `library.watch`, `library.shown` and the `library` push, out of `mac/parity.toml` as the Mac sends and reads them.
 
 ### 2.5 Attaching photos, videos and files
 

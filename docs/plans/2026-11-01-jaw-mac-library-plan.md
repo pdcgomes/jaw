@@ -159,6 +159,17 @@ What the designs leave open, each with its options and the lean the plan builds;
 
 A proposal for jawd's builders, in [the Mac design](2026-10-26-jaw-mac-design.md)'s "Protocol additions". A library row carries less of its message than a message row does, so the design's library can't be drawn whole: a voice message's `voice` has its `seconds` but not its `waveform` or `played`; a file's `file` has its `path` once it's here but not the copy's `state`, `progress` and `error`, so a file not here can't say it's coming, expired, gone or waiting for the phone, nor offer what 2.3's card offers; and a link's `link` has no `preview`, the thumbnail its message's row has. The rows would carry them as message rows have them, read in the window's one read transaction as the rest of the row is. It changes `crates/jawd/src/feed/library.rs` and `store/library.rs`, so it follows "Data integrity" in jaw's design and is audited by the database expert before it lands. Until then the Mac draws a voice message's bars evenly, a file not here with ↓ and its size, and a link's well with its symbol.
 
+## As built
+
+What changed from the tasks above as they were built:
+
+- **The rows came with the grid.** Task 2's layout and drawing hold the rows and the shelves; task 3 is their tests, references and scenes.
+- **The references** are `library-grid-*` (task 2, photos and videos), `library-rows-*` and `library-all-*` (task 3), `library-strip-{dark,light}` (task 4, the strip being the same in either look) and `library-search-*` (task 5, whole panes with tokens and an offer), each set in bubbles and lines, dark and light, but the strip's. The harness's scenes are Library grid, Library rows, Library, every kind, Library kinds and Library search, under Panes, and A chat beside its library, under Screens.
+- **The pane** (task 6): while a library has the keys, the box under the panes says them, as the terminal's footer does; the chat header's Library button shows while the pointer is over the header, as the pane's close button does, and the header keeps room for both.
+- **The keys** (task 7): a panel that took the keys, as Quick Look's does, leaves the window with none of its own, so a library pane with the focus takes them back as the window becomes key; ⌘↩ is the pane's key equivalent, and the field's when the app isn't active; the snapshot's keys offer a key with ⌘ to the window's views first, as AppKit offers it to a key window's, since the build Mac runs the app inactive.
+- **Parity** (tasks 1 and 8): each row came out of `mac/parity.toml` with the task that closed it, so `make check-parity` passes at every commit; task 9 is the README, the parity plan's step and P14.
+- **The rebase:** `mac-media` landed during task 7 (07ce129a to 7b1ad56e), and the branch was rebased onto it with `git rebase --onto origin/main 60014a35`, without a conflict; jawd was built again from main's code for the suites after.
+
 ## After the plan
 
 The branch is rebased onto main once `mac-media` is there, every suite run again on the build Mac with a jawd built from main's code, and reviewed; then it lands from this worktree, the build Mac's copy (`~/src/build-mac/jaw/jaw-mac-library`) deleted after.
