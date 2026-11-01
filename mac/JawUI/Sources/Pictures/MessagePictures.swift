@@ -55,8 +55,9 @@ public final class MessagePictures {
 
     /// Asks for what the slot lacks at `scale`, for `token`: its best preview that can be read, and,
     /// while no preview of it can be drawn, its blurred thumbnail. `came` runs on the main thread as
-    /// each comes; nothing is asked twice.
+    /// each comes; nothing is asked twice, nor anything while the cache is closed.
     public func ask(_ slot: PictureSlot, scale: CGFloat, for token: PictureToken, came: @escaping @MainActor @Sendable () -> Void) {
+        guard !cache.isClosed else { return }
         let (previews, thumbnail) = slot.keys(scale)
         let best = previews.first { !queue.failed($0) }
         let previewDrawn = drawable(slot, scale: scale)?.isPreview == true

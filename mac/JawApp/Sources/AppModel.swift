@@ -15,8 +15,6 @@ final class AppModel {
     let layouts = Layouts()
     /// Every pane's pictures, decoded once, at most 64 MB of them.
     let pictures = MessagePictures()
-    /// The decoded pictures went as the window closed, to be asked for again as it opens.
-    var picturesLetGo = false
     var jawd: Jawd!
     weak var window: MainWindowController?
 
@@ -756,16 +754,11 @@ final class AppModel {
     /// With no window open the decoded pictures go, as the design's "under 25 MB with no window
     /// open" asks; the panes' cells ask for theirs again once it's back.
     func windowClosed() {
-        pictures.cache.empty()
-        picturesLetGo = true
+        ConversationController.windowClosed(panes.values, pictures: pictures)
     }
 
     func windowShown() {
-        guard picturesLetGo else { return }
-        picturesLetGo = false
-        for c in panes.values {
-            c.askPicturesAgain()
-        }
+        ConversationController.windowShown(panes.values, pictures: pictures)
     }
 }
 

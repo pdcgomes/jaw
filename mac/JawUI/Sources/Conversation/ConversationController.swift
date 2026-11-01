@@ -603,6 +603,36 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         }
     }
 
+    /// The cells on screen let go of what they asked for, so what's still waiting isn't decoded.
+    func letGoOfPictures() {
+        table.enumerateAvailableRowViews { rowView, _ in
+            for case let cell as MessageView in rowView.subviews {
+                cell.letGo()
+            }
+        }
+    }
+
+    /// As the window closes, the panes' cells let go of what they asked for and the cache is closed,
+    /// keeping nothing and asked for nothing until the window's back, so neither what was being
+    /// decoded nor a row that comes meanwhile fills it again, as the design's "under 25 MB with no
+    /// window open" asks.
+    public static func windowClosed(_ panes: some Sequence<ConversationController>, pictures: MessagePictures) {
+        for c in panes {
+            c.letGoOfPictures()
+        }
+        pictures.cache.close()
+    }
+
+    /// Once the window's back, after it was closed, the cache is opened and the cells on screen ask
+    /// for their pictures again.
+    public static func windowShown(_ panes: some Sequence<ConversationController>, pictures: MessagePictures) {
+        guard pictures.cache.isClosed else { return }
+        pictures.cache.open()
+        for c in panes {
+            c.askPicturesAgain()
+        }
+    }
+
     func message(of view: MessageView) -> MessageRow? {
         view.message.flatMap { window.get($0.id) }
     }

@@ -17,6 +17,7 @@ public final class PictureCache: Sendable {
         var bytes = 0
         var peak = 0
         var tick: UInt64 = 0
+        var closed = false
     }
 
     struct Kept {
@@ -48,11 +49,11 @@ public final class PictureCache: Sendable {
     }
 
     /// Keeps a decoded picture, letting go of the least recently drawn until the cache is within its
-    /// limit again; one larger than the whole limit isn't kept.
+    /// limit again; one larger than the whole limit isn't kept, nor any while the cache is closed.
     public func keep(_ image: CGImage, as key: PictureKey) {
         let bytes = Decode.bytes(image)
         state.withLock { s in
-            guard bytes <= limit else { return }
+            guard bytes <= limit, !s.closed else { return }
             if let old = s.kept.removeValue(forKey: key) { s.bytes -= old.bytes }
             s.tick += 1
             s.kept[key] = Kept(image: image, bytes: bytes, drawn: s.tick)
@@ -81,13 +82,32 @@ public final class PictureCache: Sendable {
         state.withLock { $0.kept[key] != nil }
     }
 
-    /// Lets every picture go, as the app does when it has no window.
+    /// Lets every picture go.
     public func empty() {
+        state.withLock { Self.empty(&$0) }
+    }
+
+    /// Lets every picture go and keeps none until it's opened again, as the app does while it has no
+    /// window open, so what was being decoded as the window closed doesn't fill it again.
+    public func close() {
         state.withLock { s in
-            s.kept.removeAll()
-            s.families.removeAll()
-            s.bytes = 0
+            s.closed = true
+            Self.empty(&s)
         }
+    }
+
+    public func open() {
+        state.withLock { $0.closed = false }
+    }
+
+    public var isClosed: Bool {
+        state.withLock { $0.closed }
+    }
+
+    static func empty(_ s: inout State) {
+        s.kept.removeAll()
+        s.families.removeAll()
+        s.bytes = 0
     }
 
     public var bytes: Int {

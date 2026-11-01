@@ -221,6 +221,45 @@ func shownCell(_ pictures: MessagePictures) -> (MessageView, NSTableRowView, NSW
     #expect(pictures.cache.count > 0, "decoded again for the cells on screen")
 }
 
+@MainActor @Test func `as the window closes its panes' cells let go of what they asked for, and the cache keeps nothing until it's back`() async throws {
+    // No worker: what's asked for waits, to be let go of.
+    let pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .queued(0))
+    let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    c.pictures = pictures
+    let window = NSWindow(contentRect: CGRect(x: -30000, y: -30000, width: 640, height: 900), styleMask: .borderless, backing: .buffered,
+                          defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = c.view
+    window.orderFront(nil)
+    defer { window.close() }
+    await withCheckedContinuation { done in
+        c.drawn = { done.resume() }
+        c.apply(Update(seq: 1, upsert: Samples.pictures, total: UInt64(Samples.pictures.count), older: false, newer: 0,
+                       moved: Moved(place: .newest(100), newer: 0)))
+    }
+    #expect(await eventually { window.layoutIfNeeded(); return pictures.queue.busy }, "the cells on screen asked for theirs")
+    let image = try #require(Decode.picture(key("x.jpg", 64, 48), from: .memory(["x.jpg": jpeg(64, 48)])))
+    pictures.cache.keep(image, as: key("x.jpg", 64, 48))
+
+    ConversationController.windowClosed([c], pictures: pictures)
+    #expect(!pictures.queue.busy && pictures.queue.counts.dropped > 0,
+            "what they asked for let go of before it started, so never decoded: \(pictures.queue.counts)")
+    #expect(pictures.cache.count == 0 && pictures.cache.bytes == 0, "emptied")
+    let asked = pictures.queue.counts.asked
+    c.askPicturesAgain()
+    #expect(pictures.queue.counts.asked == asked, "nothing asked while it's closed, as a row that comes meanwhile would ask")
+    pictures.cache.keep(image, as: key("x.jpg", 64, 48))
+    #expect(pictures.cache.count == 0, "nor kept, as what was being decoded as it closed would be")
+
+    ConversationController.windowShown([c], pictures: pictures)
+    #expect(pictures.queue.counts.asked > asked && pictures.queue.busy, "once it's back the cells on screen ask again")
+    let again = pictures.queue.counts.asked
+    ConversationController.windowShown([c], pictures: pictures)
+    #expect(pictures.queue.counts.asked == again, "and only then, not each time the window becomes key")
+    pictures.cache.keep(image, as: key("x.jpg", 64, 48))
+    #expect(pictures.cache.count == 1, "kept again")
+}
+
 @Test func `the chat of pictures draws as its references, in both looks, dark and light`() throws {
     for look in Look.allCases {
         for dark in [true, false] {
