@@ -269,6 +269,32 @@ async fn a_community_is_one_row_wherever_its_groups_would_show_summing_up_the_gr
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_community_a_list_holds_for_itself_and_for_groups_of_it_counts_once_in_its_total() {
+    let bed = Bed::new(brisk());
+    let family = bairro(&bed).await;
+    // Bairro marked unread beside its unread groups, filed in Family beside Festa, and the whole of
+    // it in a smart folder: each list holds it for itself and for groups of it.
+    bed.apply(vec![Change::Chat(Chat { id: BAIRRO.into(), marked_unread: Some(true), ..Chat::default() })]).await;
+    file(&bed, &family, Item::Chat(BAIRRO.into())).await;
+    let whole = ruled(&bed, "Bairro whole", &format!(r#"{{"community":"{BAIRRO}"}}"#)).await;
+    let mut watcher = bed.watcher(64);
+    let lists: [(&str, &[&str]); 3] = [
+        ("unread", &["Ana", "Bairro 3/1", "  Avisos", "  Festa", "Regata"]),
+        (&family, &["Ana", "Bairro 2/1", "  Festa"]),
+        (&whole, &["Bairro 3/1", "  Avisos", "  Festa", "  Xadrez"]),
+    ];
+    for (folder, want) in lists {
+        let held = Held::top(&mut watcher, folder).await;
+        assert_eq!(shape(&held.model), want, "{folder}");
+        assert_eq!(
+            held.model.total,
+            want.len() as u64,
+            "{folder}: Bairro, held for itself and its groups, counts once"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_communitys_row_found_on_its_own_sums_up_every_group_of_it() {
     let bed = Bed::new(brisk());
     bairro(&bed).await;
