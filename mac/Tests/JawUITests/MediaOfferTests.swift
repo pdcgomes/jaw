@@ -100,8 +100,9 @@ func quarantine(_ url: URL) throws -> (type: String?, agent: String?) {
     #expect(try attributes(clone)[.posixPermissions] as? Int == 0o444)
     #expect(throws: (any Error).self, "an app can't save into it") { try Data("edited in another app".utf8).write(to: clone) }
     #expect(try Data(contentsOf: file) == Data("jawd's file".utf8), "jawd's file is as it was")
+    let first = try attributes(clone)[.systemFileNumber] as? Int
     let again = try Opened.copy(of: file, named: "Sintra topo.pdf", for: "3EB0/A1", in: opened)
-    #expect(try again == clone && attributes(again)[.systemFileNumber] as? Int == attributes(clone)[.systemFileNumber] as? Int,
+    #expect(try again == clone && attributes(again)[.systemFileNumber] as? Int == first,
             "looked at again, the same clone, so an app showing it keeps it")
     let hd = jawds.appending(path: "cd34.pdf")
     try Data("jawd's HD copy".utf8).write(to: hd)
