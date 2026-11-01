@@ -321,9 +321,16 @@ fn with_the_phone_offline_older_history_waits_and_says_so_while_messages_still_g
     let stored = |s: &Status| s.stored.map_or(0, |stored| stored.messages);
     let before = stored(&status_of(jawd.home()).expect("jawd answers"));
     // Online, the phone answers at once, and says it keeps more of the chat, so the next question
-    // has an answer to come.
-    let frame = jawd.snapshot("<up><up><up><up><up><up>");
-    assert!(frame.contains("asking your phone for older messages"), "moving past the oldest message:\n{frame}");
+    // has an answer to come. Each frame is a new jaw's, from the box, so it presses <up> once more
+    // each time until it's past the oldest message, however many the demo's first chat holds.
+    let asking = |frame: &str| frame.contains("asking your phone for older messages");
+    let (most, mut pressed) = (20, 1);
+    let mut frame = jawd.snapshot("<up>");
+    while !asking(&frame) && pressed < most {
+        pressed += 1;
+        frame = jawd.snapshot(&"<up>".repeat(pressed));
+    }
+    assert!(asking(&frame), "{pressed} presses of <up> never moved past the oldest message:\n{frame}");
     jawd.until("the phone's older messages", |s| {
         stored(s) >= before + 3 && s.history.as_ref().is_some_and(|history| history.blobs >= 1)
     });
