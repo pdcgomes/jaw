@@ -1459,6 +1459,54 @@ async fn a_timer_whatsapp_refuses_goes_back_with_its_line_unless_set_again_since
     assert_eq!(timer_of(&running, ANA).await, (0, Some(ours + 5_000)), "the newer setting stays");
 }
 
+/// Waits until the outbox has sent or let go of everything in it.
+async fn outbox_empty(running: &Running, what: &str) {
+    running.until(what, |db| Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_timer_goes_back_to_a_setting_older_than_it_that_came_while_it_waited_not_to_the_one_before_both() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let was = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(was)]).await.unwrap();
+    running.connection(jaw_proto::ConnectionState::Offline);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap();
+    let ours = timer_of(&running, ANA).await.1.unwrap();
+    // The phone turned it off before jaw's reached WhatsApp, which took the phone's.
+    let phone = Chat { id: ANA.into(), ephemeral: Some(0), ephemeral_at: Some(ours - 5_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(phone)]).await.unwrap();
+    assert_eq!(timer_of(&running, ANA).await, (604_800, Some(ours)), "jaw's, the newer, shows while it waits");
+    running.world.refuse_next(1);
+    running.connection(jaw_proto::ConnectionState::Online);
+    outbox_empty(&running, "the refusal").await;
+    assert_eq!(timer_of(&running, ANA).await, (0, Some(ours - 5_000)), "the phone's, the newest that took effect");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_timers_set_from_jaw_and_both_refused_go_back_to_the_one_from_before_both() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[CLIMBING]).await;
+    running.members(CLIMBING, &[RUI]).await;
+    let was = Chat { id: CLIMBING.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(was)]).await.unwrap();
+    running.connection(jaw_proto::ConnectionState::Offline);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for seconds in [604_800, 7_776_000] {
+        running.call("chat.disappearing", json!({ "chat": CLIMBING, "seconds": seconds })).await.unwrap();
+    }
+    assert_eq!(timer_of(&running, CLIMBING).await.0, 7_776_000, "the second shows while both wait");
+    // A group refuses both, as it does a member who isn't an admin.
+    running.world.refuse_next(2);
+    running.connection(jaw_proto::ConnectionState::Online);
+    outbox_empty(&running, "both refusals").await;
+    assert_eq!(timer_of(&running, CLIMBING).await, (86_400, Some(1_000)), "the group's, which neither changed");
+    assert_eq!(timers_asked(&running).len(), 2, "both were sent");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_timer_set_from_jaw_is_newer_than_the_chats_whatever_clock_set_that() {
     let home = tempfile::tempdir().unwrap();

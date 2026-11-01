@@ -650,6 +650,16 @@ const TIMER_SET: &str = "INSERT INTO outbox (jid, id, kind, raw, next_at, create
 const TIMER_SET_WAS: &str = "SELECT jid, id, effect FROM outbox WHERE n = ?1 AND kind = 'ephemeral'";
 const TIMER_BACK: &str =
     "UPDATE chats SET ephemeral = ?2, ephemeral_at = ?3, v = ?5 WHERE n = ?1 AND ephemeral_at IS ?4";
+/// Timer ?2, set at ?3 in chat ?1 and older than one set from jaw that waits for WhatsApp, as the
+/// timer that one replaced, if it was set between that one's `was` and it: WhatsApp took it, so
+/// it's what a refusal puts back.
+const TIMER_UNDER: &str = "UPDATE outbox SET effect = json_set(effect, '$.was', ?2, '$.was_at', ?3)
+    WHERE kind = 'ephemeral' AND jid = (SELECT id FROM chats WHERE n = ?1)
+        AND effect ->> 'at' > ?3 AND (effect ->> 'was_at' IS NULL OR effect ->> 'was_at' < ?3)";
+/// The timer ?2, set at ?3, that a timer refused, set at ?4 in chat ?1 (outbox row ?5), had
+/// replaced, handed to the timer from jaw waiting after it that replaced it in turn.
+const TIMER_HANDED: &str = "UPDATE outbox SET effect = json_set(effect, '$.was', ?2, '$.was_at', ?3)
+    WHERE kind = 'ephemeral' AND jid = ?1 AND n <> ?5 AND effect ->> 'was_at' = ?4";
 
 /// A chat's timer set from jaw: the chat shows it, with its line in a one-to-one chat, and its
 /// outbox row keeps the timer it replaced, for a refusal to put back. A chat whose timer was set
@@ -694,8 +704,17 @@ fn disappearing(
     Ok(true)
 }
 
+/// Timer `seconds`, set at `at` in chat `chat`, which the chat didn't take, as one set from jaw
+/// that waits for WhatsApp is newer: if it was set after the timer that one replaced, it's the
+/// newest that took effect, which a refusal puts back.
+pub(super) fn timer_under(db: &Connection, chat: i64, seconds: u32, at: i64) -> Result<()> {
+    db.prepare_cached(TIMER_UNDER)?.execute(params![chat, seconds, at])?;
+    Ok(())
+}
+
 /// A timer set from jaw that WhatsApp refused goes back to the one it replaced, unless the chat's
-/// has been set again since, and the line it left in a one-to-one chat goes.
+/// has been set again since: from jaw, the timer set after it, still waiting, has the one it
+/// replaced to put back in turn. The line it left in a one-to-one chat goes.
 fn timer_refused(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<()> {
     let row: Option<(String, String, Option<String>)> =
         db.prepare_cached(TIMER_SET_WAS)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
@@ -709,6 +728,8 @@ fn timer_refused(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<()
     let (was, was_at, at) = (effect["was"].as_i64().unwrap_or(0), effect["was_at"].as_i64(), effect["at"].as_i64());
     if db.prepare_cached(TIMER_BACK)?.execute(params![n, was, was_at, at, seq])? > 0 {
         stamps.record(db, CHAT, n, Some(n), seq)?;
+    } else if let Some(at) = at {
+        db.prepare_cached(TIMER_HANDED)?.execute(params![jid, was, was_at, at, outbox])?;
     }
     if effect["line"].as_bool().unwrap_or(false)
         && let Some((chat, line)) = located(db, stamps, &chat, &id)?

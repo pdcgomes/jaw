@@ -3765,6 +3765,16 @@ UPDATE chats SET ephemeral = ?2, ephemeral_at = ?3, v = ?5 WHERE n = ?1 AND ephe
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
+UPDATE outbox SET effect = json_set(effect, '$.was', ?2, '$.was_at', ?3) WHERE kind = 'ephemeral' AND jid = (SELECT id FROM chats WHERE n = ?1) AND effect ->> 'at' > ?3 AND (effect ->> 'was_at' IS NULL OR effect ->> 'was_at' < ?3)
+    SCAN outbox
+    SCALAR SUBQUERY 1
+      SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE outbox SET effect = json_set(effect, '$.was', ?2, '$.was_at', ?3) WHERE kind = 'ephemeral' AND jid = ?1 AND n <> ?5 AND effect ->> 'was_at' = ?4
+    SCAN outbox
+
+-- src/store/write/outbox.rs
 SELECT n FROM chats WHERE id = ?1
     SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 

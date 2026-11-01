@@ -1710,7 +1710,8 @@ fn unsaid(db: &Connection, chat: &Chat, jids: &[String]) -> Result<Chat> {
 /// The timer a change to chat `n` sets, with when it was set: none when it says none, or when the
 /// chat's was set later, as history's conversation can say a timer the chat has changed since. A
 /// timer at least as new is taken, and its time kept here whether or not its value changes, so the
-/// chat's version moves only when the timer does.
+/// chat's version moves only when the timer does. One older than a timer set from jaw that waits
+/// for WhatsApp is what a refusal of that one puts back, if it's newer than what it would.
 fn newest_timer(db: &Connection, chat: &Chat, n: Option<i64>) -> Result<Option<(u32, i64)>> {
     let Some(seconds) = chat.ephemeral else { return Ok(None) };
     let at = chat.ephemeral_at.unwrap_or_else(now_ms);
@@ -1718,6 +1719,9 @@ fn newest_timer(db: &Connection, chat: &Chat, n: Option<i64>) -> Result<Option<(
     let taken = db
         .prepare_cached("UPDATE chats SET ephemeral_at = ?2 WHERE n = ?1 AND ?2 >= coalesce(ephemeral_at, ?2)")?
         .execute(params![n, at])?;
+    if taken == 0 {
+        outbox::timer_under(db, n, seconds, at)?;
+    }
     Ok((taken > 0).then_some((seconds, at)))
 }
 

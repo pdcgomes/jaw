@@ -80,6 +80,11 @@ const ALLOWED: &[(&str, &str)] = &[
         "the actions kept for a late receipt, pruned as one more is kept, as the writer starts and hourly; the \
         outbox holds at most 1,000 waiting, and 1,000 of these",
     ),
+    (
+        "UPDATE outbox SET effect = json_set(effect, '$.was', ?2, '$.was_at', ?3)",
+        "only as a timer setting is refused for being older than the chat's, or a timer set from jaw is \
+        refused; the outbox holds at most 1,000 waiting, and 1,000 actions kept for a late receipt",
+    ),
     ("SELECT n FROM chats WHERE told_at IS NOT NULL", "the chats owing read receipts, once at start"),
     ("SELECT message FROM settled LIMIT", "stops at its limit"),
     ("SELECT chat, member FROM regroup LIMIT", "stops at its limit"),
