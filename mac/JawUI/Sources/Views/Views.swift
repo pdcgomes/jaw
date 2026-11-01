@@ -215,6 +215,7 @@ public struct StatusLine: View {
                         Text(part.text).foregroundStyle(part.colour.color).fixedSize(horizontal: !part.cut, vertical: false)
                     }
                 }
+                .accessibilityElement(children: .combine)
             }
             Spacer(minLength: 12)
             ViewThatFits(in: .horizontal) {
