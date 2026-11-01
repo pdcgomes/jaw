@@ -81,7 +81,9 @@ pub enum Change {
     },
     /// An app-state mutation from inbox row `seq`: its index and its raw SyncActionValue, kept as
     /// the latest for its index, and `changes`, what it changes, made unless jaw has a patch for
-    /// the index on its way (chat_actions::held_back). `at` is its time.
+    /// the index on its way, or something held for the chat's setting, under another of the chat's
+    /// JIDs or jaw's, is as new or newer, which then stands (chat_actions::held_back). `at` is its
+    /// time.
     AppState {
         index: Vec<String>,
         value: Vec<u8>,
@@ -788,9 +790,15 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
             let key = serde_json::to_string(index)?;
             db.prepare_cached("INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)")?
                 .execute(params![key, value])?;
-            if chat_actions::held_back(db, index, *seq, *at)? {
-                return Ok(false);
-            }
+            let instead;
+            let changes = match chat_actions::held_back(db, index, *seq, *at)? {
+                chat_actions::Held::No => changes,
+                chat_actions::Held::Back => return Ok(false),
+                chat_actions::Held::Instead { index, value } => {
+                    instead = crate::convert::app_state::mutation(&index, &value).changes;
+                    &instead
+                }
+            };
             let mut changed = false;
             for change in changes {
                 changed |= apply(db, stamps, change)?;
@@ -1576,13 +1584,18 @@ const SAID: &str = "SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1)
 const THEIR_JIDS: &str =
     "SELECT j.jid FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.id = ?1 AND c.kind = 'direct'";
 
+/// The JIDs of the person whose one-to-one chat jaw keeps by `kept`, by any of which WhatsApp may
+/// name the chat; none for any other chat.
+pub(super) fn their_jids(db: &Connection, kept: &str) -> Result<Vec<String>> {
+    Ok(db.prepare_cached(THEIR_JIDS)?.query_map([kept], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
 /// History's `chat` less each setting app state has said anything of for it, under any of `jids`,
 /// the JID jaw keeps the chat by, which jaw's own patches name, or, for a one-to-one chat, any other
 /// JID of its person, by which app state may name it too.
 fn unsaid(db: &Connection, chat: &Chat, jids: &[String]) -> Result<Chat> {
     let kept = chat_jid(db, &chat.id)?;
-    let theirs: Vec<String> =
-        db.prepare_cached(THEIR_JIDS)?.query_map([&kept], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let theirs = their_jids(db, &kept)?;
     let mut named: Vec<&str> = jids.iter().chain(&theirs).map(String::as_str).chain([kept.as_str()]).collect();
     named.sort_unstable();
     named.dedup();
