@@ -53,7 +53,7 @@ public extension LibraryHost {
 /// conversation moves a chat's.
 @MainActor
 public final class LibraryController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate,
-    NSCollectionViewPrefetching
+    NSCollectionViewPrefetching, NSTextFieldDelegate
 {
     public let scope: LibraryScope
     public weak var host: LibraryHost?
@@ -73,9 +73,19 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     public private(set) var selected: String?
     /// jawd's words for refusing the window, said in its place.
     public private(set) var refused: String?
-    /// What's typed and the tokens, from the search line; nothing until it has some.
-    var text = ""
-    var tokens = false
+    /// The search line's words and tokens.
+    public private(set) var search = LibrarySearch()
+    /// What a filter being typed could become, as the offers under the field show them.
+    var offers: [LibraryOffer] = []
+    /// The people `from:` offers besides you and the senders of the items held, and the chats `in:`
+    /// offers, as the app knows them.
+    public var people: () -> [(id: String, name: String)] = { [] }
+    public var chats: () -> [(id: String, name: String)] = { [] }
+    /// The filter last asked, so the words ask again only when they change.
+    var asked: LibraryFilter?
+    /// The window shown while a new one's first answer comes, as words change, so the grid doesn't
+    /// empty at each key.
+    var stale: Library<LibraryRow>?
     /// The window's items of the kinds the library shows, newest first, and where each is.
     var items: [LibraryRow] = []
     var index: [String: Int] = [:]
@@ -88,6 +98,8 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     let root = LibraryRootView()
     let header = LibraryHeader()
     let strip = LibraryStrip()
+    let bar = LibrarySearchBar()
+    let offersView = CompletionView()
     let scroll = NSScrollView()
     let collection = NSCollectionView()
     let grid = LibraryGridLayout()
@@ -135,7 +147,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
                                                object: scroll.contentView)
-        for v in [scroll, header, strip] as [NSView] {
+        for v in [scroll, header, strip, bar, offersView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -148,7 +160,13 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
             strip.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             strip.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             strip.heightAnchor.constraint(equalToConstant: Self.stripHeight),
-            scroll.topAnchor.constraint(equalTo: strip.bottomAnchor),
+            bar.topAnchor.constraint(equalTo: strip.bottomAnchor, constant: Space.xxs),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bar.heightAnchor.constraint(equalToConstant: Self.barHeight),
+            offersView.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: -Space.xxs),
+            offersView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.l + Space.xxl),
+            scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: Space.xs),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -162,6 +180,10 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
             host?.libraryFocused(self)
             choose(kind)
         }
+        bar.field.delegate = self
+        bar.removed = { [weak self] i in self?.removeToken(i) }
+        offersView.isHidden = true
+        offersView.picked = { [weak self] item in self?.take(Int(item.value) ?? 0) }
         applyTheme()
         showHeader()
     }
@@ -184,29 +206,42 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         root.layer?.backgroundColor = roles.ground.cgColor
         header.roles = roles
         strip.roles = roles
+        bar.roles = roles
+        offersView.roles = roles
         collection.reloadData()
     }
 
     // MARK: - jawd's window
 
-    /// What's asked of jawd: the kind, the scope's chat, and what the search line narrows it to.
+    /// What's asked of jawd: the kind, the scope's chat or `in:`'s, and what the search line narrows
+    /// it to.
     public var filter: LibraryFilter {
-        LibraryFilter(kind: kind, chat: scope.chat)
+        search.filter(kind: kind, chat: scope.chat, before: before)
+    }
+
+    /// The field's words up to the caret, where a filter being typed ends.
+    var before: String {
+        let text = bar.field.stringValue as NSString
+        guard let editor = bar.field.currentEditor() as? NSTextView else { return text as String }
+        return text.substring(to: min(editor.selectedRange().location, text.length))
     }
 
     /// Shows `kind`, nil for every kind's shelves, watched from the top.
     public func choose(_ kind: LibraryKind?) {
         guard kind != self.kind || refused != nil else { return }
         self.kind = kind
-        ask()
+        ask(keeping: false)
     }
 
-    /// Asks jawd for the window as the pane shows it now, from the top.
-    public func ask() {
+    /// Asks jawd for the window as the pane shows it now, from the top; `keeping` what's shown until
+    /// its answer comes, as the words change, or not, as the kind does.
+    public func ask(keeping: Bool = false) {
         // Each kind's count is of every kind, so it stands until jawd's answer.
         let counts = window.counts
+        stale = keeping ? (window.loaded ? window : stale) : nil
         window = Library(place: Self.place(for: kind))
         window.counts = counts
+        asked = filter
         askedPlace = nil
         refused = nil
         selected = nil
@@ -219,6 +254,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     public func apply(_ update: Update<LibraryRow>) {
         let anchor = currentAnchor()
         window.apply(update)
+        stale = nil
         if let moved = update.moved, moved.place == askedPlace { askedPlace = nil }
         rebuild()
         restore(anchor)
@@ -233,7 +269,8 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
 
     /// The items again from the window, laid out at the pane's width.
     func rebuild() {
-        items = window.list.filter { LibraryKind.all.contains($0.kind) && (kind == nil || $0.kind == kind) }
+        let shown = window.loaded ? window : stale ?? window
+        items = shown.list.filter { LibraryKind.all.contains($0.kind) && (kind == nil || $0.kind == kind) }
         index = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }) { a, _ in a }
         if let selected, index[selected] == nil { self.selected = nil }
         showHeader()
@@ -246,18 +283,19 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         if let refused { return refused }
         guard window.loaded else { return nil }
         if let note = window.note, kind == .link || kind == nil { return note }
-        return text.isEmpty && !tokens ? "Nothing shared here yet." : "Nothing matches."
+        return search.filtered ? "Nothing matches." : "Nothing shared here yet."
     }
 
     /// Whether jawd counts only so far: with words, a person or a time.
     var capped: Bool {
-        !text.isEmpty || tokens
+        search.capped(before: before)
     }
 
     func relayout() {
         guard isViewLoaded else { return }
         let width = floor(scroll.contentView.bounds.width)
-        laid = LibraryLayout.lay(items, kind: kind, counts: window.counts, capped: capped, note: window.note, said: said,
+        let shown = window.loaded ? window : stale ?? window
+        laid = LibraryLayout.lay(items, kind: kind, counts: shown.counts, capped: capped, note: shown.note, said: said,
                                  width: max(width, 1), style: style)
         grid.laid = laid
         grid.invalidateLayout()
@@ -409,6 +447,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     // MARK: - The header and the strip
 
     nonisolated static let stripHeight: CGFloat = 32
+    nonisolated static let barHeight: CGFloat = 32
 
     func showStrip() {
         strip.labels = LibraryKinds.labels(window.counts, capped: capped)
@@ -416,9 +455,9 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         strip.said = refused == nil ? LibraryKinds.said(kind, loaded: window.loaded, total: window.total, capped: capped, filtered: filtered) : ""
     }
 
-    /// Whether anything narrows what's shown beyond its kind and chat.
+    /// Whether anything narrows what's shown beyond its kind.
     var filtered: Bool {
-        !text.isEmpty || tokens
+        search.filtered
     }
 
     func showHeader() {
@@ -501,9 +540,110 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         }
     }
 
-    /// Gives the pane the keys.
+    /// Gives the pane the keys: its search line takes them.
     public func focus() {
-        view.window?.makeFirstResponder(root)
+        view.window?.makeFirstResponder(bar.field)
+    }
+
+    // MARK: - The search line
+
+    public func controlTextDidChange(_: Notification) {
+        search.text = bar.field.stringValue
+        showOffers()
+        if filter != asked { ask(keeping: true) } else { showStrip(); showHeader() }
+    }
+
+    /// What the filter being typed could become, under the field: you, the people the app knows and
+    /// the senders of the items held for `from:`, the chats for `in:`, and days for `since:` and
+    /// `until:`.
+    func showOffers() {
+        let senders = items.compactMap { $0.from.map { (id: $0.id, name: $0.name) } }
+        offers = search.offers(before: before, people: people() + senders, chats: chats(), now: Format.now())
+        offersView.show(offers.enumerated().map { i, offer in
+            CompletionView.Item(title: offer.said, detail: offer.token.filter, value: String(i))
+        })
+    }
+
+    var offering: Bool {
+        !offersView.isHidden && !offers.isEmpty
+    }
+
+    /// Takes the offer at `i`: the filter typed becomes its token, and jawd's asked again.
+    func take(_ i: Int) {
+        guard offers.indices.contains(i) else { return }
+        search.take(offers[i], before: before)
+        bar.field.stringValue = search.text
+        bar.field.currentEditor()?.selectedRange = NSRange(location: (search.text as NSString).length, length: 0)
+        bar.tokens = search.tokens
+        offersView.isHidden = true
+        offers = []
+        ask(keeping: true)
+    }
+
+    /// The search line as it is once `tokens` are taken and `text` typed after them, what the filter
+    /// being typed could become under it, without asking jawd: as the harness and a test show it.
+    public func typed(_ text: String, tokens: [LibraryToken]) {
+        search.tokens = tokens
+        search.text = text
+        bar.tokens = tokens
+        bar.field.stringValue = text
+        showOffers()
+        asked = filter
+        showStrip()
+        showHeader()
+    }
+
+    /// A token's × clicked: it goes, and jawd's asked again.
+    func removeToken(_ i: Int) {
+        guard search.tokens.indices.contains(i) else { return }
+        search.tokens.remove(at: i)
+        bar.tokens = search.tokens
+        ask(keeping: true)
+    }
+
+    /// The keys the search line's field hands on, as the terminal's search line takes them; says
+    /// whether it took one.
+    public func control(_: NSControl, textView _: NSTextView, doCommandBy selector: Selector) -> Bool {
+        let empty = bar.field.stringValue.isEmpty
+        switch selector {
+        case #selector(NSResponder.moveUp(_:)):
+            if offering { offersView.move(-1) } else { move(0, -1) }
+        case #selector(NSResponder.moveDown(_:)):
+            if offering { offersView.move(1) } else { move(0, 1) }
+        case #selector(NSResponder.moveLeft(_:)) where empty && !offering:
+            move(-1, 0)
+        case #selector(NSResponder.moveRight(_:)) where empty && !offering:
+            move(1, 0)
+        case #selector(NSResponder.scrollPageUp(_:)), #selector(NSResponder.pageUp(_:)):
+            move(0, -linesOnScreen)
+        case #selector(NSResponder.scrollPageDown(_:)), #selector(NSResponder.pageDown(_:)):
+            move(0, linesOnScreen)
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            if offering { offersView.pick() } else { choose(LibraryKinds.step(kind, by: selector == #selector(NSResponder.insertTab(_:)) ? 1 : -1)) }
+        case #selector(NSResponder.insertNewline(_:)):
+            if offering { offersView.pick() } else { openSelected() }
+        case #selector(NSResponder.cancelOperation(_:)):
+            if offering {
+                search.dismissed = search.text
+                offersView.isHidden = true
+            } else {
+                host?.libraryClose(self)
+            }
+        case #selector(NSResponder.deleteBackward(_:)) where empty:
+            if search.takeBack() {
+                bar.tokens = search.tokens
+                ask(keeping: true)
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Enter, or a double-click, on the selected item.
+    public func openSelected() {
+        guard let item = selectedItem else { return }
+        host?.library(self, open: item, among: items)
     }
 }
 

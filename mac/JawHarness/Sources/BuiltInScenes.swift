@@ -16,6 +16,7 @@ enum BuiltInScenes {
         catalog.register(.libraryRows)
         catalog.register(.libraryAll)
         catalog.register(.libraryKinds)
+        catalog.register(.librarySearch)
         catalog.register(.palette)
         catalog.register(.pollForm)
         catalog.register(.states)

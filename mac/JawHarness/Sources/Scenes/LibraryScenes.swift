@@ -22,6 +22,14 @@ extension HarnessScene {
         ) { LibraryRowsScene(conditions: $0) }
     }
 
+    static var librarySearch: HarnessScene {
+        HarnessScene(
+            id: "library-search", title: "Library search", symbol: "magnifyingglass",
+            synopsis: "The library's search line with tokens taken for from: and since:, an in: being typed and what it could become, and what they find",
+            section: .panes, covers: [LibraryController.self, LibrarySearch.self], axes: [.look], width: 560,
+        ) { LibrarySearchScene(conditions: $0) }
+    }
+
     static var libraryKinds: HarnessScene {
         HarnessScene(
             id: "library-kinds", title: "Library kinds", symbol: "rectangle.split.3x1",
@@ -67,6 +75,32 @@ private struct LibraryRowsScene: View {
     }
 }
 
+private struct LibrarySearchScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Tokens and offers",
+            note: "from: Ana Ribeiro and since: September 2026 as tokens, each with its ×, then in:lis being typed in the field and Lisbon Climbing offered under it, in: at its right; the files Ana shared since then below, the first selected. The words never run under a token.",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: .file, selected: "LF0", height: 300,
+                            items: Samples.library.filter { $0.from?.id == "person:4" }) { c in
+                c.typed("in:lis", tokens: [.from(id: "person:4", name: "Ana Ribeiro"), .since(at: 0, label: "September 2026")])
+            }
+        }
+        SpecimenGroup(
+            title: "Nothing found",
+            note: "Words that match nothing: the search line keeps them, the strip's end says none, and the grid says \"Nothing matches.\"",
+            roles: conditions.roles,
+        ) {
+            LibrarySpecimen(conditions: conditions, kind: .photo, height: 180, items: []) { c in
+                c.typed("lagoa azul", tokens: [])
+            }
+        }
+    }
+}
+
 private struct LibraryKindsScene: View {
     let conditions: Conditions
 
@@ -107,13 +141,18 @@ struct LibrarySpecimen: View {
     let kind: LibraryKind?
     var selected: String?
     let height: CGFloat
+    var items = Samples.library
+    /// What's done to the pane once it's made, before its items come: tokens taken, words typed.
+    var given: (LibraryController) -> Void = { _ in }
 
     var body: some View {
         ControllerSpecimen {
             let c = LibraryController(scope: scope, style: conditions.style, kind: kind)
             c.pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)
+            c.chats = { Samples.chats.map { (id: $0.id, name: $0.name) } }
             _ = c.view
-            c.apply(Samples.libraryUpdate(of: Samples.library, kind: kind))
+            given(c)
+            c.apply(Samples.libraryUpdate(of: items, kind: kind, counts: Samples.counts(of: items)))
             if let selected { c.select(selected) }
             return c
         }
