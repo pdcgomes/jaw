@@ -202,9 +202,10 @@ final class TypingRowView: NSView {
         }
     }
 
-    /// Typing came back while it was fading out: it stays.
+    /// Typing came back while it was fading out, or after its fade ended while a layout pass kept its
+    /// row: it stays.
     func stay() {
-        guard fading else { return }
+        guard fading || dots.alphaValue < 1 else { return }
         turn += 1
         fading = false
         dots.alphaValue = 1

@@ -428,3 +428,31 @@ func ruisMessage() -> MessageRow {
         #expect(!empty.typing.isEmpty && !empty.wantsTyping && !empty.showsTyping && empty.table.numberOfRows == 0)
     }
 }
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `typing back within the layout pass its fade-out ended in shows the bubble`() async throws {
+    let before = Motion.reduced
+    Motion.reduced = { false }
+    defer { Motion.reduced = before }
+    let (c, _) = await pane(typing: [])
+    ConversationController.give([Samples.group.id: [ruiTyping]], to: [c])
+    #expect(c.showsTyping)
+    try await Task.sleep(for: .milliseconds(400))
+    #expect(c.typingRow.dots.alphaValue == 1, "risen in")
+    // Holds the layout queue, so the next message's layout pass outlasts the bubble's fade.
+    c.layouts.queue.async(flags: .barrier) { Thread.sleep(forTimeInterval: 0.6) }
+    ConversationController.give([:], to: [c])
+    #expect(c.typingRow.fading, "fading out once Rui stops")
+    let count = c.rows.count
+    var ana = Samples.m(98, [Span(.text, "I'm in")], at: Samples.now + 30000, from: Samples.ana)
+    ana.sort = "9~1"
+    var drawn = false
+    c.drawn = { drawn = true }
+    c.apply(Update(seq: 300, upsert: [ana], total: UInt64(count + 1), newer: 0))
+    try await Task.sleep(for: .milliseconds(250))
+    #expect(c.reloading && !c.typingRow.fading && c.showsTyping, "the fade ended during the pass, and its row couldn't go")
+    ConversationController.give([Samples.group.id: [ruiTyping]], to: [c])
+    while !drawn { try await Task.sleep(for: .milliseconds(20)) }
+    c.view.layoutSubtreeIfNeeded()
+    #expect(c.showsTyping && c.header.typingLabel.phrase == "Rui typing", "the header says Rui's typing")
+    #expect(c.typingRow.dots.alphaValue == 1, "and his bubble shows: its dots' alpha is \(c.typingRow.dots.alphaValue)")
+}
