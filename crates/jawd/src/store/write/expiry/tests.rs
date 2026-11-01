@@ -446,37 +446,76 @@ async fn an_earlier_jawds_view_once_messages_are_kept_as_this_ones_and_their_cap
     assert!(events(&store, seq).await.iter().all(|(kind, _)| kind != "message"), "and tells windows nothing");
 }
 
+/// jaw.db in `home` as main's jawd left it, with 64 view-once photos whose captions it kept as text.
+fn main_with_captions(home: &Path) {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    for migration in &schema::MIGRATIONS[..30] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", 30).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
+        INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+        INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 0);
+        INSERT INTO sync_state (key, value) VALUES ('me', '351910000001@s.whatsapp.net');"
+    ))
+    .unwrap();
+    for n in 1..=64i64 {
+        db.execute(
+            "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, view_once, raw, v)
+            VALUES (?1, 1, ?2, ?3, ?1, 1, 'image', ?4, 1, x'00', 0)",
+            rusqlite::params![n, format!("once{n:02}"), AT + n, format!("a caption of {n}")],
+        )
+        .unwrap();
+    }
+}
+
+/// A writer that counts each caption it takes out as 5 ms, past a transaction's 3 ms, as a long
+/// one can cost at a million messages, though taking one out costs far less here.
+fn costly_captions(home: &Path) -> Store {
+    let limits = crate::store::Limits { secure_delete_least: Duration::from_millis(5), ..crate::store::LIMITS };
+    Store::open_with(home, limits).unwrap()
+}
+
+/// What the `once` backfill leaves of each message: its ID, mark, text, spans and summary.
+async fn once_kept(store: &Store) -> Vec<(String, bool, Option<String>, Option<String>, Option<String>)> {
+    query(store, |db| {
+        Ok(db
+            .prepare("SELECT id, view_once, text, spans, summary FROM messages ORDER BY n")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_once_backfill_killed_halfway_and_started_again_ends_as_one_never_killed() {
+    let (home, never) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    main_with_captions(home.path());
+    main_with_captions(never.path());
+    // A caption to a transaction, so the 32 steps commit 32 times and the kill comes after one.
+    let store = costly_captions(home.path());
+    assert_eq!(store.apply(Lane::Background, vec![Change::Backfill(VIEW_ONCE); 32]).await.unwrap().transactions, 32);
+    let killed = killed(home.path());
+    let again = Store::open(killed.path()).unwrap();
+    assert_eq!(again.backfill_left(VIEW_ONCE).unwrap(), 32, "it goes on from where the kill left it");
+    let whole = Store::open(never.path()).unwrap();
+    for store in [&again, &whole] {
+        while store.backfill_left(VIEW_ONCE).unwrap() > 0 {
+            store.apply(Lane::Background, vec![Change::Backfill(VIEW_ONCE); 64]).await.unwrap();
+        }
+    }
+    let kept = once_kept(&whole).await;
+    assert!(kept.iter().all(|(_, once, text, _, _)| *once && text.is_none()), "{kept:?}");
+    assert_eq!(once_kept(&again).await, kept);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_once_backfill_counts_a_caption_at_what_the_costliest_took_so_no_transaction_takes_two_past_its_time() {
     let home = tempfile::tempdir().unwrap();
-    {
-        // jaw.db as main's jawd left it, with 64 view-once photos whose captions it kept as text.
-        let db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.pragma_update(None, "journal_mode", "WAL").unwrap();
-        for migration in &schema::MIGRATIONS[..30] {
-            db.execute_batch(migration).unwrap();
-        }
-        db.pragma_update(None, "user_version", 30).unwrap();
-        db.execute_batch(&format!(
-            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
-            INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
-            INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 0);
-            INSERT INTO sync_state (key, value) VALUES ('me', '351910000001@s.whatsapp.net');"
-        ))
-        .unwrap();
-        for n in 1..=64i64 {
-            db.execute(
-                "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, view_once, raw, v)
-                VALUES (?1, 1, ?2, ?3, ?1, 1, 'image', ?4, 1, x'00', 0)",
-                rusqlite::params![n, format!("once{n:02}"), AT + n, format!("a caption of {n}")],
-            )
-            .unwrap();
-        }
-    }
-    // Each caption counts as 5 ms, past a transaction's 3 ms, as a long one can at a million
-    // messages, though taking one out costs far less here.
-    let limits = crate::store::Limits { secure_delete_least: Duration::from_millis(5), ..crate::store::LIMITS };
-    let store = Store::open_with(home.path(), limits).unwrap();
+    main_with_captions(home.path());
+    let store = costly_captions(home.path());
     let applied = store.apply(Lane::Background, vec![Change::Backfill(VIEW_ONCE); 64]).await.unwrap();
     assert_eq!(applied.quarantined, 0);
     assert_eq!(applied.transactions, 64, "a step, and its transaction, stop at the caption past their time");
