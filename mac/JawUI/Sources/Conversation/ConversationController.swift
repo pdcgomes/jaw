@@ -39,6 +39,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     public weak var host: ConversationHost?
     public var spec: LayoutSpec { didSet { if spec != oldValue { relayout() } } }
     let layouts: Layouts
+    /// The pictures its messages show, decoded and cached for every pane alike.
+    public var pictures = MessagePictures()
 
     var rows: [MessageRow] = []
     var contexts: [MessageContext] = []
@@ -548,9 +550,18 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let m = rows[row]
         cell.message = m
         cell.roles = spec.style.roles
+        cell.pictures = pictures
         cell.laid = layouts.laid(m, width: layoutWidth, spec: spec, context: contexts[row])
         cell.selected = selected == m.id
         return cell
+    }
+
+    /// A row scrolled out of the transcript lets go of the pictures it asked for, so what a fling
+    /// passes isn't decoded.
+    public func tableView(_: NSTableView, didRemove rowView: NSTableRowView, forRow _: Int) {
+        for case let cell as MessageView in rowView.subviews {
+            cell.letGo()
+        }
     }
 
     func message(of view: MessageView) -> MessageRow? {
@@ -570,6 +581,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             // A double click's second click would take back the vote its first made.
             case let .vote(name) where clicks == 1: vote(name, in: m.id)
             case .vote: break
+            case .media, .stop: break
             }
             return
         }

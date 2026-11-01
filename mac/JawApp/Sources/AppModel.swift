@@ -13,6 +13,8 @@ final class AppModel {
     let agent: Agent
     let preferences: Preferences
     let layouts = Layouts()
+    /// Every pane's pictures, decoded once, at most 64 MB of them.
+    let pictures = MessagePictures()
     var jawd: Jawd!
     weak var window: MainWindowController?
 
@@ -80,15 +82,15 @@ final class AppModel {
     }
 
     var spec: LayoutSpec {
-        if let made = madeSpec, made.style == style, made.me == me, made.pictures?.id == pictures?.id { return made }
-        let spec = LayoutSpec(style: style, me: me, pictures: pictures)
+        if let made = madeSpec, made.style == style, made.me == me, made.pictures?.id == thumbnails?.id { return made }
+        let spec = LayoutSpec(style: style, me: me, pictures: thumbnails)
         madeSpec = spec
         return spec
     }
 
     var madeSpec: LayoutSpec?
-    /// The pictures in jawd's folder, whose paths jawd's rows give relative to hello's root.
-    var pictures: FolderPictures?
+    /// The link thumbnails in jawd's folder, whose paths jawd's rows give relative to hello's root.
+    var thumbnails: FolderPictures?
 
     func start() {
         if let why = agent.ensure() {
@@ -143,10 +145,11 @@ final class AppModel {
             linked = w.account.state == .linked
             self.me = Set(me)
             window?.chatList.root = w.root
-            if pictures?.root != w.root {
-                pictures = FolderPictures(root: w.root)
+            if thumbnails?.root != w.root {
+                thumbnails = FolderPictures(root: w.root)
                 if !panes.isEmpty { restyle() }
             }
+            pictures.files = .folder(w.root)
         case let .unreachable(why, retryIn):
             if let stopped = agent.stopped {
                 reach = .starting(failed: stopped)
@@ -315,6 +318,7 @@ final class AppModel {
     func makePane(_ chat: ChatRow, place: Place) -> ConversationController {
         let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: place)
         ConversationController.give(typing, to: [c])
+        c.pictures = pictures
         c.host = self
         c.notice = { [weak self] in self?.say($0) }
         c.avatar = window?.chatList.avatar(for: chat)

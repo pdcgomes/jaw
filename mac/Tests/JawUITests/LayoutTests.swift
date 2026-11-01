@@ -14,7 +14,7 @@ let references = URL(fileURLWithPath: #filePath).deletingLastPathComponent().app
 
 func spec(_ look: Look, dark: Bool, density: Density = .comfortable) -> LayoutSpec {
     LayoutSpec(style: Style(roles: Catalog.jaw.roles(dark: dark), look: look, density: density), me: ["person:1"],
-               pictures: Samples.pictures)
+               pictures: Samples.thumbnails)
 }
 
 @Test func `names show where a run starts, and days where they change`() {
@@ -82,11 +82,25 @@ func spec(_ look: Look, dark: Bool, density: Density = .comfortable) -> LayoutSp
     try compare(try #require(render(spec(.bubbles, dark: true, density: .compact))), "conversation-bubbles-dark-compact")
 }
 
+/// A slot's picture as a cell draws it once it's decoded: its best preview at its pixels at 2x, or
+/// its blurred thumbnail when it has no preview, from the made-up pictures.
+func decoded(_ slot: PictureSlot) -> CGImage? {
+    let files = PictureFiles.memory(SamplePictures.files)
+    let (previews, thumbnail) = slot.keys(2)
+    return previews.lazy.compactMap { Decode.picture($0, from: files) }.first ?? thumbnail.flatMap { Decode.picture($0, from: files) }
+}
+
 /// The samples drawn as a conversation 640 points wide, at 2x, as a conversation's rows draw them,
 /// with the typing bubble still after the newest message, since Rui is typing in the sample group,
 /// unless `typing` is false.
 func render(_ spec: LayoutSpec, _ rows: [MessageRow] = Samples.messages, typing: Bool = true) -> CGImage? {
-    let cs = MessageContext.of(rows, group: true, unfolded: [], now: Samples.now)
+    render(rows, spec, group: true, typing: typing)
+}
+
+/// Messages drawn as a conversation 640 points wide at 2x, their pictures decoded, and the typing
+/// bubble after them when someone's typing.
+func render(_ rows: [MessageRow], _ spec: LayoutSpec, group: Bool, typing: Bool) -> CGImage? {
+    let cs = MessageContext.of(rows, group: group, unfolded: [], now: Samples.now)
     let laid = zip(rows, cs).map {
         MessageLayout.lay($0, width: 640, context: $1, style: spec.style, fonts: spec.fonts, me: spec.me, pictures: spec.pictures)
     }
@@ -103,13 +117,11 @@ func render(_ spec: LayoutSpec, _ rows: [MessageRow] = Samples.messages, typing:
     ctx.fill(CGRect(x: 0, y: 0, width: 640, height: height))
     var y: CGFloat = 8
     for l in laid {
-        l.draw(in: ctx, y: y)
+        l.draw(in: ctx, y: y, picture: decoded)
         y += l.height
     }
-    if typing {
-        let metrics = MessageLayout.Metrics(spec.style)
-        TypingBubble.draw(in: ctx, at: CGPoint(x: metrics.margin, y: y + metrics.runGap), style: spec.style)
-    }
+    let metrics = MessageLayout.Metrics(spec.style)
+    if typing { TypingBubble.draw(in: ctx, at: CGPoint(x: metrics.margin, y: y + metrics.runGap), style: spec.style) }
     return ctx.makeImage()
 }
 
@@ -187,6 +199,8 @@ func differing(_ a: [UInt8], _ b: [UInt8]) -> Int {
     #expect(kinds[0].media?.seconds == 42 && kinds[1].media?.pages == 12 && kinds[2].location?.name == "Cabo da Roca")
     #expect(kinds[3].poll?.options.count == 2 && kinds[3].poll?.options.first?.mine == true && kinds[4].contact?.name == "Climbing shop")
     #expect(kinds[5].link?.description != nil && kinds[7].album?.items.count == 5)
+    #expect(kinds[0].media?.isHere == true && kinds[7].album?.items.allSatisfy { $0.media?.preview(768) != nil } == true,
+            "the video's poster and the album's tiles have their previews")
 }
 
 /// An invitation as jawd sends it, from Ana in the sample group, with `caption` as its spans.

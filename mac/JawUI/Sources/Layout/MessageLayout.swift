@@ -60,6 +60,11 @@ public enum Region: Sendable, Hashable {
     case open(String)
     /// A poll's option, by name, which a click votes for.
     case vote(String)
+    /// A picture or a file: a click looks at it, or asks for it when it isn't here; `item` is an
+    /// album's.
+    case media(item: Int?)
+    /// The ring over a picture or a file coming: a click stops it.
+    case stop(item: Int?)
 }
 
 /// A message laid out at a width: its height, and what to draw, already measured.
@@ -74,6 +79,10 @@ public final class Laid: @unchecked Sendable {
     let parts: [Part]
     let regions: [(CGRect, Region)]
     let text: (frame: CTFrame, rect: CGRect)?
+    /// The pictures it shows, each drawn from what's decoded of it, over `parts` and under `over`.
+    public let pictures: [PictureSlot]
+    /// What's drawn over the pictures: a video's ▶ and length, an album's "+3", a download's ring.
+    let over: [Part]
 
     enum Part {
         case fill(CGRect, CGColor, CGFloat)
@@ -87,18 +96,46 @@ public final class Laid: @unchecked Sendable {
         case image(CGImage, CGRect)
         /// A picture filling a rect from its centre, clipped to the rect's rounded corners.
         case picture(CGImage, CGRect, CGFloat)
+        /// A ring around a centre, of a radius, filled from the top clockwise to a share of it, at a
+        /// line's width.
+        case ring(CGPoint, CGFloat, CGFloat, CGColor, CGFloat)
     }
 
-    init(height: CGFloat, body: CGRect, parts: [Part], regions: [(CGRect, Region)], text: (CTFrame, CGRect)?) {
+    init(height: CGFloat, body: CGRect, parts: [Part], regions: [(CGRect, Region)], text: (CTFrame, CGRect)?,
+         pictures: [PictureSlot] = [], over: [Part] = [])
+    {
         self.height = height
         self.body = body
         self.parts = parts
         self.regions = regions
         self.text = text
+        self.pictures = pictures
+        self.over = over
     }
 
-    /// Draws into a flipped context, its top at `y`.
-    public func draw(in ctx: CGContext, y: CGFloat = 0) {
+    /// Draws into a flipped context, its top at `y`, each picture from `picture` when it has one.
+    public func draw(in ctx: CGContext, y: CGFloat = 0, picture: (PictureSlot) -> CGImage? = { _ in nil }) {
+        Self.draw(parts, in: ctx, y: y)
+        for slot in pictures {
+            if let image = picture(slot) { Self.draw(image, in: slot, ctx: ctx, y: y) }
+        }
+        Self.draw(over, in: ctx, y: y)
+    }
+
+    /// A picture in its slot, clipped to its corners, filling it.
+    static func draw(_ image: CGImage, in slot: PictureSlot, ctx: CGContext, y: CGFloat) {
+        let rect = slot.rect.offsetBy(dx: 0, dy: y)
+        ctx.saveGState()
+        ctx.addPath(CGPath(roundedRect: rect, cornerWidth: min(slot.radius, rect.width / 2), cornerHeight: min(slot.radius, rect.height / 2),
+                           transform: nil))
+        ctx.clip()
+        ctx.translateBy(x: rect.minX, y: rect.maxY)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
+        ctx.restoreGState()
+    }
+
+    static func draw(_ parts: [Part], in ctx: CGContext, y: CGFloat) {
         for part in parts {
             switch part {
             case let .fill(rect, colour, radius):
@@ -140,6 +177,17 @@ public final class Laid: @unchecked Sendable {
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.interpolationQuality = .high
                 ctx.draw(image, in: CGRect(origin: .zero, size: filled.size))
+                ctx.restoreGState()
+            case let .ring(centre, radius, share, colour, width):
+                guard share > 0 else { break }
+                ctx.saveGState()
+                ctx.setStrokeColor(colour)
+                ctx.setLineWidth(width)
+                ctx.setLineCap(.round)
+                let top = -CGFloat.pi / 2
+                ctx.addArc(center: CGPoint(x: centre.x, y: centre.y + y), radius: radius, startAngle: top,
+                           endAngle: top + 2 * .pi * min(share, 1), clockwise: false)
+                ctx.strokePath()
                 ctx.restoreGState()
             }
         }
@@ -282,6 +330,10 @@ public enum MessageLayout {
         var parts: [Laid.Part] = []
         var regions: [(CGRect, Region)] = []
         var text: (CTFrame, CGRect)?
+        var slots: [PictureSlot] = []
+        var over: [Laid.Part] = []
+        /// Whether the card's pieces are drawn over its pictures rather than under them.
+        var drawingOver = false
         var y: CGFloat = 0
 
         init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>,
@@ -371,7 +423,7 @@ public enum MessageLayout {
             if style.look == .bubbles { parts.append(.fill(rect, roles.surface.cgColor, 11)) }
             parts.append(.line(label, CGPoint(x: (width - w) / 2, y: y + 15)))
             y += 22
-            return Laid(height: ceil(y), body: rect, parts: parts, regions: regions, text: nil)
+            return Laid(height: ceil(y), body: rect, parts: parts, regions: regions, text: nil, pictures: slots, over: over)
         }
 
         /// The message's words: its spans, or what its kind is, as one line before its caption.
@@ -439,7 +491,7 @@ public enum MessageLayout {
             case .audio: return "Audio\(length)"
             case .document: return "Document · " + (m.media?.name ?? "a file")
             case .sticker: return "Sticker"
-            case .album: return "Album of \(m.album?.items.count ?? 0)"
+            case .album: return albumLine(m.album)
             case .location: return "Location"
             case .liveLocation: return "Live location"
             case .contact: return "Contact card"
@@ -448,6 +500,15 @@ public enum MessageLayout {
             case .invite: return invitation(m.invite)
             case .unknown: return "Jaw can't show this yet"
             }
+        }
+
+        /// An album's photos and videos, counted: "Album · 3 photos and 1 video".
+        static func albumLine(_ album: Album?) -> String {
+            let items = album?.items ?? []
+            let photos = items.isEmpty ? album?.photos ?? 0 : items.count { $0.kind != "video" }
+            let videos = items.isEmpty ? album?.videos ?? 0 : items.count { $0.kind == "video" }
+            let counted = [(photos, "photo"), (videos, "video")].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)\($0.0 == 1 ? "" : "s")" }
+            return counted.isEmpty ? "Album" : "Album · " + counted.joined(separator: " and ")
         }
 
         /// What an invitation is to, the group's or channel's name, and until when. Its caption, under
@@ -585,6 +646,7 @@ public enum MessageLayout {
 
         mutating func bubble() -> Laid {
             if emojiOnly() { return bigEmoji() }
+            if m.kind == .sticker || m.kind == .videoNote, !m.deleted, m.reply == nil { return alone() }
             let most = min(width * 0.72, 520) - 2 * metrics.padX
             let p = metrics.padX, q = metrics.padY
             var inner: CGFloat = 0
@@ -654,7 +716,7 @@ public enum MessageLayout {
             y += h
             reactions(x: x + 6, alignRight: m.mine, right: x + bw - 6)
             failedLine(x: x + p, alignRight: m.mine, right: x + bw)
-            return Laid(height: ceil(y + 1), body: rect, parts: parts, regions: regions, text: text)
+            return Laid(height: ceil(y + 1), body: rect, parts: parts, regions: regions, text: text, pictures: slots, over: over)
         }
 
         mutating func quote(_ reply: Quote, _ rect: CGRect) {
@@ -687,7 +749,7 @@ public enum MessageLayout {
             parts.append(contentsOf: footParts(foot, at: CGPoint(x: m.mine ? width - metrics.margin - fw : x, y: y + ascent(fonts.time))))
             y += lineHeight(fonts.time)
             reactions(x: x, alignRight: m.mine, right: x + w)
-            return Laid(height: ceil(y + 1), body: rect, parts: parts, regions: regions, text: nil)
+            return Laid(height: ceil(y + 1), body: rect, parts: parts, regions: regions, text: nil, pictures: slots, over: over)
         }
 
         // MARK: Lines
@@ -747,7 +809,7 @@ public enum MessageLayout {
             reactions(x: x, alignRight: false, right: 0)
             failedLine(x: x, alignRight: false, right: 0)
             let body = CGRect(x: x - 4, y: top, width: width - x - m + 8, height: y - top)
-            return Laid(height: ceil(y + 1), body: body, parts: parts, regions: regions, text: text)
+            return Laid(height: ceil(y + 1), body: body, parts: parts, regions: regions, text: text, pictures: slots, over: over)
         }
     }
 }

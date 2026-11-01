@@ -83,7 +83,7 @@ private struct PollsScene: View {
         ) {
             ControllerSpecimen {
                 let c = ConversationController(chat: Samples.group,
-                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures),
+                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.thumbnails),
                                                layouts: Layouts(), place: .newest(100))
                 _ = c.view
                 Pictures.apply(Samples.update(of: Samples.polls), to: c)
@@ -95,7 +95,7 @@ private struct PollsScene: View {
 }
 
 /// `Samples.links` in Lisbon Climbing, as a pane 640 points wide shows them, their thumbnails drawn by
-/// `Samples.pictures` as the app reads jawd's from its folder.
+/// `Samples.thumbnails` as the app reads jawd's from its folder.
 private struct LinkPreviewsScene: View {
     let conditions: Conditions
 
@@ -107,7 +107,7 @@ private struct LinkPreviewsScene: View {
         ) {
             ControllerSpecimen {
                 let c = ConversationController(chat: Samples.group,
-                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures),
+                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.thumbnails),
                                                layouts: Layouts(), place: .newest(100))
                 _ = c.view
                 Pictures.apply(Samples.update(of: Samples.links), to: c)

@@ -89,9 +89,22 @@ public enum Samples {
             m(13, [Span(.text, "Saturday at 9? I can drive two of you")], at: now - 1_400_000, mine: true, status: .sent, edited: true),
             m(14, [Span(.text, "on my way")], at: now - 120_000, mine: true, status: .pending),
             m(15, [Span(.text, "this one didn't go")], at: now - 60000, mine: true, status: .failed),
-            m(16, [Span(.text, "sunset from the top")], at: now - 40000, from: rui, kind: .image,
-              reactions: [Reaction(emoji: "🔥", n: 1, mine: false), Reaction(emoji: "😍", n: 3, mine: false)]),
+            photo(m(16, [Span(.text, "sunset from the top")], at: now - 40000, from: rui, kind: .image,
+                    reactions: [Reaction(emoji: "🔥", n: 1, mine: false), Reaction(emoji: "😍", n: 3, mine: false)]), "sunset", hd: true),
         ] + kinds
+    }
+
+    /// A media row's file as jawd sends it once it's here, drawn from one of `SamplePictures`.
+    static func here(_ picture: String, kind: String = "image", seconds: Int? = nil, bytes: Int = 2_400_000, hd: Bool = false) -> String {
+        let (w, h) = SamplePictures.size(picture)
+        let length = seconds.map { #","seconds":\#($0)"# } ?? ""
+        return #"{"w":\#(w),"h":\#(h),"bytes":\#(bytes),"mime":"\#(kind == "sticker" ? "image/webp" : kind == "image" ? "image/jpeg" : "video/mp4")","state":"local","path":"media/files/\#(picture).\#(kind == "image" ? "jpg" : kind == "sticker" ? "webp" : "mp4")","previews":{"256":"\#(SamplePictures.preview(picture, 256))","768":"\#(SamplePictures.preview(picture, 768))"},"thumbnail":"\#(SamplePictures.thumbnail(picture))","hd":\#(hd)\#(length)}"#
+    }
+
+    static func photo(_ row: MessageRow, _ picture: String, hd: Bool = false) -> MessageRow {
+        var row = row
+        row.media = try? JSONDecoder().decode(Media.self, from: Data(here(picture, hd: hd).utf8))
+        return row
     }
 
     /// One message of each kind jawd draws a card for, as jawd sends them: their media's size,
@@ -101,7 +114,7 @@ public enum Samples {
         let rows = """
         [
           {"id":"K1","v":1,"sort":"\(at)~000101","chat":"g","at":\(at),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"video",
-           "spans":[{"t":"text","s":"the last move"}],"media":{"w":1080,"h":1920,"seconds":42,"bytes":12500000,"mime":"video/mp4"}},
+           "spans":[{"t":"text","s":"the last move"}],"media":\(here("poster", kind: "video", seconds: 42, bytes: 12_500_000))},
           {"id":"K2","v":1,"sort":"\(at + 1000)~000102","chat":"g","at":\(at + 1000),"mine":true,"status":"delivered","kind":"document",
            "spans":[{"t":"text","s":"Sintra topo.pdf"}],"media":{"name":"Sintra topo.pdf","bytes":2400000,"mime":"application/pdf","pages":12}},
           {"id":"K3","v":1,"sort":"\(at + 2000)~000103","chat":"g","at":\(at + 2000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"location",
@@ -116,7 +129,9 @@ public enum Samples {
                    "preview":"media/links/sintra.jpg"}},
           {"id":"K7","v":1,"sort":"\(at + 6000)~000107","chat":"g","at":\(at + 6000),"mine":true,"status":"read","kind":"voice","media":{"seconds":14}},
           {"id":"K8","v":1,"sort":"\(at + 7000)~000108","chat":"g","at":\(at + 7000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"album",
-           "album":{"items":[{"id":"a","kind":"image"},{"id":"b","kind":"image"},{"id":"c","kind":"video"},{"id":"d","kind":"image"},{"id":"e","kind":"image"}]}}
+           "album":{"items":[{"id":"a","kind":"image","media":\(here("lake"))},{"id":"b","kind":"image","media":\(here("wall"))},
+                             {"id":"c","kind":"video","media":\(here("poster", kind: "video", seconds: 9))},
+                             {"id":"d","kind":"image","media":\(here("ridge"))},{"id":"e","kind":"image","media":\(here("rope"))}]}}
         ]
         """
         return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
@@ -184,9 +199,45 @@ public enum Samples {
         return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
     }
 
-    /// The samples' pictures, drawn here rather than read from jawd's folder, so the harness and the
-    /// tests draw what the app would without a file: the thumbnails of the sample links.
-    public static let pictures: any ThumbnailSource = SampleThumbnails()
+    /// The samples' link thumbnails, drawn here rather than read from jawd's folder, so the harness and
+    /// the tests draw what the app would without a file.
+    public static let thumbnails: any ThumbnailSource = SampleThumbnails()
+
+
+    /// A chat of pictures, as jawd sends each once it's here: photos of every shape, one with an HD
+    /// copy, albums of two, three, four and eight, a sticker, a video's, a GIF's and a video message's
+    /// posters, a photo whose previews aren't made yet and one with nothing yet, and an album as media
+    /// in's jawd sends one, its items as messages of their own.
+    public static var pictures: [MessageRow] {
+        let at = now - 600_000
+        func album(_ pictures: [String]) -> String {
+            let items = pictures.enumerated().map { i, p in #"{"id":"\#(p)\#(i)","kind":"\#(p == "poster" ? "video" : "image")","media":\#(here(p, kind: p == "poster" ? "video" : "image", seconds: p == "poster" ? 9 : nil))}"# }
+            return #"{"items":[\#(items.joined(separator: ","))]}"#
+        }
+        let rows: [(String, String, Bool, String, String)] = [
+            ("P1", "image", false, "[{\"t\":\"text\",\"s\":\"the lake, from the top\"}]", #""media":\#(here("lake"))"#),
+            ("P2", "image", true, "[]", #""media":\#(here("wall"))"#),
+            ("P3", "image", false, "[{\"t\":\"text\",\"s\":\"the whole ridge\"}]", #""media":\#(here("ridge"))"#),
+            ("P4", "image", true, "[]", #""media":\#(here("rope", hd: true))"#),
+            ("P5", "album", false, "[]", #""album":\#(album(["lake", "wall"]))"#),
+            ("P6", "album", true, "[{\"t\":\"text\",\"s\":\"three from Sunday\"}]", #""album":\#(album(["ridge", "rope", "sunset"]))"#),
+            ("P7", "album", false, "[]", #""album":\#(album(["sunset", "lake", "poster", "wall"]))"#),
+            ("P8", "album", false, "[{\"t\":\"text\",\"s\":\"the whole day\"}]",
+             #""album":\#(album(["lake", "wall", "ridge", "rope", "sunset", "poster", "lake", "wall"]))"#),
+            ("P9", "sticker", false, "[]", #""media":\#(here("smile", kind: "sticker", bytes: 24000))"#),
+            ("P10", "video", true, "[{\"t\":\"text\",\"s\":\"the last move\"}]", #""media":\#(here("poster", kind: "video", seconds: 42, bytes: 12_500_000))"#),
+            ("P11", "gif", false, "[]", #""media":\#(here("lake", kind: "gif", bytes: 900_000))"#),
+            ("P12", "video_note", false, "[]", #""media":\#(here("note", kind: "video_note", seconds: 14, bytes: 1_200_000))"#),
+            ("P13", "image", false, "[]", #""media":{"w":4032,"h":3024,"state":"local","path":"media/files/sunset.jpg","thumbnail":"\#(SamplePictures.thumbnail("sunset"))"}"#),
+            ("P14", "image", true, "[]", #""media":{"w":3024,"h":4032,"state":"local","path":"media/files/x.jpg"}"#),
+            ("P15", "album", false, "[]", #""album":{"photos":3,"videos":1}"#),
+        ]
+        let json = rows.enumerated().map { i, r in
+            let who = r.2 ? #""mine":true,"status":"read""# : #""from":{"id":"person:4","name":"Ana","colour":4}"#
+            return #"{"id":"\#(r.0)","v":1,"sort":"\#(at + Int64(i) * 1000)~\#(String(format: "%06d", 300 + i))","chat":"\#(direct.id)","at":\#(at + Int64(i) * 1000),\#(who),"kind":"\#(r.1)","spans":\#(r.3),\#(r.4)}"#
+        }
+        return (try? JSONDecoder().decode([MessageRow].self, from: Data("[\(json.joined(separator: ","))]".utf8))) ?? []
+    }
 
     /// The window update a watch of those messages returns.
     public static var update: Update<MessageRow> {

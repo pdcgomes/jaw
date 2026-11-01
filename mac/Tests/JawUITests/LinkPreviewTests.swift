@@ -92,7 +92,7 @@ func pictureParts(_ l: Laid) -> Int {
     let folder = FolderPictures(root: root)
     #expect(folder.id == root)
     #expect(folder.picture("media/links/ipma.jpg", pixels: 140) == nil, "not kept yet")
-    let drawn = try #require(Samples.pictures.picture("media/links/ipma.jpg", pixels: 140))
+    let drawn = try #require(Samples.thumbnails.picture("media/links/ipma.jpg", pixels: 140))
     let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: root + "/media/links/ipma.jpg") as CFURL,
                                                                    UTType.jpeg.identifier as CFString, 1, nil))
     CGImageDestinationAddImage(destination, drawn, nil)
@@ -140,7 +140,7 @@ func writeJPEG(_ path: String, _ w: Int, _ h: Int) throws {
     let (root, done) = try pictureFolder()
     defer { done() }
     try writeJPEG("\(root)/media/links/a.jpg", 140, 140)
-    let drawn = try #require(Samples.pictures.picture("media/links/ipma.jpg", pixels: 140))
+    let drawn = try #require(Samples.thumbnails.picture("media/links/ipma.jpg", pixels: 140))
     for (name, type) in [("b", UTType.png), ("c", UTType.tiff)] {
         let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: "\(root)/media/links/\(name).jpg") as CFURL,
                                                                        type.identifier as CFString, 1, nil))

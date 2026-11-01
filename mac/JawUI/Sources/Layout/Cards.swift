@@ -48,8 +48,10 @@ extension MessageLayout.Builder {
     /// Whether the kind is drawn as a card, its words then only its caption.
     var hasCard: Bool {
         switch m.kind {
-        case .image, .video, .gif, .sticker, .videoNote, .voice, .audio, .document, .location, .liveLocation, .contact, .poll, .album:
+        case .image, .video, .gif, .sticker, .videoNote, .voice, .audio, .document, .location, .liveLocation, .contact, .poll:
             !m.deleted
+        // An album media in's jawd sends as counts, its items as messages of their own, is a line.
+        case .album: !m.deleted && !(m.album?.items.isEmpty ?? true)
         case .text: !m.deleted && (m.link.map(Self.shows) ?? false)
         case .system, .call, .event, .invite, .unknown: false
         }
@@ -107,10 +109,7 @@ extension MessageLayout.Builder {
         case .document, .contact: return CGSize(width: w, height: 44)
         case .location, .liveLocation: return CGSize(width: w, height: 52)
         case .poll: return pollSize(most: most)
-        case .album:
-            let n = min(m.album?.items.count ?? 1, 4)
-            let side = (min(most, 260) - 4) / 2
-            return CGSize(width: min(most, 260), height: CGFloat((n + 1) / 2) * (side + 4) - 4)
+        case .album: return albumSize(most: most)
         case .text: return linkSize(most: most)
         case .system, .call, .event, .invite, .unknown: return nil
         }
@@ -199,18 +198,50 @@ extension MessageLayout.Builder {
         return Array(lines.prefix(most - 1)) + [truncated((one as NSString).substring(from: rest), font, colour, width)]
     }
 
-    /// A picture's frame in its shape, from its width and height.
+    /// A picture's place in its shape, from the row's width and height before any pixel: a photo, a
+    /// video's or a GIF's poster inside 320 by 400 points and 120 at least, cropped from the centre
+    /// when its shape is further out than that; a sticker inside 160; a video message a 192-point
+    /// circle.
     func pictureSize(most: CGFloat) -> CGSize {
+        let aspect = m.media.flatMap { m in m.w.flatMap { w in m.h.flatMap { h in w > 0 && h > 0 ? CGFloat(w) / CGFloat(h) : nil } } }
         switch m.kind {
-        case .videoNote: return CGSize(width: 160, height: 160)
-        case .sticker: return CGSize(width: 140, height: 140)
+        case .videoNote:
+            let side = min(192, most)
+            return CGSize(width: side, height: side)
+        case .sticker:
+            let side = min(160, most), a = aspect ?? 1
+            return a >= 1 ? CGSize(width: side, height: max((side / a).rounded(), 1)) : CGSize(width: max((side * a).rounded(), 1), height: side)
         default:
-            let aspect = m.media.flatMap { m in m.w.flatMap { w in m.h.map { CGFloat(w) / CGFloat(max($0, 1)) } } } ?? 4 / 3
-            let widest = min(most, 280)
-            var w = widest, h = w / aspect
-            if h > 320 { h = 320; w = h * aspect }
-            if h < 90 { h = 90; w = min(widest, h * aspect) }
-            return CGSize(width: max(w.rounded(), 120), height: h.rounded())
+            let a = aspect ?? 4 / 3
+            let widest = min(most, 320)
+            var w = widest, h = w / a
+            if h > 400 { h = 400; w = h * a }
+            w = max(w, min(120, widest))
+            h = min(max(h, 120), 400)
+            return CGSize(width: w.rounded(), height: h.rounded())
+        }
+    }
+
+    /// An album's place, fixed by how many items it has: two side by side, three as two across and
+    /// one wide below, four or more two by two, the tiles square and 2 points apart, 320 wide.
+    func albumSize(most: CGFloat) -> CGSize {
+        let w = min(most, 320), side = ((w - 2) / 2).rounded(.down)
+        return CGSize(width: w, height: (m.album?.items.count ?? 0) <= 2 ? side : 2 * side + 2)
+    }
+
+    /// The album's tiles in `r`: at most four, the fourth saying how many more there are.
+    static func albumTiles(_ r: CGRect, count: Int) -> [CGRect] {
+        let side = ((r.width - 2) / 2).rounded(.down), right = r.width - side - 2
+        let left = CGRect(x: r.minX, y: r.minY, width: side, height: side)
+        let beside = CGRect(x: r.minX + side + 2, y: r.minY, width: right, height: side)
+        switch count {
+        case ...0: return []
+        case 1: return [r]
+        case 2: return [left, beside]
+        case 3: return [left, beside, CGRect(x: r.minX, y: r.minY + side + 2, width: r.width, height: side)]
+        default:
+            return [left, beside, left.offsetBy(dx: 0, dy: side + 2),
+                    CGRect(x: beside.minX, y: beside.minY + side + 2, width: right, height: side)]
         }
     }
 
@@ -235,22 +266,45 @@ extension MessageLayout.Builder {
         roles.text.opacity(roles.isDark ? 0.07 : 0.06)
     }
 
+    /// A part under the pictures, or over them while `drawingOver` is set.
+    mutating func put(_ part: Laid.Part) {
+        if drawingOver { over.append(part) } else { parts.append(part) }
+    }
+
     mutating func symbol(_ name: String, _ size: CGFloat, _ colour: RGBA, on fill: RGBA? = nil, centredIn r: CGRect) {
         guard let (image, s) = Symbols.image(name, size, colour, on: fill) else { return }
-        parts.append(.image(image, CGRect(x: (r.midX - s.width / 2).rounded(), y: (r.midY - s.height / 2).rounded(), width: s.width, height: s.height)))
+        put(.image(image, CGRect(x: (r.midX - s.width / 2).rounded(), y: (r.midY - s.height / 2).rounded(), width: s.width, height: s.height)))
     }
 
     /// A line of text with its baseline placed so the line sits at `top`.
     mutating func text(_ s: String, _ font: CTFont, _ colour: RGBA, x: CGFloat, top: CGFloat, most: CGFloat) {
         let l = truncated(s, font, colour, most)
-        parts.append(.line(l, CGPoint(x: x, y: top + ascent(font))))
+        put(.line(l, CGPoint(x: x, y: top + ascent(font))))
+    }
+
+    /// A pill of quiet words over a picture's corner: a poster's length and size, "GIF", "HD".
+    mutating func pill(_ words: String, in r: CGRect, top: Bool = false, right: Bool = false) {
+        let label = line(words, fonts.small, roles.text)
+        let lh = lineHeight(fonts.small) + 4
+        let w = min(width(of: label) + 12, r.width - 16)
+        let pill = CGRect(x: right ? r.maxX - 8 - w : r.minX + 8, y: top ? r.minY + 8 : r.maxY - 8 - lh, width: w, height: lh)
+        put(.fill(pill, roles.ground.opacity(0.72).cgColor, lh / 2))
+        text(words, fonts.small, roles.text, x: pill.minX + 6, top: pill.minY + 2, most: pill.width - 12)
+    }
+
+    /// ▶ on a scrim, at the middle of a video's or a GIF's poster.
+    mutating func play(in r: CGRect, size: CGFloat = 44) {
+        let circle = CGRect(x: (r.midX - size / 2).rounded(), y: (r.midY - size / 2).rounded(), width: size, height: size)
+        put(.fill(circle, roles.ground.opacity(0.6).cgColor, size / 2))
+        symbol("play.fill", size * 0.38, roles.text, centredIn: circle.offsetBy(dx: size * 0.04, dy: 0))
     }
 
     static func bytes(_ n: Int64?) -> String? {
         n.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
     }
 
-    /// What a picture is, said over its frame until jawd sends its preview: "Video · 0:42 · 12 MB".
+    /// What a picture is, said over its frame while there's nothing to draw it from: "Video · 0:42 ·
+    /// 12 MB".
     var pictureLabel: String {
         let what = switch m.kind {
         case .video: "Video"
@@ -262,24 +316,71 @@ extension MessageLayout.Builder {
         return ([what, m.media?.seconds.map(Format.length), Self.bytes(m.media?.bytes)] as [String?]).compactMap(\.self).joined(separator: " · ")
     }
 
+    /// A poster's length and size, or "GIF".
+    var posterLabel: String? {
+        switch m.kind {
+        case .gif: return "GIF"
+        case .video: return ([m.media?.seconds.map(Format.length), Self.bytes(m.media?.bytes)] as [String?]).compactMap(\.self).joined(separator: " · ")
+        case .videoNote: return m.media?.seconds.map(Format.length)
+        default: return nil
+        }
+    }
+
+    /// A photo, a sticker, or a video's, a GIF's or a video message's poster, in its place: the well
+    /// where it will be, its slot, drawn from jawd's previews by the cell, and over it what it is.
     mutating func picture(_ r: CGRect) {
-        let round = m.kind == .videoNote ? r.width / 2 : Radius.field
-        parts.append(.fill(r, well.cgColor, round))
-        let icon = switch m.kind {
-        case .video, .gif: "play.circle.fill"
-        case .videoNote: "video.fill"
-        case .sticker: "face.smiling"
-        default: m.viewOnce ? "1.circle" : "photo"
+        let round = m.kind == .videoNote ? r.width / 2 : m.kind == .sticker ? 0 : Radius.field
+        let source = m.viewOnce ? PictureSource() : PictureSource(m.media)
+        if m.kind != .sticker || source.isEmpty { parts.append(.fill(r, well.cgColor, round)) }
+        drawingOver = true
+        defer { drawingOver = false }
+        if source.isEmpty {
+            let icon = switch m.kind {
+            case .video, .gif: "play.circle.fill"
+            case .videoNote: "video.fill"
+            case .sticker: "face.smiling"
+            default: m.viewOnce ? "1.circle" : "photo"
+            }
+            symbol(icon, m.kind == .video || m.kind == .gif ? 34 : 26, roles.secondary, centredIn: r)
+            if m.kind != .videoNote { pill(pictureLabel, in: r) }
+        } else {
+            slots.append(PictureSlot(rect: r, radius: round, fit: m.kind == .sticker ? .fit : .fill, source: source, message: m.id))
+            if [.video, .gif, .videoNote].contains(m.kind) { play(in: r, size: m.kind == .videoNote ? 40 : 44) }
+            if let label = posterLabel, !label.isEmpty {
+                if m.kind == .videoNote {
+                    let l = line(label, fonts.small, roles.text)
+                    let lh = lineHeight(fonts.small) + 4, w = width(of: l) + 12
+                    let pill = CGRect(x: (r.midX - w / 2).rounded(), y: r.maxY - 14 - lh, width: w, height: lh)
+                    put(.fill(pill, roles.ground.opacity(0.72).cgColor, lh / 2))
+                    text(label, fonts.small, roles.text, x: pill.minX + 6, top: pill.minY + 2, most: w)
+                } else {
+                    pill(label, in: r)
+                }
+            }
+            if m.media?.hd == true, m.kind == .image { pill("HD", in: r, top: true, right: true) }
         }
-        symbol(icon, m.kind == .video || m.kind == .gif ? 34 : 26, roles.secondary, centredIn: r)
-        let label = line(pictureLabel, fonts.small, roles.text)
-        let lw = width(of: label)
-        let lh = lineHeight(fonts.small) + 4
-        let pill = CGRect(x: r.minX + 8, y: r.maxY - 8 - lh, width: min(lw + 12, r.width - 16), height: lh)
-        if m.kind != .videoNote {
-            parts.append(.fill(pill, roles.ground.opacity(0.7).cgColor, lh / 2))
-            text(pictureLabel, fonts.small, roles.text, x: pill.minX + 6, top: pill.minY + 2, most: pill.width - 12)
+        if !m.viewOnce { regions.append((r, .media(item: nil))) }
+    }
+
+    /// A sticker or a video message on its own, as WhatsApp draws them: no bubble, the time under
+    /// it. One that quotes a message has a bubble for the quote.
+    mutating func alone() -> Laid {
+        let size = pictureSize(most: width - 2 * metrics.margin)
+        var top = y
+        if !m.mine, context.group, context.firstOfRun, let from = m.from {
+            parts.append(.line(line(from.name, fonts.name, roles.sender(from.colour)), CGPoint(x: metrics.margin, y: top + ascent(fonts.name))))
+            top += lineHeight(fonts.name) + 2
         }
+        let x = m.mine ? width - metrics.margin - size.width : metrics.margin
+        let r = CGRect(x: x, y: top, width: size.width, height: size.height)
+        drawCard(r)
+        y = r.maxY + 2
+        let foot = footer()
+        let fw = width(of: foot)
+        parts.append(contentsOf: footParts(foot, at: CGPoint(x: m.mine ? width - metrics.margin - fw : x, y: y + ascent(fonts.time))))
+        y += lineHeight(fonts.time)
+        reactions(x: x, alignRight: m.mine, right: r.maxX)
+        return Laid(height: ceil(y + 1), body: r, parts: parts, regions: regions, text: nil, pictures: slots, over: over)
     }
 
     mutating func voice(_ r: CGRect) {
@@ -383,19 +484,30 @@ extension MessageLayout.Builder {
         text(Self.pollVoted(poll), fonts.small, roles.tertiary, x: r.minX, top: top, most: r.width)
     }
 
+    /// An album's tiles, each filled and cropped from the centre, a video's with ▶, the fourth saying
+    /// how many more there are.
     mutating func album(_ r: CGRect) {
-        let n = m.album?.items.count ?? 1
-        let side = (r.width - 4) / 2
-        for i in 0 ..< min(n, 4) {
-            let tile = CGRect(x: r.minX + CGFloat(i % 2) * (side + 4), y: r.minY + CGFloat(i / 2) * (side + 4), width: side, height: side)
-            parts.append(.fill(tile, well.cgColor, Radius.control))
-            if i == 3, n > 4 {
-                let more = line("+\(n - 3)", fonts.name, roles.text)
-                let w = width(of: more)
-                parts.append(.line(more, CGPoint(x: tile.midX - w / 2, y: tile.midY + ascent(fonts.name) / 2 - 1)))
+        let items = m.album?.items ?? []
+        for (i, tile) in Self.albumTiles(r, count: items.count).enumerated() {
+            let item = items[i]
+            let source = PictureSource(item.media)
+            parts.append(.fill(tile, well.cgColor, Radius.small))
+            drawingOver = true
+            if source.isEmpty {
+                symbol(item.kind == "video" ? "play.circle.fill" : "photo", 20, roles.secondary, centredIn: tile)
             } else {
-                symbol(m.album?.items[i].kind == "video" ? "play.circle.fill" : "photo", 20, roles.secondary, centredIn: tile)
+                slots.append(PictureSlot(rect: tile, radius: Radius.small, source: source, message: m.id, item: i))
             }
+            if i == 3, items.count > 4 {
+                put(.fill(tile, roles.ground.opacity(0.55).cgColor, Radius.small))
+                let more = line("+\(items.count - 3)", fonts.emoji, roles.text)
+                let w = width(of: more)
+                put(.line(more, CGPoint(x: (tile.midX - w / 2).rounded(), y: (tile.midY + ascent(fonts.emoji) / 2 - 4).rounded())))
+            } else if item.kind == "video", !source.isEmpty {
+                play(in: tile, size: 34)
+            }
+            drawingOver = false
+            regions.append((tile, .media(item: i)))
         }
     }
 
