@@ -238,9 +238,6 @@ extension AppModel: RosterHost {
     /// shows, as jawd sends typing only for those.
     func rosterTyping() -> Set<String> {
         guard let roster = window?.sidebar.roster else { return [] }
-        return Set(roster.people.list.compactMap { p in
-            guard let chat = p.chat, typing[chat]?.contains(where: { $0.id == p.id }) == true else { return nil }
-            return p.id
-        })
+        return RosterLines.typing(roster.people.list, in: typing)
     }
 }

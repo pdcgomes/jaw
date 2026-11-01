@@ -50,6 +50,15 @@ public enum RosterLines {
         return out
     }
 
+    /// Who of `people` is typing or recording in their one-to-one chat, by person id, from who jawd
+    /// says is typing in each chat its windows show: typing in a group isn't typing in their chat.
+    public static func typing(_ people: [RosterRow], in typists: Typists) -> Set<String> {
+        Set(people.compactMap { p in
+            guard let chat = p.chat, typists[chat]?.contains(where: { $0.id == p.id }) == true else { return nil }
+            return p.id
+        })
+    }
+
     /// How someone is, in words, and whether they're drawn in the online colour.
     public struct Said: Equatable, Sendable {
         public var text: String

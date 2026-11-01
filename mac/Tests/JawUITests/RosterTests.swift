@@ -109,6 +109,32 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
 }
 
 @MainActor
+@Test func `the roster says who's typing from the app's typing map, in their own chat only, and follows it when only that changes`() throws {
+    let host = RosterStub()
+    let r = roster(host)
+    let window = NSWindow(contentViewController: r)
+    defer { withExtendedLifetime(window) {} }
+    let cell = { (row: Int) in r.table.view(atColumn: 0, row: row, makeIfNecessary: true) as? PersonCell }
+    // As the app keeps it: Ana typing in her chat, and person:7 in Lisbon Climbing, as the harness has it.
+    var typing = Samples.typing
+    typing[Samples.direct.id] = [Typist(id: "person:1", name: "Ana Ribeiro")]
+    r.typing = RosterLines.typing(r.people.list, in: typing)
+    r.view.layoutSubtreeIfNeeded()
+    #expect(r.typing == ["person:1"], "the roster's person:7, Avó Lurdes, isn't typing in her own chat")
+    #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro typing…", "▸ 4 offline"])
+    #expect(try #require(cell(2)).state.stringValue == "typing…")
+    // Only who's typing changes, with no roster push and no chat's row: Ana stops, and Avó Lurdes types in her chat.
+    let lurdes = try #require(r.people.get("person:7")?.chat)
+    r.typing = RosterLines.typing(r.people.list, in: [lurdes: [Typist(id: "person:7", name: "Avó Lurdes")]])
+    r.view.layoutSubtreeIfNeeded()
+    #expect(Array(r.said.prefix(5)) == ["People:", "Family 2 of 5", "Ana Ribeiro online", "Avó Lurdes typing…", "▸ 3 offline"],
+            "listed though she hides her presence")
+    #expect(try #require(cell(2)).state.stringValue == "online" && cell(3)?.state.stringValue == "typing…")
+    r.typing = RosterLines.typing(r.people.list, in: [:])
+    #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro online", "▸ 4 offline"], "nobody's typing")
+}
+
+@MainActor
 @Test func `the roster asks for more only once the last person it holds is in sight, and never past the 1,000 jawd keeps`() throws {
     let host = RosterStub()
     let r = roster(host)
