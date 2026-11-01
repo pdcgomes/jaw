@@ -87,6 +87,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
 
     let root = LibraryRootView()
     let header = LibraryHeader()
+    let strip = LibraryStrip()
     let scroll = NSScrollView()
     let collection = NSCollectionView()
     let grid = LibraryGridLayout()
@@ -134,7 +135,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
                                                object: scroll.contentView)
-        for v in [scroll, header] as [NSView] {
+        for v in [scroll, header, strip] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -143,7 +144,11 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             header.heightAnchor.constraint(equalToConstant: ConversationHeader.height),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
+            strip.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Space.xs),
+            strip.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            strip.heightAnchor.constraint(equalToConstant: Self.stripHeight),
+            scroll.topAnchor.constraint(equalTo: strip.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -151,6 +156,11 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         header.clicked = { [weak self] in
             guard let self else { return }
             host?.libraryFocused(self)
+        }
+        strip.picked = { [weak self] kind in
+            guard let self else { return }
+            host?.libraryFocused(self)
+            choose(kind)
         }
         applyTheme()
         showHeader()
@@ -173,6 +183,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         root.wantsLayer = true
         root.layer?.backgroundColor = roles.ground.cgColor
         header.roles = roles
+        strip.roles = roles
         collection.reloadData()
     }
 
@@ -183,9 +194,19 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         LibraryFilter(kind: kind, chat: scope.chat)
     }
 
+    /// Shows `kind`, nil for every kind's shelves, watched from the top.
+    public func choose(_ kind: LibraryKind?) {
+        guard kind != self.kind || refused != nil else { return }
+        self.kind = kind
+        ask()
+    }
+
     /// Asks jawd for the window as the pane shows it now, from the top.
     public func ask() {
+        // Each kind's count is of every kind, so it stands until jawd's answer.
+        let counts = window.counts
         window = Library(place: Self.place(for: kind))
+        window.counts = counts
         askedPlace = nil
         refused = nil
         selected = nil
@@ -216,6 +237,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         index = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }) { a, _ in a }
         if let selected, index[selected] == nil { self.selected = nil }
         showHeader()
+        showStrip()
         relayout()
     }
 
@@ -371,6 +393,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         case 125: move(0, 1)
         case 116: move(0, -linesOnScreen)
         case 121: move(0, linesOnScreen)
+        case 48: choose(LibraryKinds.step(kind, by: flags == .shift ? -1 : 1))
         default: return false
         }
         return true
@@ -378,15 +401,25 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
 
     func clicked(_ cell: LibraryCell, _ clicks: Int) {
         host?.libraryFocused(self)
+        if case let .heading(_, _, kind?)? = cell.element { return choose(kind) }
         guard let id = cell.item?.id else { return }
         select(id)
     }
 
-    func header(of cell: LibraryCell) -> LibraryKind? {
-        if case let .heading(_, _, kind)? = cell.element { kind } else { nil }
+    // MARK: - The header and the strip
+
+    nonisolated static let stripHeight: CGFloat = 32
+
+    func showStrip() {
+        strip.labels = LibraryKinds.labels(window.counts, capped: capped)
+        strip.shown = kind
+        strip.said = refused == nil ? LibraryKinds.said(kind, loaded: window.loaded, total: window.total, capped: capped, filtered: filtered) : ""
     }
 
-    // MARK: - The header
+    /// Whether anything narrows what's shown beyond its kind and chat.
+    var filtered: Bool {
+        !text.isEmpty || tokens
+    }
 
     func showHeader() {
         let shared = window.counts.map { LibraryLayout.counted($0.shared, capped: capped) }

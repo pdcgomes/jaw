@@ -22,6 +22,14 @@ extension HarnessScene {
         ) { LibraryRowsScene(conditions: $0) }
     }
 
+    static var libraryKinds: HarnessScene {
+        HarnessScene(
+            id: "library-kinds", title: "Library kinds", symbol: "rectangle.split.3x1",
+            synopsis: "The strip of kinds under the library's header, with jawd's counts, at each kind in turn, and what's shown said at its end",
+            section: .panes, covers: [LibraryController.self, LibraryKinds.self], width: 560,
+        ) { LibraryKindsScene(conditions: $0) }
+    }
+
     static var libraryAll: HarnessScene {
         HarnessScene(
             id: "library-all", title: "Library, every kind", symbol: "square.stack",
@@ -55,6 +63,24 @@ private struct LibraryRowsScene: View {
             roles: conditions.roles,
         ) {
             LibrarySpecimen(conditions: conditions, kind: .voice, height: 200)
+        }
+    }
+}
+
+private struct LibraryKindsScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Each kind chosen",
+            note: "All, Photos 18, Videos 3, Voice 2, Files 4 and Links 3, the one shown on the selection's fill; at the strip's end \"newest first\" for All and how many of the kind otherwise. Under the header, whose words say every chat and 30 shared.",
+            roles: conditions.roles,
+        ) {
+            VStack(alignment: .leading, spacing: Space.m) {
+                ForEach(Array(LibraryKinds.order.enumerated()), id: \.offset) { _, kind in
+                    LibrarySpecimen(conditions: conditions, kind: kind, height: 80)
+                }
+            }
         }
     }
 }
