@@ -1886,6 +1886,33 @@ mod tests {
     }
 
     #[test]
+    fn jaws_star_in_her_lids_chat_waits_through_the_merge_so_the_phones_earlier_unstar_is_held_back() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let in_her_lids = Message {
+            chat: ANA_LID.into(),
+            id: "l1".into(),
+            at: AT - 120_000,
+            sender: Some(ANA_LID.into()),
+            kind: "text",
+            text: Some("l1".into()),
+            summary: "l1".into(),
+            live: true,
+            ..Message::default()
+        };
+        written(&db, &[Change::Message(in_her_lids)]);
+        let index = ["star", ANA_LID, "l1", "0", "0"];
+        assert!(matches!(acted(&db, ANA_LID, star_at(&index, true, AT, "s1")), Acted::Queued { .. }));
+        // Her chats merge while jaw's star waits (round three's T4), and the phone's unstar, from
+        // before jaw's star by its time, names her number.
+        her_lid_joined(&db);
+        arrives(&db, &["star", ANA, "l1", "0", "0"], &star_value(false, AT - 1_000), 1);
+        assert!(starred(&db, "l1"), "held back: the star's wait went with her LID's chat");
+        arrives(&db, &index, &star_value(true, AT), 2);
+        assert_eq!((starred(&db, "l1"), waits(&db)), (true, 0), "and jaw's echo, under her LID, ends it");
+    }
+
+    #[test]
     fn a_phone_unstar_under_her_lid_while_jaws_star_waits_is_held_back_so_unstarring_isnt_so_already() {
         let db = db();
         written(&db, &[from_ana("m1", AT)]);
