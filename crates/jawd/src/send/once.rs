@@ -82,7 +82,7 @@ struct Found {
     copy: bool,
 }
 
-const FOUND: &str = "SELECT m.n, c.id, j.jid, m.mine, m.view_once, m.deleted, m.kind, m.raw, m.detail,
+const FOUND: &str = "m.n, c.id, j.jid, m.mine, m.view_once, m.deleted, m.kind, m.raw, m.detail,
         EXISTS (SELECT 1 FROM media md WHERE md.message = m.n AND md.variant = 'sd' AND md.sha256 IS NOT NULL)";
 const IN_CHAT: &str = "FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2
     LEFT JOIN person_jids j ON j.n = m.sender WHERE c.id = ?1";
@@ -109,13 +109,13 @@ fn found(r: &rusqlite::Row) -> rusqlite::Result<Found> {
 fn find(db: &Connection, id: &str, chat: Option<&str>) -> anyhow::Result<Result<Found, Error>> {
     let found: Vec<Found> = match chat {
         Some(chat) => db
-            .prepare_cached(&format!("{FOUND} {IN_CHAT}"))?
+            .prepare_cached(&format!("SELECT {FOUND} {IN_CHAT}"))?
             .query_row(params![chat, id], found)
             .optional()?
             .into_iter()
             .collect(),
         None => db
-            .prepare_cached(&format!("{FOUND} {ANYWHERE}"))?
+            .prepare_cached(&format!("SELECT {FOUND} {ANYWHERE}"))?
             .query_map([id], found)?
             .collect::<rusqlite::Result<_>>()?,
     };

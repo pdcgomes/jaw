@@ -266,6 +266,22 @@ SELECT person FROM chats WHERE n = ?1
 SELECT n FROM outbox WHERE kind = 'played' AND target = ?1
     SEARCH outbox USING INDEX outbox_by_target (target=?)
 
+-- src/send/once.rs
+SELECT m.n, c.id, j.jid, m.mine, m.view_once, m.deleted, m.kind, m.raw, m.detail, EXISTS (SELECT 1 FROM media md WHERE md.message = m.n AND md.variant = 'sd' AND md.sha256 IS NOT NULL) FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender WHERE c.id = ?1
+    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/send/once.rs
+SELECT m.n, c.id, j.jid, m.mine, m.view_once, m.deleted, m.kind, m.raw, m.detail, EXISTS (SELECT 1 FROM media md WHERE md.message = m.n AND md.variant = 'sd' AND md.sha256 IS NOT NULL) FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LIMIT 2
+    SCAN c USING COVERING INDEX sqlite_autoindex_chats_1
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+
 -- src/send/outbox.rs
 SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1
     SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
