@@ -956,7 +956,9 @@ fn attach(
 
 /// Outbox row `outbox`'s copy couldn't be made or uploaded, or was cancelled: the row has failed,
 /// without an attempt at sending it counted, since its message never went, and its message shows
-/// failed, its media row saying why. A row whose copy is ready, or has gone, is left as it is.
+/// failed, its media row saying why. A row whose message was deleted for you goes instead, and its
+/// copy with it, since send.retry can't find it (`dropped`); an HD copy's row stays for send.retry.
+/// A row whose copy is ready, or has gone, is left as it is.
 fn unsent(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Result<bool> {
     if db.prepare_cached(COPY_FAILED)?.execute(params![outbox, error])? == 0 {
         return Ok(false);
@@ -972,6 +974,8 @@ fn unsent(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Res
             shown_failed(db, stamps, chat, n, status.as_deref())?;
             Ok(true)
         }
+        // Its message was deleted for you.
+        Some(None) if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? => dropped(db, outbox),
         // An HD copy's row shows nothing of its own; its message shows its media row's error.
         _ => {
             if let Some((Some(n), _)) = copy {

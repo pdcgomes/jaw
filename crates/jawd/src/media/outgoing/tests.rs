@@ -1971,3 +1971,67 @@ async fn a_deletion_taking_the_hd_copy_at_the_front_of_its_chats_queue_lets_what
         assert!(took < Duration::from_secs(10), "deleted {deleted}, a text sent after it waited {took:?}");
     }
 }
+
+/// Audit round three: a photo of yours deleted for you while its copy is still to make, which, as
+/// on the phone, doesn't stop it going; then its copy can't be made, or its upload is refused, for
+/// good. send.retry finds a send by its message, which has gone, so nothing can send it again: as
+/// an attempt refused leaves nothing of a message deleted for you (`dropped`), nothing of it, nor
+/// of its copy, is left.
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_r3_a_send_deleted_for_you_whose_copy_then_fails_for_good_leaves_nothing() {
+    for refused in ["made", "uploaded"] {
+        let home = tempfile::tempdir().unwrap();
+        let picked = tempfile::tempdir().unwrap();
+        let config = if refused == "made" { Config { send_keep_free: u64::MAX / 4, ..quick() } } else { quick() };
+        let rig = Rig::with(home.path(), world(), config).await;
+        rig.media.hold_making(true);
+        // Large enough that its SD copy is made smaller, so the disk's room is looked at.
+        let path = yours(picked.path(), "a.jpg", &Picture::lake(2400, 1800));
+        let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+        let id = answer["messages"][0].as_str().unwrap().to_string();
+        assert!(until(Duration::from_secs(30), || making(&rig)).await, "{refused}: its copy taken to make, held");
+        rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+        if refused == "uploaded" {
+            rig.world.refuse_uploads(1);
+        }
+        rig.media.hold_making(false);
+        let on_its_way = |db: &Connection| -> anyhow::Result<i64> {
+            Ok(db.query_row("SELECT count(*) FROM outgoing WHERE state IN ('preparing', 'uploading')", [], |r| {
+                r.get(0)
+            })?)
+        };
+        let settled = tokio::time::timeout(Duration::from_secs(60), async {
+            while rig.query(on_its_way).await > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(settled.await.is_ok(), "{refused}: its copy never stopped being on its way");
+        assert!(until(Duration::from_secs(10), || !making(&rig)).await, "{refused}: its job ended");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let left = rig
+            .query(|db| {
+                Ok((
+                    db.query_row("SELECT count(*) FROM outbox WHERE kind <> 'app_state'", [], |r| r.get::<_, i64>(0))?,
+                    db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get::<_, i64>(0))?,
+                    db.query_row(
+                        "SELECT count(*) FROM outbox WHERE kind <> 'app_state' AND state = 'failed' AND message IS NULL",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )?,
+                ))
+            })
+            .await;
+        let retried = rig.call("send.retry", json!({ "message": id })).await.map_err(|e| e.code);
+        let status = rig.media.status();
+        eprintln!(
+            "audit r3, {refused}: (outbox rows, copies, failed rows with no message) {left:?}; media/outgoing {:?}; \
+             media/files {:?}; send.retry {retried:?}; status unsent {} kept_files {} cache_files {}",
+            rig.files("media/outgoing"),
+            rig.files("media/files"),
+            status.unsent,
+            status.kept_files,
+            status.cache_files,
+        );
+        assert_eq!(left, (0, 0, 0), "{refused}: a send nothing can retry is left, failed, with its copy");
+    }
+}
