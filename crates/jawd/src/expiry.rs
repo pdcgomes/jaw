@@ -1,6 +1,9 @@
 //! The timer for disappearing messages: one task waits for the soonest `expires_at` jaw.db holds and,
-//! at it, has the writer erase what's due, a batch at a time, each batch one synced commit
-//! (`store::expiry`); at start it erases what came due while jawd wasn't running. The writer wakes it
+//! at it, has the writer erase what's due, a batch at a time, in the background lane's short
+//! transactions (`store::expiry`); at start it erases what came due while jawd wasn't running. An
+//! erasure acknowledges nothing, so its commit isn't synced: one a power cut loses is still due, and
+//! goes at the next start, and media's cleaner makes a synced commit of its own before it deletes a
+//! file, which makes the erasures before it durable first. The writer wakes it
 //! when it commits a sooner time than the one it waits for, and while it waits for one, a commit
 //! wakes it to look at the wall clock, since its sleep counts only time the Mac was awake and so runs
 //! late after a sleep or a change of the clock. With nothing to expire it waits for the writer alone:
@@ -15,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use jaw_proto::disappearing::DisappearingStatus;
 
-use crate::store::{Change, Store, expiry};
+use crate::store::{Change, Lane, Store, expiry};
 use crate::work::Priority;
 
 /// How soon after a commit woke the timer another may, so a flood's commits wake it once a second at
@@ -87,8 +90,11 @@ pub struct Batch {
     pub failed: Vec<i64>,
 }
 
-/// Erases the messages due by `now`, soonest first, but for those in `skip`: a batch's worth, in one
-/// synced commit.
+/// Erases the messages due by `now`, soonest first, but for those in `skip`: a batch's worth, in the
+/// background lane's transactions, each a few milliseconds at most with its commit and ending early
+/// once a live write or an inbox row waits, so no erasure holds them back for more than one. Each
+/// commits at NORMAL: a kill or a power cut leaves the erasures of the transactions before it, and
+/// the rest still due.
 pub async fn erase_due(store: &Store, now: i64, skip: &[i64]) -> Result<Batch> {
     let skipping = skip.to_vec();
     let due: Vec<i64> = store
@@ -104,7 +110,7 @@ pub async fn erase_due(store: &Store, now: i64, skip: &[i64]) -> Result<Batch> {
     if due.is_empty() {
         return Ok(Batch::default());
     }
-    let applied = store.apply_durable(due.iter().map(|&n| Change::Expire { n, at: now }).collect()).await?;
+    let applied = store.apply(Lane::Background, due.iter().map(|&n| Change::Expire { n, at: now }).collect()).await?;
     let failed = if applied.quarantined > 0 {
         let looked = due.clone();
         store
@@ -302,7 +308,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn what_came_due_while_the_timer_wasnt_running_goes_once_it_starts_32_to_a_synced_commit() {
+    async fn what_came_due_while_the_timer_wasnt_running_goes_once_it_starts_none_of_it_synced() {
         let before = tempfile::tempdir().unwrap();
         let stopped = Store::open(before.path()).unwrap();
         let soon = now_ms() + 200;
@@ -317,8 +323,47 @@ mod tests {
         let synced = store.storage().synced_commits;
         let expiry = start(store.clone());
         assert!(gone(&store, "due69", Duration::from_secs(10)).await, "the last of three batches");
+        // The writer counts a transaction's erasures once it has committed, as a reader may
+        // already see them gone.
+        let until = Instant::now() + Duration::from_secs(5);
+        while expiry.status(&store).erased < 70 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(expiry.status(&store), DisappearingStatus { erased: 70, ..DisappearingStatus::default() });
-        assert_eq!(store.storage().synced_commits - synced, 3, "32, 32 and 6, each in a synced commit");
+        assert_eq!(store.storage().synced_commits - synced, 0, "an erasure acknowledges nothing, so none is synced");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_backlog_of_erasures_goes_in_short_transactions_and_a_live_write_goes_in_between_them() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let due = now_ms() + 60_000;
+        // Long messages, each erasure taking its 9,000 words out of search's segments.
+        let long = |k: i64| {
+            let words: String = (0..9_000).map(|w| format!("long{k}word{w} ")).collect();
+            Message { text: Some(words), ..message(&format!("long{k:02}"), due + k) }
+        };
+        store.apply(Lane::Live, (0..32).map(|k| Change::Message(long(k))).collect()).await.unwrap();
+        store.indexed().await.unwrap();
+        let synced = store.storage().synced_commits;
+        let erasing = {
+            let store = store.clone();
+            tokio::spawn(async move { erase_due(&store, due + 1_000, &[]).await.unwrap() })
+        };
+        while there(&store, "long00").await {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        store.apply(Lane::Live, vec![Change::Message(timeless("live"))]).await.unwrap();
+        let left: i64 = store
+            .reads()
+            .query(Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT count(*) FROM messages WHERE id LIKE 'long%'", [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert!(left >= 8, "the live write waited for a short transaction, not for the backlog: {left} left");
+        assert_eq!(erasing.await.unwrap().erased, 32);
+        assert_eq!(store.storage().synced_commits, synced, "an erasure acknowledges nothing, so none is synced");
     }
 
     /// A message without a time to go, which wakes the timer only by its commit.

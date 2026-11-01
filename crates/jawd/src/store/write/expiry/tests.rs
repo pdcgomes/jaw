@@ -736,7 +736,10 @@ async fn erase_all(store: &Store, at: i64) -> usize {
 
 /// Killed after any of the erasures' commits, and started again, erasing ends as it does never
 /// killed: every due message gone, once, with its tombstone, and each chat showing what's left. A
-/// kill inside a transaction leaves jaw.db as its last commit did, so these are every kill.
+/// kill inside a transaction leaves jaw.db as its last commit did, and a batch goes in the
+/// background lane's transactions, each committing the next of its erasures in order, so a kill
+/// leaves the erasures of a batch up to one of them: taken here after whole batches, and after
+/// erasures made one at a time on a copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn erasing_killed_after_any_of_its_commits_and_started_again_ends_as_one_never_killed() {
     let home = tempfile::tempdir().unwrap();
@@ -744,13 +747,34 @@ async fn erasing_killed_after_any_of_its_commits_and_started_again_ends_as_one_n
     apply(&store, expiring()).await;
     store.indexed().await.unwrap();
     let mut kills = vec![killed(home.path())];
+    let within = killed(home.path());
+    {
+        let store = Store::open(within.path()).unwrap();
+        let due: Vec<i64> = query(&store, |db| {
+            Ok(db
+                .prepare(DUE)?
+                .query_map(rusqlite::params![LATER + 1_000, 1_000], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+        assert_eq!(due.len(), 100);
+        for (k, n) in due.into_iter().enumerate() {
+            store.apply(Lane::Background, vec![Change::Expire { n, at: LATER + 1_000 }]).await.unwrap();
+            if [0, 1, 2, 15, 30, 31, 32, 33, 63, 64, 98].contains(&k) {
+                kills.push(killed(within.path()));
+            }
+        }
+    }
+    let mut batches = 0;
     loop {
         let batch = crate::expiry::erase_due(&store, LATER + 1_000, &[]).await.unwrap();
         if batch.erased == 0 {
             break;
         }
+        batches += 1;
         kills.push(killed(home.path()));
     }
+    assert_eq!(batches, 4, "the hundred due, 32 at a time");
     let never_killed = left_by(&store).await;
     assert_eq!(never_killed.0.len(), 20, "the ten not due yet and the ten with no time: {:?}", never_killed.0);
     assert_eq!(never_killed.1.len(), 100);
@@ -760,7 +784,7 @@ async fn erasing_killed_after_any_of_its_commits_and_started_again_ends_as_one_n
     store.indexed().await.unwrap();
     let kept: Vec<String> = (100..120).map(|k| format!("site{k}")).collect();
     assert_eq!(link_words(home.path()), kept, "the links' index holds only the words of the links left");
-    assert!(kills.len() >= 4, "a kill after each of {} batches", kills.len() - 1);
+    assert!(kills.len() >= 15, "a kill after each of {} batches and erasures", kills.len() - 1);
     for (at, killed) in kills.iter().enumerate() {
         let store = Store::open(killed.path()).unwrap();
         erase_all(&store, LATER + 1_000).await;

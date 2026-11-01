@@ -16,8 +16,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::{CHAT, MESSAGE, PENDING_FOR, Stamps, delete_row, now_ms};
 use crate::convert;
 
-/// How many due messages one synced commit erases at most: with each erasure's words taken out of
-/// the indexes' segments as it goes, a batch keeps to a short transaction.
+/// How many due messages the timer hands the writer at once, which erases them in the background
+/// lane's short transactions: each erasure's words taken out of the indexes' segments as it goes
+/// cost about a millisecond at a million messages, so a transaction takes one or a few.
 pub const BATCH: usize = 32;
 
 /// The messages that go soonest, from ?1 on, with their times, ?2 at most, from the index's first
