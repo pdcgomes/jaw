@@ -1763,3 +1763,178 @@ async fn a_failed_hd_copy_whose_sent_message_is_deleted_for_you_leaves_nothing()
     );
     assert_eq!(left, (0, 0, 0), "a failed HD copy of a message deleted for you stays, out of send.retry's reach");
 }
+
+/// Whether a job making copies is running.
+fn making(rig: &Rig) -> bool {
+    rig.media.inner.sending.running.lock().unwrap().values().any(|running| running.making.is_some())
+}
+
+/// Waits up to `bound` until `done` says so.
+async fn until(bound: Duration, done: impl Fn() -> bool) -> bool {
+    tokio::time::timeout(bound, async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// The round-two audit's O4: a photo sent in HD, its copies made and the first held just before
+/// jaw.db is told, then deleted for you, which takes its HD copy's rows; once let go, the HD copy
+/// is placed in the cache with no row to name it, and its file still goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_placed_once_a_deletion_took_its_rows_is_counted_and_leaves_the_cache() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.gate_uploads(true);
+    rig.media.hold_keeping(true);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let held = until(Duration::from_secs(60), || rig.media.inner.sending.keeping_held.load(SeqCst) > 0).await;
+    assert!(held, "a copy made and held before jaw.db is told");
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    rig.media.hold_keeping(false);
+    assert!(until(Duration::from_secs(60), || !making(&rig)).await, "both copies placed");
+    rig.until_the_cleaner_has_passed().await;
+    let mut named: Vec<String> = rig
+        .query(|db| {
+            Ok(db
+                .prepare("SELECT path FROM media_files WHERE path IS NOT NULL")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?)
+        })
+        .await;
+    named.sort();
+    let files: Vec<String> = rig.files("media/files").into_iter().map(|f| format!("media/files/{f}")).collect();
+    let status = rig.media.status();
+    eprintln!(
+        "O4: cache files {files:?}; named {named:?}; status cache_files {} unnamed {}",
+        status.cache_files, status.unnamed
+    );
+    assert_eq!(files, named, "a copy placed once its rows were taken stays in the cache, named by nothing");
+    assert_eq!((files.len(), status.cache_files, status.unnamed), (1, 1, 0), "only the SD copy, on its way, is left");
+    rig.world.gate_uploads(false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_whose_copy_a_deletion_takes_is_stopped_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    let hd: String =
+        rig.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?)).await;
+    let uploading = || rig.files(UPLOADS).iter().any(|f| f.starts_with(&format!("{hd}.")));
+    assert!(until(Duration::from_secs(30), uploading).await, "the HD copy's upload held half sent");
+    rig.store.apply(Lane::Live, vec![revoked_from_your_phone(&id)]).await.unwrap();
+    let stopped = until(Duration::from_secs(10), || !uploading()).await;
+    rig.world.gate_uploads(false);
+    assert!(stopped, "the upload of an HD copy whose rows the deletion took went on, its partial file there");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_whose_rows_a_deletion_took_before_it_was_made_isnt_made() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.world.gate_uploads(true);
+    rig.media.hold_making(true);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    assert!(until(Duration::from_secs(30), || making(&rig)).await, "its copies taken to make, held before any is made");
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    rig.media.hold_making(false);
+    assert!(until(Duration::from_secs(60), || !making(&rig)).await, "its SD copy made");
+    let state: String =
+        rig.query(|db| Ok(db.query_row("SELECT state FROM outgoing WHERE variant = 'sd'", [], |r| r.get(0))?)).await;
+    assert_eq!(state, "uploading", "the SD copy, which goes all the same, is made");
+    let mut made = Vec::new();
+    while let Ok(push) = pushes.try_recv() {
+        if push.method == "job" {
+            made.push(push.params["variant"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    assert!(!made.is_empty() && made.iter().all(|v| v == "sd"), "the HD copy whose rows had gone was made: {made:?}");
+    rig.world.gate_uploads(false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_video_whose_hd_copy_a_deletion_takes_while_its_made_stops_being_made() {
+    use std::sync::atomic::Ordering::SeqCst;
+    if !has_ffmpeg() {
+        eprintln!("ffmpeg isn't here, so no video is made");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let clip = made_by_ffmpeg(
+        picked.path(),
+        "clip.avi",
+        &["-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=4", "-c:v", "mpeg4", "-q:v", "2"],
+    );
+    let sending = &rig.media.inner.sending;
+    sending.hold_hd.store(true, SeqCst);
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": clip }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let held = until(Duration::from_secs(180), || sending.hd_held.load(SeqCst) > 0).await;
+    if !held {
+        sending.hold_hd.store(false, SeqCst);
+        panic!("its HD copy was never made, held as it said how far it had got");
+    }
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    let stopped = until(Duration::from_secs(20), || sending.hd_held.load(SeqCst) == 0 && !making(&rig)).await;
+    sending.hold_hd.store(false, SeqCst);
+    assert!(stopped, "the HD copy whose rows the deletion took was still being made");
+    let hd: i64 =
+        rig.query(|db| Ok(db.query_row("SELECT count(*) FROM outgoing WHERE variant = 'hd'", [], |r| r.get(0))?)).await;
+    assert_eq!(hd, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_video_whose_hd_copy_a_deletion_takes_while_its_sd_copy_is_made_never_makes_it() {
+    use std::sync::atomic::Ordering::SeqCst;
+    if !has_ffmpeg() {
+        eprintln!("ffmpeg isn't here, so no video is made");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.world.gate_uploads(true);
+    let clip = made_by_ffmpeg(
+        picked.path(),
+        "clip.avi",
+        &["-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=4", "-c:v", "mpeg4", "-q:v", "2"],
+    );
+    rig.media.hold_keeping(true);
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": clip }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let held = until(Duration::from_secs(180), || rig.media.inner.sending.keeping_held.load(SeqCst) > 0).await;
+    if !held {
+        rig.media.hold_keeping(false);
+        panic!("its SD copy was never made and held before jaw.db is told");
+    }
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    rig.media.hold_keeping(false);
+    assert!(until(Duration::from_secs(180), || !making(&rig)).await, "its SD copy placed");
+    let mut made = Vec::new();
+    while let Ok(push) = pushes.try_recv() {
+        if push.method == "job" {
+            made.push(push.params["variant"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    assert!(!made.is_empty() && made.iter().all(|v| v == "sd"), "the HD copy whose rows had gone was made: {made:?}");
+    rig.world.gate_uploads(false);
+}

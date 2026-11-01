@@ -429,6 +429,10 @@ pub(super) struct Stamps {
     /// Whether the transaction left what waits for an event to be taken in steps, which the
     /// background is told of once it commits.
     opening: bool,
+    /// Whether the transaction took outbox rows whose copies of a file may be on their way, as a
+    /// deletion takes an HD copy's, so whatever makes, uploads or waits for one is told once it
+    /// commits.
+    copies_taken: bool,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -454,6 +458,7 @@ pub(super) struct Mark {
     next: i64,
     touched: usize,
     unsettling: usize,
+    copies_taken: bool,
 }
 
 impl Stamps {
@@ -467,6 +472,7 @@ impl Stamps {
             unsettled: Vec::new(),
             unsettling: Vec::new(),
             opening: false,
+            copies_taken: false,
         })
     }
 
@@ -477,6 +483,7 @@ impl Stamps {
         self.unsettled.clear();
         self.unsettling.clear();
         self.opening = false;
+        self.copies_taken = false;
     }
 
     /// Notes that the transaction leaves what waits for an event to be taken in steps.
@@ -495,6 +502,17 @@ impl Stamps {
         self.order.clear();
         self.unsettled.clear();
         self.unsettling.clear();
+        self.copies_taken = false;
+    }
+
+    /// Notes that a statement took `rows` outbox rows whose copies may be on their way.
+    fn took_copies(&mut self, rows: usize) {
+        self.copies_taken |= rows > 0;
+    }
+
+    /// Whether the transaction took outbox rows whose copies may be on their way.
+    pub(super) fn copies_taken(&self) -> bool {
+        self.copies_taken
     }
 
     /// Notes that chat `n`'s unread messages may have changed.
@@ -514,15 +532,21 @@ impl Stamps {
     }
 
     pub(super) fn mark(&self) -> Mark {
-        Mark { next: self.next, touched: self.order.len(), unsettling: self.unsettling.len() }
+        Mark {
+            next: self.next,
+            touched: self.order.len(),
+            unsettling: self.unsettling.len(),
+            copies_taken: self.copies_taken,
+        }
     }
 
-    /// Forgets what was stamped and unsettled since `mark`, whose savepoint was rolled back.
+    /// Forgets what was stamped, unsettled and taken since `mark`, whose savepoint was rolled back.
     pub(super) fn undo(&mut self, mark: Mark) {
         for key in self.order.drain(mark.touched..) {
             self.touched.remove(&key);
         }
         self.next = mark.next;
+        self.copies_taken = mark.copies_taken;
         for (at, was) in self.unsettling.drain(mark.unsettling..).rev() {
             match was {
                 Some(was) => self.unsettled[at].1 = was,
@@ -1202,7 +1226,7 @@ fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
     )?
     .execute(params![n, now_ms()])?;
-    outbox::deleted_for_you(db, n)?;
+    outbox::deleted_for_you(db, stamps, n)?;
     remove_row(db, stamps, chat, n)
 }
 
@@ -2169,7 +2193,7 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     )?
     .execute([kept, gone])?;
     media::fold(db, kept, gone)?;
-    outbox::folded(db, kept, gone)?;
+    outbox::folded(db, stamps, kept, gone)?;
     let revoked: bool =
         db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([gone], |r| r.get(0))?;
     db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([gone])?;
@@ -2179,7 +2203,7 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
         apply_amendment(db, stamps, chat, kept, Doing { what: &Amendment::Revoke, sender: None, mine: false, at: 0 })?;
     }
     // The send that went to the kept copy may be one nothing can send again.
-    outbox::tidied(db, kept)
+    outbox::tidied(db, stamps, kept)
 }
 
 /// How many bits of a message's t count messages within one millisecond.
@@ -2620,7 +2644,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             )?
             .execute(params![n, text, spans, summary, at, seq])?,
         Amendment::Revoke => {
-            outbox::deleted_for_everyone(db, n)?;
+            outbox::deleted_for_everyone(db, stamps, n)?;
             media::revoked(db, n)?;
             db.prepare_cached(
                 "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,

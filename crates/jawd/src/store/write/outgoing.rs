@@ -118,6 +118,7 @@ const TO_DO: &str = "SELECT g.outbox, g.message, g.variant, g.kind, g.source, g.
         LEFT JOIN media_files f ON f.sha256 = g.sha256
     WHERE g.state IN ('preparing', 'uploading') ORDER BY g.outbox LIMIT ?1";
 const OF_MESSAGE: &str = "SELECT outbox, state FROM outgoing WHERE message = ?1";
+const STATE: &str = "SELECT state FROM outgoing WHERE outbox = ?1";
 const MESSAGE_IN: &str = "SELECT m.n FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 WHERE c.id = ?1";
 const MESSAGE_ANYWHERE: &str = "SELECT m.n FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LIMIT 2";
 const NEEDED: &str = "SELECT EXISTS (SELECT 1 FROM outgoing WHERE source = ?1)";
@@ -180,6 +181,18 @@ pub fn of_message(db: &Connection, n: i64) -> Result<Vec<(i64, String)>> {
         .prepare_cached(OF_MESSAGE)?
         .query_map([n], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The state of the copy each of outbox rows `outboxes` sends, for those still there.
+pub fn states(db: &Connection, outboxes: &[i64]) -> Result<Vec<(i64, String)>> {
+    let mut state = db.prepare_cached(STATE)?;
+    let mut states = Vec::new();
+    for &outbox in outboxes {
+        if let Some(s) = state.query_row([outbox], |r| r.get(0)).optional()? {
+            states.push((outbox, s));
+        }
+    }
+    Ok(states)
 }
 
 /// Message `id`'s n, in `chat` or in any chat; None for one jawd doesn't have, or one in more chats
@@ -262,14 +275,15 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
 
 /// A copy made: it's in the cache, its message's media row shows it, wanted so its previews are
 /// made, and its message and outbox row say what it is. Once a copy is made, jaw's copy of your file
-/// isn't needed for it any more.
+/// isn't needed for it any more. One cancelled or taken while it was made, as a deletion takes an
+/// HD copy's rows, is in the cache all the same: its file's row lists it to go, as nothing names it.
 fn prepared(db: &Connection, stamps: &mut Stamps, p: &Prepared) -> Result<bool> {
     let made: Option<(Option<i64>, String)> = db
         .prepare_cached(PREPARED)?
         .query_row(params![p.outbox, p.sha256], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
-    let Some((message, variant)) = made else { return Ok(false) };
     db.prepare_cached(FILED)?.execute(params![p.sha256, p.path, p.bytes as i64, p.at])?;
+    let Some((message, variant)) = made else { return Ok(false) };
     db.prepare_cached(SENDS)?.execute(params![p.outbox, p.raw])?;
     let Some(n) = message else { return Ok(true) };
     let copy = &p.copy;

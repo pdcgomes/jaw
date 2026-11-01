@@ -332,6 +332,7 @@ pub struct Store {
     background: Sender<Background>,
     reads: Reads,
     committed: watch::Receiver<i64>,
+    copies_taken: watch::Receiver<u64>,
     stats: Arc<Mutex<Stats>>,
     inboxed: Arc<Notify>,
     opening: Arc<Notify>,
@@ -675,6 +676,7 @@ impl Store {
         let (background, background_rx) = bounded(16);
         let (kick, kicks) = bounded(1);
         let (seq, committed) = watch::channel(stamps.last());
+        let (copies, copies_taken) = watch::channel(0);
         let (trouble, troubled) = watch::channel(None);
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
         let kept: i64 = db.query_row("SELECT coalesce(sum(bytes), 0) FROM thumbnails", [], |r| r.get(0))?;
@@ -697,6 +699,7 @@ impl Store {
             kick,
             trouble,
             seq,
+            copies,
             pruned: Instant::now(),
             changes_pace: Pace::new(&limits),
             index_pace: Pace::new(&limits),
@@ -727,6 +730,7 @@ impl Store {
             background,
             reads,
             committed,
+            copies_taken,
             stats,
             inboxed,
             opening,
@@ -751,6 +755,12 @@ impl Store {
     /// The feed's last committed seq, which changes as each transaction with events commits.
     pub fn committed(&self) -> watch::Receiver<i64> {
         self.committed.clone()
+    }
+
+    /// What moves on after each commit that took outbox rows whose copies of a file may be on
+    /// their way, as a deletion takes an HD copy's, for whatever makes, uploads or waits for one.
+    pub fn copies_taken(&self) -> watch::Receiver<u64> {
+        self.copies_taken.clone()
     }
 
     /// What's woken each time an engine event is committed to the inbox.
@@ -982,6 +992,8 @@ struct Writer {
     trouble: watch::Sender<Option<String>>,
     /// The feed's last committed seq, for whoever follows the feed.
     seq: watch::Sender<i64>,
+    /// Moves on after each commit that took outbox rows whose copies of a file may be on their way.
+    copies: watch::Sender<u64>,
     pruned: Instant,
     changes_pace: Pace,
     index_pace: Pace,
@@ -1392,6 +1404,9 @@ impl Writer {
                         self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
                         if self.stamps.opened_later() {
                             self.opening.notify_one();
+                        }
+                        if self.stamps.copies_taken() {
+                            self.copies.send_modify(|n| *n += 1);
                         }
                         for write in shared {
                             let _ = write.done.send(Ok(Applied {
@@ -1819,6 +1834,9 @@ impl Writer {
                 self.committed();
                 let last = self.stamps.last();
                 self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
+                if self.stamps.copies_taken() {
+                    self.copies.send_modify(|n| *n += 1);
+                }
                 self.backlog = true;
                 if self.stamps.opened_later() {
                     self.opening.notify_one();

@@ -85,9 +85,27 @@ pub(super) struct Sending {
     pub hold_keeping: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub keeping_held: std::sync::atomic::AtomicUsize,
+    /// Holds an HD copy being made as it says how far it has got, until its job is cancelled, while
+    /// set, counting those held, for the tests of what stops one.
+    #[cfg(test)]
+    pub hold_hd: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub hd_held: std::sync::atomic::AtomicUsize,
 }
 
 impl Sending {
+    #[cfg(test)]
+    fn hd_held_while_made(&self, cancel: &Cancel) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.hold_hd.load(SeqCst) && !cancel.is_cancelled() {
+            self.hd_held.fetch_add(1, SeqCst);
+            while self.hold_hd.load(SeqCst) && !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.hd_held.fetch_sub(1, SeqCst);
+        }
+    }
+
     #[cfg(test)]
     async fn held_before_keeping(&self) {
         use std::sync::atomic::Ordering::SeqCst;
@@ -122,6 +140,9 @@ struct Running {
     cancel: Cancel,
     /// The engine's id for its upload, while it's uploading.
     upload: Option<String>,
+    /// For a job making a file's copies, the outbox rows of all of them, which its cancel stops
+    /// together; None for an upload.
+    making: Option<Arc<[i64]>>,
 }
 
 impl Sending {
@@ -285,6 +306,46 @@ pub(super) fn unkeep(inner: &Inner, kept: &[KeptFile]) {
 pub(super) fn start(inner: &Arc<Inner>) {
     tokio::spawn(run(inner.clone()));
     tokio::spawn(drop_unneeded(inner.clone()));
+    tokio::spawn(stop_taken(inner.clone()));
+}
+
+/// Stops the jobs of copies whose rows a commit took, as a deletion takes an HD copy's, until jawd
+/// stops, so none goes on making or uploading a copy nothing will send.
+async fn stop_taken(inner: Arc<Inner>) {
+    let mut taken = inner.store.copies_taken();
+    while taken.changed().await.is_ok() {
+        if let Err(e) = stop_gone(&inner).await {
+            eprintln!("jawd: can't read which copies of your files are still on their way: {e:#}");
+        }
+    }
+}
+
+/// Stops the job of each copy whose row has gone, as `cancel` stops one: an upload at once, and a
+/// job making a file's copies once none of them is still to make, since it passes over those that
+/// have gone (`make_all`). Only a gone row's job is stopped: no job takes a row that has gone, so
+/// the job running for it is the one read here, and one whose copy is made or uploaded finishes.
+async fn stop_gone(inner: &Arc<Inner>) -> anyhow::Result<()> {
+    let running: Vec<(i64, Running)> =
+        inner.sending.running.lock().expect("sending").iter().map(|(o, r)| (*o, r.clone())).collect();
+    if running.is_empty() {
+        return Ok(());
+    }
+    let outboxes: Vec<i64> = running.iter().map(|(o, _)| *o).collect();
+    let states: HashMap<i64, String> = inner
+        .store
+        .reads()
+        .query(Priority::Interactive, move |db| outgoing::states(db, &outboxes))
+        .await?
+        .into_iter()
+        .collect();
+    let to_make = |outbox: &i64| states.get(outbox).is_some_and(|state| state == "preparing");
+    for (outbox, running) in running {
+        let making = running.making.as_ref().is_some_and(|copies| copies.iter().any(to_make));
+        if !states.contains_key(&outbox) && !making {
+            stop(inner, outbox).await;
+        }
+    }
+    Ok(())
 }
 
 /// Removes, once at start and before any copy is made, the files in jaw's folder of yours that no
@@ -388,7 +449,7 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
             if busy(&copy) {
                 continue;
             }
-            let mark = Running { cancel: Cancel::new(), upload: None };
+            let mark = Running { cancel: Cancel::new(), upload: None, making: None };
             inner.sending.running.lock().expect("sending").insert(copy.outbox, mark);
             let doing = inner.clone();
             tokio::spawn(async move {
@@ -418,10 +479,12 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
         }
         file.sort_by_key(|c| c.variant == "hd");
         let cancel = Cancel::new();
+        let making: Arc<[i64]> = file.iter().map(|c| c.outbox).collect();
         {
             let mut running = inner.sending.running.lock().expect("sending");
             for copy in &file {
-                running.insert(copy.outbox, Running { cancel: cancel.clone(), upload: None });
+                let mark = Running { cancel: cancel.clone(), upload: None, making: Some(making.clone()) };
+                running.insert(copy.outbox, mark);
             }
         }
         let doing = inner.clone();
@@ -535,9 +598,13 @@ async fn make(inner: &Arc<Inner>, copies: Vec<Copy>, cancel: Cancel) {
     }
 }
 
-/// Each copy made in turn, or the first that couldn't be, by outbox row, and why.
+/// Each copy made in turn, or the first that couldn't be, by outbox row, and why. A deletion may
+/// have taken some of them since they were read, as it takes an HD copy's rows, and may take one
+/// while those before it are made: none taken is made.
 async fn make_all(inner: &Arc<Inner>, copies: &[Copy], source: &str, cancel: &Cancel) -> Result<(), (i64, Failed)> {
-    let first = copies[0].outbox;
+    let wanted = to_make(inner, copies).await;
+    let copies: Vec<&Copy> = copies.iter().filter(|c| wanted.contains(&c.outbox)).collect();
+    let Some(first) = copies.first().map(|c| c.outbox) else { return Ok(()) };
     let path = inner.home.join(source);
     let pipeline = inner.pipeline.clone();
     let probed = blocking(move || pipeline.probe(&path)).await.map_err(|e| (first, e.into()))?;
@@ -559,13 +626,28 @@ async fn make_all(inner: &Arc<Inner>, copies: &[Copy], source: &str, cancel: &Ca
         }
         return Ok(());
     }
-    for (copy, plan) in &planned {
+    for (n, (copy, plan)) in planned.iter().enumerate() {
+        if n > 0 && to_make(inner, std::slice::from_ref(copy)).await.is_empty() {
+            continue;
+        }
         let one = [(copy.clone(), plan.clone())];
         let mut made = prepare(inner, source, &probe, &one, cancel, plan.lane()).await.map_err(|e| (copy.outbox, e))?;
         let prepared = made.pop().ok_or_else(|| (copy.outbox, Failed::Never("jaw-media made nothing".into())))?;
         place(inner, copy, plan, prepared).await.map_err(|e| (copy.outbox, e))?;
     }
     Ok(())
+}
+
+/// The outbox rows of those of `copies` still to make, as jaw.db has them now; all of them if it
+/// can't be read, since a copy made whose row has gone costs only the work, its file going once
+/// it's in the cache.
+async fn to_make(inner: &Arc<Inner>, copies: &[Copy]) -> Vec<i64> {
+    let outboxes: Vec<i64> = copies.iter().map(|c| c.outbox).collect();
+    let asked = outboxes.clone();
+    match inner.store.reads().query(Priority::Interactive, move |db| outgoing::states(db, &asked)).await {
+        Ok(states) => states.into_iter().filter(|(_, state)| state == "preparing").map(|(outbox, _)| outbox).collect(),
+        Err(_) => outboxes,
+    }
 }
 
 /// Makes `copies` of the file at `source` on `lane`'s pool, pushing how far each has got.
@@ -589,9 +671,16 @@ async fn prepare(
     let pushed: Vec<Option<Pushed>> = copies.iter().map(|(c, _)| pushed(c, "make")).collect();
     let pushes = inner.pushes.clone();
     let job_cancel = cancel.clone();
+    #[cfg(test)]
+    let (holding, held, hd): (Arc<Inner>, Cancel, Vec<bool>) =
+        (inner.clone(), cancel.clone(), copies.iter().map(|(c, _)| c.variant == "hd").collect());
     let work = blocking(move || {
         let mut last: Vec<Option<Instant>> = vec![None; pushed.len()];
         let mut job = Job::new(job_cancel).on_progress(|p: Progress| {
+            #[cfg(test)]
+            if hd.get(p.copy).copied().unwrap_or(false) {
+                holding.sending.hd_held_while_made(&held);
+            }
             let Some(Some(who)) = pushed.get(p.copy) else { return };
             let now = Instant::now();
             if p.done < 1.0 && last[p.copy].is_some_and(|at| now - at < PROGRESS_EVERY) {
@@ -887,21 +976,27 @@ pub(super) async fn cancel(inner: &Arc<Inner>, n: i64) -> Result<bool, jaw_proto
     if !changes.is_empty() {
         super::durably(inner, changes, "keep that sending the file was cancelled").await?;
     }
-    for outbox in &stopping {
-        let running = inner.sending.running.lock().expect("sending").get(outbox).cloned();
-        if let Some(running) = running {
-            running.cancel.cancel();
-            if let (Some(id), Some(engine)) = (running.upload, &inner.engine) {
-                let _ = engine.call(pb::command::Kind::MediaCancel(pb::MediaCancel { id })).await;
-            }
-        }
-        let key = format!("make:{outbox}");
-        let _ = inner.images.cancel(&key) || inner.transcodes.cancel(&key) || inner.uploads.cancel(&key);
-        inner.uploads.cancel(&format!("upload:{outbox}"));
-        inner.sending.later.lock().expect("sending").remove(outbox);
+    for &outbox in &stopping {
+        stop(inner, outbox).await;
     }
     inner.sending.changed();
     Ok(true)
+}
+
+/// Stops the job making or uploading outbox row `outbox`'s copy: an ffmpeg making it is killed, an
+/// upload stopped, and a job waiting taken off its pool.
+async fn stop(inner: &Arc<Inner>, outbox: i64) {
+    let running = inner.sending.running.lock().expect("sending").get(&outbox).cloned();
+    if let Some(running) = running {
+        running.cancel.cancel();
+        if let (Some(id), Some(engine)) = (running.upload, &inner.engine) {
+            let _ = engine.call(pb::command::Kind::MediaCancel(pb::MediaCancel { id })).await;
+        }
+    }
+    let key = format!("make:{outbox}");
+    let _ = inner.images.cancel(&key) || inner.transcodes.cancel(&key) || inner.uploads.cancel(&key);
+    inner.uploads.cancel(&format!("upload:{outbox}"));
+    inner.sending.later.lock().expect("sending").remove(&outbox);
 }
 
 /// Pushes an upload's progress, as the engine says it, at most every PROGRESS_EVERY.

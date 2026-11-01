@@ -3373,6 +3373,10 @@ SELECT outbox, state FROM outgoing WHERE message = ?1
     SEARCH outgoing USING INDEX outgoing_by_message (message=?)
 
 -- src/store/write/outgoing.rs
+SELECT state FROM outgoing WHERE outbox = ?1
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
 SELECT m.n FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 WHERE c.id = ?1
     SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)

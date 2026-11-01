@@ -546,7 +546,7 @@ fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> 
     }
     if db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
         if db.prepare_cached(HD_SHOWN_DELETED)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
-            db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+            stamps.took_copies(db.prepare_cached(DROP_ROW)?.execute([outbox])?);
         }
         return Ok(false);
     }
@@ -619,7 +619,7 @@ fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String
     )?;
     db.prepare_cached(OWN_ID)?.execute(params![chat_n, acting.id, now])?;
     if matches!(acting.effect, Amendment::Revoke) {
-        db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
+        stamps.took_copies(db.prepare_cached(HD_WITHDRAWN)?.execute([n])?);
     }
     db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
     if let Some(key) = key {
@@ -1091,7 +1091,7 @@ fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_a
 /// unless nothing can send it again (`tidied`).
 fn failed_message(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, status: Option<&str>) -> Result<bool> {
     let shown = shown_failed(db, stamps, chat, n, status)?;
-    tidied(db, n)?;
+    tidied(db, stamps, n)?;
     Ok(shown)
 }
 
@@ -1113,7 +1113,7 @@ fn no_receipt(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) ->
         if let Some((chat, n)) = action.target {
             bumped(db, stamps, chat, n)?;
             if matches!(action.effect, Some(Amendment::Revoke)) {
-                tidied(db, n)?;
+                tidied(db, stamps, n)?;
             }
         }
         prune_kept(db)?;
@@ -1143,10 +1143,10 @@ pub(super) fn prune_kept(db: &Connection) -> Result<()> {
 /// failed. Its HD copies go once it will never reach WhatsApp, or once it's deleted for everyone,
 /// or being, there or in a copy merging with it, as a merge can leave them on a copy deleted
 /// already or being deleted.
-pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
+pub(super) fn tidied(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     db.prepare_cached(UNRETRYABLE)?.execute([n])?;
-    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
-    db.prepare_cached(HD_OF_DELETED)?.execute([n])?;
+    stamps.took_copies(db.prepare_cached(ORPHANED_HD)?.execute([n])?);
+    stamps.took_copies(db.prepare_cached(HD_OF_DELETED)?.execute([n])?);
     Ok(())
 }
 
@@ -1157,19 +1157,19 @@ pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
 /// (`Outboxed::withdrawn`). An HD copy goes only after its message, which leaves nothing for it to
 /// go after, so its HD copies go, whatever their state, or a failed one would wait for a send.retry
 /// that can't find it.
-pub(super) fn deleted_for_you(db: &Connection, n: i64) -> Result<()> {
+pub(super) fn deleted_for_you(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     db.prepare_cached(FORGOTTEN)?.execute([n])?;
     db.prepare_cached(KEEP_DELETED)?.execute([n])?;
-    db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
+    stamps.took_copies(db.prepare_cached(HD_WITHDRAWN)?.execute([n])?);
     Ok(())
 }
 
 /// Message `n` of yours was deleted for everyone, by jawd or by your other devices or history: if
 /// WhatsApp refused it, or has had no receipt for it, nothing of it is sent again; and its HD copy,
 /// whatever its state and whether or not the message went, never goes.
-pub(super) fn deleted_for_everyone(db: &Connection, n: i64) -> Result<()> {
+pub(super) fn deleted_for_everyone(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     db.prepare_cached(CANCELLED)?.execute([n])?;
-    db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
+    stamps.took_copies(db.prepare_cached(HD_WITHDRAWN)?.execute([n])?);
     Ok(())
 }
 
@@ -1582,14 +1582,14 @@ pub fn owed(db: &Connection, chat: i64) -> Result<Owing> {
 /// either's file on its way is the kept one's, so it still fills in what its message says of it;
 /// and an interface's key for either names the kept one. Nothing of `gone`'s is left in the outbox,
 /// where its deletion would leave it a second send, or an action done to nothing.
-pub(super) fn folded(db: &Connection, kept: i64, gone: i64) -> Result<()> {
+pub(super) fn folded(db: &Connection, stamps: &mut Stamps, kept: i64, gone: i64) -> Result<()> {
     let status: Option<String> = db.prepare_cached(STATUS_OF)?.query_row([kept], |r| r.get(0))?;
     if matches!(status.as_deref(), Some("sent" | "delivered" | "read" | "played")) {
         received(db, kept)?;
     } else {
         db.prepare_cached(FOLD_OUTBOX)?.execute([kept, gone])?;
     }
-    db.prepare_cached(DEQUEUE)?.execute([gone])?;
+    stamps.took_copies(db.prepare_cached(DEQUEUE)?.execute([gone])?);
     db.prepare_cached(FOLD_TARGETS)?.execute([kept, gone])?;
     db.prepare_cached(FOLD_COPIES)?.execute([kept, gone])?;
     db.prepare_cached(FOLD_KEYS)?.execute([kept, gone])?;
