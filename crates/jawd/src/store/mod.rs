@@ -987,6 +987,14 @@ impl Store {
         outgoing::counts(&connect(&self.path, Role::Reader)?)
     }
 
+    /// How many transactions the writer has made, and the lengths of its latest, in microseconds,
+    /// for a measurement to take each one's.
+    #[cfg(test)]
+    pub fn writer_runs(&self) -> (u64, Vec<u64>) {
+        let stats = self.stats.lock().expect("the writer's stats");
+        (stats.transactions, stats.runs.recent())
+    }
+
     /// How many messages backfill `name` has still to look at, 0 once it's done, read on a
     /// connection of its own.
     pub fn backfill_left(&self, name: &str) -> Result<u64> {

@@ -1070,3 +1070,257 @@ async fn a_view_once_message_opens_once_and_killed_at_either_commit_ends_as_one_
         assert_eq!(store.apply_durable(vec![open()]).await.unwrap().changed, 0, "killed after commit {at}");
     }
 }
+
+/// jaw.db as main's jawd leaves it at migration 30, built by SQL as the audit's measurements were:
+/// `messages` messages in `chats` chats, texts of 3 to 25 words from 20,000, raw protobufs of 380 to
+/// 620 bytes, a link in one in 22, a view-once photo as main kept it in one in 120 (60% of them
+/// captioned, a quarter of those with a link), one in 200 to go within a week and `due` past their
+/// time, and two of 9,000 words due before them; then migrated, its links made by main's backfill
+/// and its indexes merged by the writer, and its WAL emptied, ready to copy.
+async fn measured(home: &Path, messages: i64, chats: i64, due: i64) {
+    let now = now_ms();
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move |most: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % most
+    };
+    {
+        let db = Connection::open(home.join("jaw.db")).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for migration in &schema::MIGRATIONS[..30] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 30).unwrap();
+        db.execute(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < ?1)
+            INSERT INTO people (n, name, v) SELECT x, 'Person ' || x, 1 FROM c",
+            [chats],
+        )
+        .unwrap();
+        db.execute_batch(
+            "INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+            INSERT INTO chats (n, id, kind, person, v) SELECT n, printf('3519%08d@s.whatsapp.net', n), 'direct', n, 1
+                FROM people;
+            INSERT INTO sync_state (key, value) VALUES ('me', '351910000001@s.whatsapp.net');",
+        )
+        .unwrap();
+        let every_due = (messages / due.max(1)).max(1);
+        for chunk in (1..=messages + 2).collect::<Vec<i64>>().chunks(5_000) {
+            db.execute_batch("BEGIN").unwrap();
+            let mut insert = db
+                .prepare(
+                    "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, spans, summary, view_once, expires_at,
+                        raw, v)
+                    VALUES (?1, ?2, printf('3EB0%016d', ?1), ?3, ?1, ?2, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)",
+                )
+                .unwrap();
+            for &n in chunk {
+                let long = n > messages;
+                let words = if long { 9_000 } else { 3 + next(23) };
+                let mut text: String = (0..words).map(|_| format!("w{}", next(20_000))).collect::<Vec<_>>().join(" ");
+                let once = !long && n % 120 == 0;
+                let captioned = once && next(10) < 6;
+                let linked = !long && if once { captioned && next(4) == 0 } else { n % 22 == 0 };
+                let mut spans = serde_json::json!([{ "t": "text", "s": text.clone() }]);
+                if linked {
+                    let url = format!("https://site{}.example/p{n}", next(5_000));
+                    spans = serde_json::json!([{ "t": "text", "s": format!("{text} ") },
+                        { "t": "link", "s": url, "url": url }]);
+                    text = format!("{text} {url}");
+                }
+                let (text, spans, summary) = match (once, captioned) {
+                    (true, false) => (None, None, Some("View once photo".to_string())),
+                    _ => (Some(text), Some(spans.to_string()), None),
+                };
+                let expires_at = if long {
+                    Some(n - messages)
+                } else if n % every_due == 0 && n / every_due <= due {
+                    Some(now - 60_000 + n % 1_000)
+                } else if n % 200 == 0 {
+                    Some(now + 3_600_000 + next(7 * 86_400_000) as i64)
+                } else {
+                    None
+                };
+                let raw: Vec<u8> = (0..380 + next(241)).map(|_| next(256) as u8).collect();
+                let kind = if once { "image" } else { "text" };
+                let row =
+                    rusqlite::params![n, 1 + n % chats, AT + n, kind, text, spans, summary, once, expires_at, raw];
+                insert.execute(row).unwrap();
+            }
+            drop(insert);
+            db.execute_batch("COMMIT").unwrap();
+        }
+        db.execute("INSERT INTO backfills (name, after, upto) VALUES ('links', 0, ?1)", [messages + 2]).unwrap();
+    }
+    let store = Store::open(home).unwrap();
+    while store.backfill_left(crate::store::links::LINKS).unwrap() > 0 {
+        let links = vec![Change::Backfill(crate::store::links::LINKS); 64];
+        assert_eq!(store.apply(Lane::Background, links).await.unwrap().quarantined, 0);
+    }
+    store.indexed().await.unwrap();
+    store.truncate().await.unwrap();
+}
+
+/// A live write, a message, every 10 ms until `done` is set, each timed from its asking to its answer.
+async fn live_messages(store: Store, done: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Vec<Duration> {
+    let mut every = tokio::time::interval(Duration::from_millis(10));
+    let mut took = Vec::new();
+    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+        every.tick().await;
+        let began = std::time::Instant::now();
+        let id = format!("live{:06}", took.len());
+        store.apply(Lane::Live, vec![Change::Message(message(RUI, &id, now_ms(), "a live one", None))]).await.unwrap();
+        took.push(began.elapsed());
+    }
+    took
+}
+
+/// Adds the lengths of the writer's transactions since its `since`th to `into`, saying how many it
+/// has made.
+fn transactions_since(store: &Store, since: u64, into: &mut Vec<Duration>) -> u64 {
+    let (count, recent) = store.writer_runs();
+    let new = (count - since).min(recent.len() as u64) as usize;
+    into.extend(recent[recent.len() - new..].iter().map(|&us| Duration::from_micros(us)));
+    count
+}
+
+/// Durations as p50, p99 and the most, how many there were, and the share past 3 ms.
+fn spread(mut took: Vec<Duration>) -> String {
+    if took.is_empty() {
+        return "none".into();
+    }
+    took.sort_unstable();
+    let at = |q: f64| took[((took.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1e3;
+    let past = took.iter().filter(|t| **t > Duration::from_millis(3)).count() as f64 / took.len() as f64;
+    format!(
+        "{:.2} / {:.2} / {:.2} ms (p50 / p99 / most) of {}, {:.0}% past 3 ms",
+        at(0.5),
+        at(0.99),
+        at(1.0),
+        took.len(),
+        past * 100.0
+    )
+}
+
+/// The load average, as the Mac says it.
+fn load() -> String {
+    std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The `once` backfill and erasing a backlog, each alone and beside a live write every 10 ms, as
+/// the audit's P1 and P2 measured them, at the owner's shape (87,000 messages in 502 chats) or,
+/// with `JAW_MEASURE_MESSAGES=1000000 JAW_MEASURE_CHATS=3000`, a million: alone, the writer's
+/// transactions; beside, the live writes:
+/// `cargo test --release -p jawd measure_erasing -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement, minutes long at a million messages"]
+async fn measure_erasing_a_backlog_and_the_once_backfill() {
+    let number = |name: &str, or: i64| std::env::var(name).ok().and_then(|n| n.parse().ok()).unwrap_or(or);
+    let (messages, chats) = (number("JAW_MEASURE_MESSAGES", 87_000), number("JAW_MEASURE_CHATS", 502));
+    let made = tempfile::tempdir().unwrap();
+    let began = std::time::Instant::now();
+    measured(made.path(), messages, chats, 3_200).await;
+    let bytes = std::fs::metadata(made.path().join("jaw.db")).unwrap().len();
+    eprintln!(
+        "{messages} messages in {chats} chats, {} MB, made in {:.0} s",
+        bytes / 1_000_000,
+        began.elapsed().as_secs_f64()
+    );
+    let copy = || {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::copy(made.path().join("jaw.db"), home.path().join("jaw.db")).unwrap();
+        home
+    };
+    let beside = |store: &Store| {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (done.clone(), tokio::spawn(live_messages(store.clone(), done)))
+    };
+    let stop = |(done, writing): (std::sync::Arc<std::sync::atomic::AtomicBool>, tokio::task::JoinHandle<_>)| async move {
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        writing.await.unwrap()
+    };
+    let home = copy();
+    let store = Store::open(home.path()).unwrap();
+    let live = beside(&store);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    eprintln!("live writes alone, load {}: {}", load(), spread(stop(live).await));
+    drop(store);
+    for with_live in [false, true] {
+        let home = copy();
+        let store = Store::open(home.path()).unwrap();
+        let live = with_live.then(|| beside(&store));
+        let (mut took, mut seen) = (Vec::new(), store.writer_runs().0);
+        let began = std::time::Instant::now();
+        while store.backfill_left(VIEW_ONCE).unwrap() > 0 {
+            let steps = vec![Change::Backfill(VIEW_ONCE); 64];
+            assert_eq!(store.apply(Lane::Background, steps).await.unwrap().quarantined, 0);
+            seen = transactions_since(&store, seen, &mut took);
+        }
+        let backfilled = began.elapsed().as_secs_f64();
+        match live {
+            Some(live) => eprintln!(
+                "the once backfill beside live writes, load {}, {backfilled:.2} s: live writes {}",
+                load(),
+                spread(stop(live).await)
+            ),
+            None => eprintln!(
+                "the once backfill alone, load {}, {backfilled:.2} s: its transactions {}",
+                load(),
+                spread(took)
+            ),
+        }
+    }
+    for with_live in [false, true] {
+        let home = copy();
+        let store = Store::open(home.path()).unwrap();
+        let mut seen = store.writer_runs().0;
+        let mut long = Vec::new();
+        assert_eq!(crate::expiry::erase_due(&store, 1, &[]).await.unwrap().erased, 1);
+        seen = transactions_since(&store, seen, &mut long);
+        let deleted = Amend {
+            chat: format!("3519{:08}@s.whatsapp.net", 1 + (messages + 2) % chats),
+            target: format!("3EB0{:016}", messages + 2),
+            sender: None,
+            mine: true,
+            at: now_ms(),
+            what: Amendment::DeleteForMe,
+            raw: None,
+        };
+        let began = std::time::Instant::now();
+        assert_eq!(apply(&store, vec![Change::Amend(deleted)]).await.changed, 1);
+        let deleting = began.elapsed().as_secs_f64() * 1e3;
+        seen = store.writer_runs().0.max(seen);
+        let live = with_live.then(|| beside(&store));
+        let (mut took, mut batches) = (Vec::new(), 0);
+        let began = std::time::Instant::now();
+        loop {
+            let batch = crate::expiry::erase_due(&store, now_ms(), &[]).await.unwrap();
+            seen = transactions_since(&store, seen, &mut took);
+            if batch.erased == 0 {
+                break;
+            }
+            batches += 1;
+        }
+        let erasing = began.elapsed().as_secs_f64();
+        match live {
+            Some(live) => eprintln!(
+                "the backlog beside live writes, load {}, {batches} batches in {erasing:.2} s: live writes {}",
+                load(),
+                spread(stop(live).await)
+            ),
+            None => eprintln!(
+                "a long message erased {}, deleted for you {deleting:.2} ms; the backlog alone, load {}, {batches} \
+                 batches in {erasing:.2} s: its transactions {}",
+                spread(long),
+                load(),
+                spread(took)
+            ),
+        }
+    }
+}

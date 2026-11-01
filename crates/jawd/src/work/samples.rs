@@ -34,6 +34,12 @@ impl Samples {
     pub fn most(&self) -> Option<u64> {
         self.recent.iter().copied().max()
     }
+
+    /// The latest, oldest first, in microseconds.
+    #[cfg(test)]
+    pub fn recent(&self) -> Vec<u64> {
+        self.recent.iter().copied().collect()
+    }
 }
 
 #[cfg(test)]
