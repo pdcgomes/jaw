@@ -478,6 +478,9 @@ pub(super) struct Stamps {
     /// When the transaction erased a message whose links' words only a merge of links_fts takes
     /// out (`expiry`), as kept in sync_state.
     links_erased: Option<i64>,
+    /// When the transaction erased a message, or took a caption out of its row, leaving the WAL
+    /// to empty (`expiry`), as kept in sync_state.
+    wal_erased: Option<i64>,
     /// How many messages the transaction erased, disappeared or opened, for `status`.
     erased: u64,
     /// The view-once messages open here that the transaction erased or deleted, by n and ID, for
@@ -533,6 +536,7 @@ impl Stamps {
             copies_taken: false,
             expiring: None,
             links_erased: None,
+            wal_erased: None,
             erased: 0,
             closed: Vec::new(),
             costliest: Duration::ZERO,
@@ -553,6 +557,7 @@ impl Stamps {
         self.unsettling.clear();
         self.expiring = None;
         self.links_erased = None;
+        self.wal_erased = None;
         self.erased = 0;
         self.closed.clear();
         self.costliest = Duration::ZERO;
@@ -579,6 +584,7 @@ impl Stamps {
         self.copies_taken = false;
         self.expiring = None;
         self.links_erased = None;
+        self.wal_erased = None;
         self.erased = 0;
         self.closed.clear();
     }
@@ -613,6 +619,16 @@ impl Stamps {
     /// When the committed transaction last erased a message with links, taken once.
     pub(super) fn take_links_erased(&mut self) -> Option<i64> {
         self.links_erased.take()
+    }
+
+    /// Notes that the transaction left the WAL to empty, at `at`, as sync_state keeps it.
+    pub(super) fn wal_erased(&mut self, at: i64) {
+        self.wal_erased = Some(at);
+    }
+
+    /// When the committed transaction last left the WAL to empty, taken once.
+    pub(super) fn take_wal_erased(&mut self) -> Option<i64> {
+        self.wal_erased.take()
     }
 
     /// Notes that the transaction erased a message.

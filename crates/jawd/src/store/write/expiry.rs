@@ -39,6 +39,12 @@ const DUE_IN: &str = "SELECT chat FROM messages WHERE n = ?1 AND expires_at <= ?
 /// merged whole since, which the writer does in its idle moments (`Writer::merge`).
 pub const LINKS_ERASED: &str = "erased.links";
 const NOTE_LINKS_ERASED: &str = "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.links', ?1)";
+/// Where sync_state keeps when a message was last erased, or a caption taken out of its row, until
+/// the writer has emptied the WAL since in its idle moments (`Writer::empty_wal`): a running jawd
+/// keeps the WAL's file, and in it the frames written before, which hold what went, until they're
+/// written over.
+pub const WAL_ERASED: &str = "erased.wal";
+const NOTE_WAL_ERASED: &str = "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.wal', ?1)";
 const SECURE_DELETE_ON: &str = "PRAGMA secure_delete = 1";
 const SECURE_DELETE_FAST: &str = "PRAGMA secure_delete = FAST";
 const MESSAGES_SECURE: &str = "INSERT INTO messages_fts (messages_fts, rank) VALUES ('secure-delete', ?1)";
@@ -68,6 +74,7 @@ pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> 
     stamps.securely_deleted(began.elapsed());
     if erased {
         stamps.erased_one();
+        wal_to_empty(db, stamps)?;
     }
     if linked && erased {
         let now = now_ms();
@@ -75,6 +82,15 @@ pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> 
         stamps.links_erased(now);
     }
     Ok(erased)
+}
+
+/// Notes, with what went, that the WAL is to be emptied, so a kill before the writer does it
+/// leaves it to do.
+fn wal_to_empty(db: &Connection, stamps: &mut Stamps) -> Result<()> {
+    let now = now_ms();
+    db.prepare_cached(NOTE_WAL_ERASED)?.execute([now.to_string()])?;
+    stamps.wal_erased(now);
+    Ok(())
 }
 
 /// Takes what waits for message `n`, which can never apply once it's erased, as a message that
@@ -242,6 +258,9 @@ pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<boo
         let began = Instant::now();
         let hidden = erasing(db, || Ok(db.prepare_cached(UNCAPTIONED)?.execute(params![n, said, seq])? > 0))?;
         stamps.securely_deleted(began.elapsed());
+        if hidden {
+            wal_to_empty(db, stamps)?;
+        }
         if linked && hidden {
             let now = now_ms();
             db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;

@@ -437,6 +437,12 @@ const TRUNCATE_TRIES: u32 = 500;
 /// WAL again, and, if one holds them longer, how long before it tries again. Inbox rows and live
 /// writes arriving meanwhile wait for it, so it waits far less than background work can.
 const RESTART_READERS: Duration = Duration::from_millis(20);
+/// How long the writer waits to empty the WAL again after a reader held its frames.
+const WAL_AGAIN: Duration = Duration::from_secs(1);
+/// How long the writer goes without a commit before it empties the WAL erasures left: a backlog's
+/// or a backfill's transactions follow one another closer than that, so none waits behind it, and
+/// a jawd too busy ever to go IDLE, when the checkpointer empties it, still has moments that long.
+const WAL_QUIET: Duration = Duration::from_secs(1);
 const RESTART_AGAIN: Duration = Duration::from_millis(50);
 /// Frames past WAL_HARD from which the writer, refused the checkpoint lock, waits for the
 /// checkpointer's pass to end rather than commit more, for RESTART_MOST at most: what's left before
@@ -727,10 +733,13 @@ impl Store {
         let (copies, copies_taken) = watch::channel(0);
         let (trouble, troubled) = watch::channel(None);
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
-        let links_erased: Option<i64> = db
-            .query_row("SELECT value FROM sync_state WHERE key = ?1", [expiry::LINKS_ERASED], |r| r.get::<_, String>(0))
-            .optional()?
-            .and_then(|at| at.parse().ok());
+        let noted = |key: &str| -> Result<Option<i64>> {
+            Ok(db
+                .query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| r.get::<_, String>(0))
+                .optional()?
+                .and_then(|at| at.parse().ok()))
+        };
+        let (links_erased, wal_erased) = (noted(expiry::LINKS_ERASED)?, noted(expiry::WAL_ERASED)?);
         let kept: i64 = db.query_row("SELECT coalesce(sum(bytes), 0) FROM thumbnails", [], |r| r.get(0))?;
         let thumbnails = Arc::new(Thumbnails::open(home, kept.max(0) as u64));
         let stats = Arc::new(Mutex::new(Stats::default()));
@@ -767,6 +776,9 @@ impl Store {
             links_merging: None,
             links_merged: None,
             links_merge_every: limits.links_merge_every,
+            wal_erased,
+            wal_again: None,
+            committed_at: Instant::now(),
             indexed: Vec::new(),
             index_after: None,
             index_retry: RETRY_FIRST,
@@ -1092,6 +1104,12 @@ struct Writer {
     links_merging: Option<i64>,
     links_merged: Option<Instant>,
     links_merge_every: Duration,
+    /// When a message was last erased, or a caption taken out of its row, as sync_state keeps it,
+    /// until the WAL has been emptied since; and, while a reader held it, when to try again.
+    wal_erased: Option<i64>,
+    wal_again: Option<Instant>,
+    /// When the writer last committed.
+    committed_at: Instant,
     /// Who waits for everything written to be indexed.
     indexed: Vec<oneshot::Sender<Result<(), String>>>,
     /// When indexing, after a step failed, is tried again, and how long the next failure waits.
@@ -1272,7 +1290,8 @@ impl Writer {
     /// How long the writer may wait for work before an indexing step is due.
     fn idle_for(&self) -> Duration {
         if !self.backlog && !self.unmerged {
-            return self.links_merge_due().map_or(Duration::from_secs(3600), |due| {
+            let due = [self.links_merge_due(), self.wal_empty_due()].into_iter().flatten().min();
+            return due.map_or(Duration::from_secs(3600), |due| {
                 due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE)
             });
         }
@@ -1304,6 +1323,8 @@ impl Writer {
             self.merge()
         } else if self.backlog {
             self.index()
+        } else if self.wal_empty_due().is_some_and(|due| due <= Instant::now()) {
+            self.empty_wal()
         } else {
             Ok(())
         };
@@ -1337,6 +1358,7 @@ impl Writer {
 
     /// After a commit: what it left in the WAL, and the checkpointer woken to copy it.
     fn committed(&mut self) {
+        self.committed_at = Instant::now();
         let frames = FRAMES.with(Cell::get);
         self.wal.frames.store(frames, Ordering::Relaxed);
         self.wal.peak.fetch_max(frames, Ordering::Relaxed);
@@ -1347,11 +1369,54 @@ impl Writer {
         if let Some(at) = self.stamps.take_links_erased() {
             self.links_erased = Some(at);
         }
+        if let Some(at) = self.stamps.take_wal_erased() {
+            self.wal_erased = Some(at);
+        }
         self.erased.fetch_add(self.stamps.take_erased(), Ordering::Relaxed);
         let closed = self.stamps.take_closed();
         if !closed.is_empty() {
             self.closed.lock().expect("the view-once messages erased").extend(closed);
         }
+    }
+
+    /// When the WAL is next to be emptied, for what erasures since it last was left in its frames,
+    /// if any did: WAL_QUIET after the last commit, or later while a reader held it.
+    fn wal_empty_due(&self) -> Option<Instant> {
+        let quiet = self.committed_at + WAL_QUIET;
+        self.wal_erased.map(|_| self.wal_again.map_or(quiet, |again| again.max(quiet)))
+    }
+
+    /// Copies the whole WAL into jaw.db and empties it, once erasures have left what they took out
+    /// in frames a running jawd keeps until it writes over them: with the short wait for readers
+    /// that starting the WAL again has, and, while one holds its frames, again WAL_AGAIN later.
+    /// Then lets go of the note that kept it to do, in a transaction of its own, whose frames hold
+    /// none of what went.
+    fn empty_wal(&mut self) -> Result<()> {
+        let Some(noted) = self.wal_erased else { return Ok(()) };
+        let began = Instant::now();
+        self.db.busy_timeout(RESTART_READERS)?;
+        let tried = wal_checkpoint(&self.db, "TRUNCATE");
+        if let Err(e) = self.db.busy_timeout(self.busy) {
+            eprintln!("jawd: can't give the writer its busy timeout back: {e}");
+        }
+        if tried?.0 {
+            self.wal_again = Some(Instant::now() + WAL_AGAIN);
+            return Ok(());
+        }
+        FRAMES.with(|f| f.set(0));
+        self.wal.frames.store(0, Ordering::Relaxed);
+        self.wal.passed((0, 0));
+        self.synced(false)?;
+        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM sync_state WHERE key = ?1 AND value = ?2",
+            params![expiry::WAL_ERASED, noted.to_string()],
+        )?;
+        tx.commit()?;
+        (self.wal_erased, self.wal_again) = (None, None);
+        self.committed();
+        self.count(None, began.elapsed());
+        Ok(())
     }
 
     /// When links_fts is next to be merged whole, for the words of messages erased since the last

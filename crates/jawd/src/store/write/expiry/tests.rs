@@ -614,8 +614,13 @@ async fn an_erased_messages_words_and_raw_protobuf_are_gone_from_jaw_db_and_its_
     };
     apply(&store, vec![Change::Message(message(ANA, "stays", AT, "an ordinary day", None)), Change::Message(goes)])
         .await;
+    // Writes before it, as a running jawd's, whose WAL keeps the frames they and the message wrote.
+    // None search indexes, whose merges would free pages holding its words under FAST before it
+    // goes (as the design says), and none after, which would write over the pages it freed.
+    for k in 0..100 {
+        apply(&store, vec![Change::Remember { key: format!("around{k}"), value: "x".repeat(200) }]).await;
+    }
     store.indexed().await.unwrap();
-    store.truncate().await.unwrap();
     let before = files(home.path());
     let window = &packed.0[packed.0.len() / 2..packed.0.len() / 2 + 64];
     assert!(holds(&before, b"quokkaflummox") && holds(&before, b"wombatgalore"), "the words are there to look for");
@@ -630,7 +635,8 @@ async fn an_erased_messages_words_and_raw_protobuf_are_gone_from_jaw_db_and_its_
     })
     .await;
     assert_eq!(noted, None, "the merge it waited for is done");
-    store.truncate().await.unwrap();
+    // Nothing truncates the WAL here, as at a clean stop: the writer empties it once it's idle.
+    assert!(wal_emptied(&store).await, "the WAL the erasure left is emptied");
     let after = files(home.path());
     assert!(!holds(&after, b"quokkaflummox"), "its words are left in jaw.db or its WAL");
     assert!(!holds(&after, b"wombatgalore"), "its link's words are left in jaw.db or its WAL");
@@ -643,6 +649,53 @@ async fn an_erased_messages_words_and_raw_protobuf_are_gone_from_jaw_db_and_its_
     assert_eq!(secure, 0, "a connection of the test's own, which jawd's settings don't reach");
     let left: i64 = db.query_row("SELECT count(*) FROM links", [], |r| r.get(0)).unwrap();
     assert_eq!(left, 0, "its link went with it");
+}
+
+/// When sync_state says a message was erased, while the WAL is still to empty after it.
+async fn wal_noted(store: &Store) -> Option<String> {
+    query(store, |db| {
+        Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [WAL_ERASED], |r| r.get(0)).optional()?)
+    })
+    .await
+}
+
+/// Waits up to 10 s for the writer to have emptied the WAL that erasures left, saying whether it did.
+async fn wal_emptied(store: &Store) -> bool {
+    for _ in 0..500 {
+        if wal_noted(store).await.is_none() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wal_an_erasure_leaves_is_emptied_once_no_reader_holds_it_and_a_kill_keeps_that_to_do() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![Change::Message(message(ANA, "goes", AT, "quokkawal gone at its time", Some(LATER)))]).await;
+    store.indexed().await.unwrap();
+    // A reader in the middle of a read holds the WAL's frames, so it can't be emptied meanwhile.
+    let reader = Connection::open(home.path().join("jaw.db")).unwrap();
+    reader.execute_batch("BEGIN; SELECT count(*) FROM messages;").unwrap();
+    let n = n_of(&store, "goes").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    // Long enough for the writer, a second without a commit, to have tried.
+    tokio::time::sleep(crate::store::WAL_QUIET + Duration::from_millis(1_500)).await;
+    assert!(wal_noted(&store).await.is_some(), "it's still to empty while the reader holds it");
+    let killed = killed(home.path());
+    reader.execute_batch("COMMIT").unwrap();
+    assert!(wal_emptied(&store).await, "and emptied once the reader lets go");
+    assert!(!holds(&files(home.path()), b"quokkawal"), "with nothing of the message left in the files");
+    let left: Option<String> = Connection::open(killed.path().join("jaw.db"))
+        .unwrap()
+        .query_row("SELECT value FROM sync_state WHERE key = ?1", [WAL_ERASED], |r| r.get(0))
+        .optional()
+        .unwrap();
+    assert!(left.is_some(), "a kill before then leaves it to do");
+    let again = Store::open(killed.path()).unwrap();
+    assert!(wal_emptied(&again).await, "and started again, jawd does it");
 }
 
 /// Message `id` of Rui's, `raw` its raw protobuf, written and then deleted for you, as an ordinary
