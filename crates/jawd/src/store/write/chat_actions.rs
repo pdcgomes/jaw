@@ -385,14 +385,16 @@ struct Waiting {
 }
 
 /// What holds back the setting of a chat `index` names, which WhatsApp sent at time `at`, the chat
-/// kept by `kept`: the newest that's held for the setting under some JID of the chat, if it's as
-/// late or later, so what WhatsApp sent applies only when it's newer than each. WhatsApp keeps a
-/// one-to-one chat's setting under each of its person's JIDs that named it, and a group message's
-/// star under each of its sender's, and hands them over in no order of their own, a full fetch each
-/// as it comes; so across them the newest stands, as the owner chose on 1 November, while under one
-/// index WhatsApp's own order does, since it keeps one value there. What's held under each index is
-/// what WhatsApp last sent for it, but under the one jaw's waiting patch named (`waiting`), that
-/// patch at its time, which WhatsApp ends with there and the chat already shows.
+/// kept by `kept`: the newest that's held for the setting under some JID of the chat, if it's
+/// newer, so what WhatsApp sent applies only when it's newer than each. One is newer than another
+/// by its time, and at the same time by its index, the one that sorts last, so of two values held
+/// at one millisecond the same stands whichever comes first. WhatsApp keeps a one-to-one chat's
+/// setting under each of its person's JIDs that named it, and a group message's star under each of
+/// its sender's, and hands them over in no order of their own, a full fetch each as it comes; so
+/// across them the newest stands, as the owner chose on 1 November, while under one index
+/// WhatsApp's own order does, since it keeps one value there. What's held under each index is what
+/// WhatsApp last sent for it, but under the one jaw's waiting patch named (`waiting`), that patch at
+/// its time, which WhatsApp ends with there and the chat already shows.
 fn newest_held(
     db: &Connection,
     index: &[String],
@@ -400,7 +402,7 @@ fn newest_held(
     kept: &str,
     waiting: Option<&Waiting>,
 ) -> Result<Option<Held>> {
-    let mut newest = waiting.map(|waiting| (waiting.at, Held::Back));
+    let mut newest = waiting.map(|waiting| (waiting.at, waiting.named.clone(), Held::Back));
     // A star's setting is its message's: its chat, its ID and whether it's yours, whichever JID
     // names its sender.
     let mut setting = index[..if index[0] == "star" { index.len().min(4) } else { 2 }].to_vec();
@@ -423,12 +425,13 @@ fn newest_held(
                 continue;
             }
             let time = SyncActionValue::decode(value.as_slice()).map_or(0, |v| v.timestamp.unwrap_or_default());
-            if newest.as_ref().is_none_or(|(newest, _)| time > *newest) {
-                newest = Some((time, Held::Instead { index: serde_json::from_str(&key)?, value }));
+            if newest.as_ref().is_none_or(|(newest, under, _)| (time, key.as_str()) > (*newest, under.as_str())) {
+                let index = serde_json::from_str(&key)?;
+                newest = Some((time, key, Held::Instead { index, value }));
             }
         }
     }
-    Ok(newest.filter(|(time, _)| *time >= at).map(|(_, held)| held))
+    Ok(newest.filter(|(time, under, _)| (*time, under.as_str()) > (at, own.as_str())).map(|(.., held)| held))
 }
 
 /// Chat `gone` is merging into `keep`, each named by its JID: what waited under `gone`'s JID waits
@@ -1858,8 +1861,8 @@ mod tests {
         arrives(&db, &["mute", ANA], &mute_value(0, AT), 1);
         arrives(&db, &["mute", ANA_LID], &mute_value(FOREVER, AT + 60_000), 2);
         assert_eq!(chat(&db, ANA).2, FOREVER, "the phone's later mute, under her LID, stands");
-        arrives(&db, &["mute", ANA], &mute_value(0, AT + 60_000), 3);
-        assert_eq!(chat(&db, ANA).2, FOREVER, "an unmute under her number at the same time isn't newer");
+        arrives(&db, &["mute", ANA], &mute_value(0, AT + 59_000), 3);
+        assert_eq!(chat(&db, ANA).2, FOREVER, "an unmute under her number a second earlier isn't newer");
         // Under her LID again, by a clock that's behind: that's what WhatsApp holds there now, which
         // leaves her number's unmute the newest it holds.
         let hour = AT + 3_600_000;
@@ -1941,6 +1944,22 @@ mod tests {
             (hour, None),
             "jaw's echo, older than the hour's mute, ends the wait and changes nothing"
         );
+    }
+
+    #[test]
+    fn of_two_values_held_under_her_jids_at_one_millisecond_the_same_stands_in_any_order() {
+        let db = db();
+        chats(&db, &[ANA]);
+        her_lid_joined(&db);
+        // Her number says unmuted and her LID muted for ever, both at AT, handed over by one full
+        // fetch after another, in either order (round three's C1): her number's index sorts last.
+        let (number, lid) = ((["mute", ANA], mute_value(0, AT)), (["mute", ANA_LID], mute_value(FOREVER, AT)));
+        for (n, (index, value)) in [&number, &lid, &lid, &number, &number, &lid].into_iter().enumerate() {
+            arrives(&db, index, value, n as i64 + 1);
+            if n % 2 == 1 {
+                assert_eq!(chat(&db, ANA).2, 0, "unmuted, as her number has it, after fetch {}", n / 2 + 1);
+            }
+        }
     }
 
     #[test]
