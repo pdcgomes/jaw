@@ -1913,6 +1913,30 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_a_merge_moves_after_whatsapp_took_jaws_patch_still_ends_where_its_echo_had_to_be() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        let Acted::Queued { outbox, .. } = acted(&db, ANA_LID, pin_at(ANA_LID, true, AT, "p1")) else {
+            panic!("not queued")
+        };
+        // WhatsApp takes jaw's pin, its echo at 7 or before, then her chats merge (round three's T5).
+        inboxed(&db, &[6, 7]);
+        sent(&db, outbox[0]);
+        her_lid_joined(&db);
+        let number = ["pin_v1", ANA];
+        assert_eq!(
+            awaited(&db, &number),
+            Some((AT, outbox[0], Some(7))),
+            "the wait moved, where its echo has to be with it"
+        );
+        // The phone's unpin under her number, from before jaw's pin by its time.
+        arrives(&db, &number, &pin_value(false, AT - 1_000), 6);
+        assert_eq!(chat(&db, ANA).0, AT, "held back, the wait going on though its outbox row has gone");
+        written(&db, &[Change::Drained(Drained::Inbox(7))]);
+        assert_eq!(awaited(&db, &number), None, "and the converter past 7 ends it");
+    }
+
+    #[test]
     fn a_phone_unstar_under_her_lid_while_jaws_star_waits_is_held_back_so_unstarring_isnt_so_already() {
         let db = db();
         written(&db, &[from_ana("m1", AT)]);
