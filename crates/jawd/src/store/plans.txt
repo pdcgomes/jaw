@@ -2799,6 +2799,15 @@ DELETE FROM quarantine WHERE source = 'opened' AND ref = ?1
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
 -- src/store/write/expiry.rs
+SELECT c.id, m.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+DELETE FROM quarantine WHERE source IN ('vote', 'answer', 'edit') AND ref >= ?1 AND ref < ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/expiry.rs
 SELECT n, view_once AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 

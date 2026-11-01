@@ -470,6 +470,66 @@ async fn a_message_that_comes_after_its_time_is_never_shown_and_what_waited_for_
     assert!(events(&store, seq).await.iter().all(|(kind, _)| kind != "message"), "no window hears of it");
 }
 
+/// What waits for message `id` in pending, and what was set aside for it in quarantine.
+async fn waiting_for(store: &Store, id: &'static str) -> (i64, i64) {
+    query(store, move |db| {
+        let (named, past) = (format!("{ANA} {id} "), format!("{ANA} {id}!"));
+        Ok((
+            db.query_row("SELECT count(*) FROM pending WHERE target = ?1", [id], |r| r.get(0))?,
+            db.query_row(
+                "SELECT count(*) FROM quarantine WHERE ref = ?1 OR (ref >= ?2 AND ref < ?3)",
+                [format!("{ANA} {id}"), named, past],
+                |r| r.get(0),
+            )?,
+        ))
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erasure_takes_what_waits_for_its_message_and_what_was_set_aside_for_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // An edit sealed with its message's secret, which this jawd keeps for a later one.
+    let kept = |target: &str| Amend {
+        chat: ANA.into(),
+        target: target.into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: AT + 5,
+        what: Amendment::Keep { kind: "edit".into() },
+        raw: None,
+    };
+    apply(
+        &store,
+        vec![
+            Change::Message(message(ANA, "goes", AT, "gone at its time", Some(LATER))),
+            Change::Message(message(ANA, "stays", AT + 1, "here to stay", None)),
+            Change::Amend(kept("goes")),
+            Change::Amend(kept("stays")),
+        ],
+    )
+    .await;
+    {
+        // Set aside past what waits: a receipt of it opened elsewhere, a vote, an answer and an edit.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        for id in ["goes", "stays"] {
+            let insert = "INSERT INTO quarantine (at, source, ref, error) VALUES (?1, ?2, ?3, 'set aside')";
+            db.execute(insert, rusqlite::params![AT, "opened", format!("{ANA} {id}")]).unwrap();
+            for source in ["vote", "answer", "edit"] {
+                db.execute(insert, rusqlite::params![AT, source, format!("{ANA} {id} {RUI} {source}")]).unwrap();
+            }
+        }
+    }
+    assert_eq!(waiting_for(&store, "goes").await, (1, 4));
+    let n = n_of(&store, "goes").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    assert!(tombstoned(&store, "goes").await);
+    assert_eq!(waiting_for(&store, "goes").await, (0, 0), "what waited for it, or was set aside for it, went with it");
+    assert_eq!(waiting_for(&store, "stays").await, (1, 4), "what waits for another message stays");
+}
+
 /// Whether `needle` is anywhere in `haystack`.
 fn holds(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)

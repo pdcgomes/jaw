@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{CHAT, MESSAGE, Stamps, delete_row, now_ms};
+use super::{CHAT, MESSAGE, PENDING_FOR, Stamps, delete_row, now_ms};
 use crate::convert;
 
 /// How many due messages one synced commit erases at most: with each erasure's words taken out of
@@ -55,11 +55,14 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
     erase(db, stamps, chat, n)
 }
 
-/// Erases message `n` of chat `chat`, as a disappearing message goes; one whose links' words
-/// links_fts holds is noted, for the whole merge that takes them out.
+/// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it; one
+/// whose links' words links_fts holds is noted, for the whole merge that takes them out.
 pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     let linked = db.prepare_cached(LINKED)?.exists([n])?;
-    let erased = erasing(db, || delete_row(db, stamps, chat, n))?;
+    let erased = erasing(db, || {
+        forget_waiting(db, n)?;
+        delete_row(db, stamps, chat, n)
+    })?;
     if erased {
         stamps.erased_one();
     }
@@ -69,6 +72,21 @@ pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> 
         stamps.links_erased(now);
     }
     Ok(erased)
+}
+
+/// Takes what waits for message `n`, which can never apply once it's erased, as a message that
+/// arrives after its time takes it: what's kept in pending for it, such as an edit or an event's
+/// answer sealed with its secret, which this jawd keeps for a later one, and what was set aside in
+/// quarantine past what waits, a receipt of it opened elsewhere, named by the message, and votes,
+/// answers and edits, named from it on.
+fn forget_waiting(db: &Connection, n: i64) -> Result<()> {
+    let named: Option<(String, String)> =
+        db.prepare_cached(NAMED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    let Some((chat, id)) = named else { return Ok(()) };
+    db.prepare_cached(PENDING_FOR)?.execute(params![chat, id])?;
+    db.prepare_cached(OPENED_ASIDE)?.execute([format!("{chat} {id}")])?;
+    db.prepare_cached(SET_ASIDE_FOR)?.execute(params![format!("{chat} {id} "), format!("{chat} {id}!")])?;
+    Ok(())
 }
 
 /// What becomes of a view-once message of someone else's opened here.
@@ -109,6 +127,11 @@ const SET_OPENED_ASIDE: &str = "INSERT OR IGNORE INTO quarantine (at, source, re
 const DROP_OPENED_ASIDE: &str =
     "DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = 'opened' ORDER BY n LIMIT ?1)";
 const OPENED_ASIDE: &str = "DELETE FROM quarantine WHERE source = 'opened' AND ref = ?1";
+/// Message ?1's chat's JID and its ID, as what waits for it names them.
+const NAMED: &str = "SELECT c.id, m.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
+/// The votes, answers and edits set aside past what waits for a message, named from ?1 to ?2.
+const SET_ASIDE_FOR: &str =
+    "DELETE FROM quarantine WHERE source IN ('vote', 'answer', 'edit') AND ref >= ?1 AND ref < ?2";
 
 pub(super) fn once(db: &Connection, stamps: &mut Stamps, once: &Once) -> Result<bool> {
     match once {
