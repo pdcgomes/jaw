@@ -19,7 +19,7 @@ public enum Reply: Sendable, Hashable {
 
 /// What the reader expects of the reply with an id: looked up as the line decodes.
 enum Want: Sendable {
-    case hello, find, chats, messages, nothing
+    case hello, find, chats, messages, library, nothing
     case reply(Expect)
 }
 
@@ -38,11 +38,13 @@ enum Incoming: Sendable {
     case found(UInt64, Found)
     case chats(UInt64, ChatsWatched)
     case messages(UInt64, MessagesWatched)
+    case library(UInt64, LibraryWatched)
     case error(UInt64, JawError)
     /// A reply that isn't jaw's protocol, and why.
     case bad(UInt64, String)
     case chatsPush(ChatsPush)
     case messagesPush(MessagesPush)
+    case libraryPush(LibraryPush)
     case typing(TypingPush)
     case resync(String)
     case connection(Connection)
@@ -76,6 +78,7 @@ struct IncomingLine: Decodable {
                 case .find: value = try .found(id, c.decode(Found.self, forKey: .result))
                 case .chats: value = try .chats(id, c.decode(ChatsWatched.self, forKey: .result))
                 case .messages: value = try .messages(id, c.decode(MessagesWatched.self, forKey: .result))
+                case .library: value = try .library(id, c.decode(LibraryWatched.self, forKey: .result))
                 case .nothing: value = .reply(id, .json(.null))
                 case .reply(.json): value = try .reply(id, .json(c.decode(JSONValue.self, forKey: .result)))
                 case .reply(.sent): value = try .reply(id, .sent(c.decode(Sent.self, forKey: .result)))
@@ -99,6 +102,7 @@ struct IncomingLine: Decodable {
             switch method {
             case "chats": value = try .chatsPush(c.decode(ChatsPush.self, forKey: .params))
             case "messages": value = try .messagesPush(c.decode(MessagesPush.self, forKey: .params))
+            case "library": value = try .libraryPush(c.decode(LibraryPush.self, forKey: .params))
             case "typing": value = try .typing(c.decode(TypingPush.self, forKey: .params))
             case "resync": value = try .resync(c.decode(WatchRef.self, forKey: .params).watch)
             case "connection": value = try .connection(c.decode(Connection.self, forKey: .params))

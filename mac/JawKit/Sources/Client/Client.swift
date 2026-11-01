@@ -88,6 +88,12 @@ public final class Client: Sendable {
         open(.messages, chat, place)
     }
 
+    /// Watches the library: a kind's items, or the newest of every kind, as `filter` narrows them.
+    /// jawd watches a library whole, so watched again it comes whole, with what left as `remove`.
+    public func watchLibrary(_ filter: LibraryFilter, _ place: Place) -> WindowID {
+        open(.library, filter.chat ?? "", place, filter: filter)
+    }
+
     /// Moves a window, for scrolling. Moves asked while one is in flight wait for it, and only the
     /// latest is sent.
     public func move(_ window: WindowID, _ place: Place) {
@@ -105,6 +111,7 @@ public final class Client: Sendable {
         let (line, typing) = state.withLock { s -> (Line?, Bool) in
             s.chats[window] = nil
             s.messages[window] = nil
+            s.library[window] = nil
             guard let w = s.windows[window] else { return (nil, false) }
             if w.asking != nil {
                 s.windows[window]!.closing = true
@@ -148,11 +155,13 @@ public final class Client: Sendable {
                 events: s.events,
                 chats: s.chats.mapValues { $0.update() },
                 messages: s.messages.mapValues { $0.update() },
+                library: s.library.mapValues { $0.update() },
                 typing: s.typingChanged ? s.typing : nil,
             )
             s.events.removeAll(keepingCapacity: true)
             s.chats.removeAll(keepingCapacity: true)
             s.messages.removeAll(keepingCapacity: true)
+            s.library.removeAll(keepingCapacity: true)
             s.typingChanged = false
             if !frame.isEmpty { s.stats.frames += 1 }
             return frame
@@ -173,11 +182,11 @@ public final class Client: Sendable {
         let counted: Bool
     }
 
-    func open(_ kind: Kind, _ of: String, _ place: Place) -> WindowID {
+    func open(_ kind: Kind, _ of: String, _ place: Place, filter: LibraryFilter? = nil) -> WindowID {
         let (window, line) = state.withLock { s -> (WindowID, Line?) in
             s.nextWindow += 1
             let window = WindowID(raw: s.nextWindow)
-            s.windows[window] = Win(kind: kind, of: of, place: place)
+            s.windows[window] = Win(kind: kind, of: of, place: place, filter: filter)
             return (window, s.live ? asking(&s, window, again: false) : nil)
         }
         if let line { write(line) }
@@ -227,6 +236,11 @@ public final class Client: Sendable {
                 let watch = MessagesWatch(chat: w.of, around: place.around, before: place.before,
                                           after: place.after, since: have.isEmpty ? nil : w.seq, have: have)
                 data = Lines.encode(id: id, method: "messages.watch", params: watch)
+            case .library:
+                // jawd watches a library whole, with no have: its `since` is a time.
+                let watch = LibraryWatch(filter: w.filter ?? LibraryFilter(), around: place.around, before: place.before,
+                                         after: place.after)
+                data = Lines.encode(id: id, method: "library.watch", params: watch)
             }
         }
         let landingAgain: Bool? = (w.watch == nil || again) ? again : nil
@@ -406,7 +420,11 @@ public final class Client: Sendable {
                 case let .request(expect): .reply(expect)
                 case .find: .find
                 case let .window(landing):
-                    s.windows[landing.window]?.kind == .messages ? .messages : .chats
+                    switch s.windows[landing.window]?.kind {
+                    case .messages: .messages
+                    case .library: .library
+                    case .chats, nil: .chats
+                    }
                 case .unwatch, nil: .nothing
                 }
             }
@@ -494,6 +512,11 @@ public final class Client: Sendable {
             let update = Update<MessageRow>(seq: push.seq, remove: push.remove, upsert: push.upsert,
                                             total: push.total, older: push.older, newer: push.newer)
             return windowPush(push.watch, generation) { s, window in s.mergeMessages(window, update) }
+        case let .libraryPush(push):
+            if push.unread > 0 { _ = event(.unreadable(Self.unread(push.unread, "library items", push.why)), generation, urgent: false) }
+            let update = Update<LibraryRow>(seq: push.seq, remove: push.remove, upsert: push.upsert, total: push.total,
+                                            older: push.older, counts: push.counts)
+            return windowPush(push.watch, generation) { s, window in s.mergeLibrary(window, update) }
         case let .typing(push):
             let (current, changed) = state.withLock { s -> (Bool, Bool) in
                 guard s.current(generation) else { return (false, false) }
@@ -546,6 +569,11 @@ public final class Client: Sendable {
         case let .messages(id, watched):
             if watched.unread > 0 { _ = event(.unreadable(Self.unread(watched.unread, "messages", watched.why)), generation, urgent: false) }
             return reply(id, .success(.messages(watched)), generation)
+        case let .library(id, watched):
+            if watched.unread > 0 {
+                _ = event(.unreadable(Self.unread(watched.unread, "library items", watched.why)), generation, urgent: false)
+            }
+            return reply(id, .success(.library(watched)), generation)
         }
     }
 
@@ -609,6 +637,7 @@ public final class Client: Sendable {
         case found(Found)
         case chats(ChatsWatched)
         case messages(MessagesWatched)
+        case library(LibraryWatched)
     }
 
     func reply(_ id: UInt64, _ outcome: Result<Answer, Failure>, _ generation: UInt64) -> Bool {
@@ -667,6 +696,8 @@ public final class Client: Sendable {
                     watch = watched.watch
                 case let .messages(watched):
                     watch = watched.watch
+                case let .library(watched):
+                    watch = watched.watch
                 default:
                     failed = (window, .jawd(JawError(code: ErrorCode.internal, message: "jawd's answer to a watch wasn't one")))
                     return true
@@ -695,6 +726,12 @@ public final class Client: Sendable {
                     if moved { update.moved = Moved(place: place, newer: watched.newer) }
                     s.mergeMessages(window, update)
                     s.answered(window, watched.typing)
+                case let .library(watched):
+                    var update = Update<LibraryRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows,
+                                                    total: watched.total, older: watched.older, counts: watched.counts,
+                                                    note: .some(watched.note))
+                    if moved { update.moved = Moved(place: place, newer: 0) }
+                    s.mergeLibrary(window, update)
                 default:
                     break
                 }
@@ -740,7 +777,7 @@ public final class Client: Sendable {
     static func fallback(_ kind: Kind, _ place: Place) -> Place {
         let rows = place.before + place.after
         switch kind {
-        case .chats: return .top(rows)
+        case .chats, .library: return .top(rows)
         case .messages: return .newest(rows)
         }
     }
@@ -808,11 +845,12 @@ public struct Frame: Sendable {
     public var events: [Event]
     public var chats: [WindowID: Update<ChatRow>]
     public var messages: [WindowID: Update<MessageRow>]
+    public var library: [WindowID: Update<LibraryRow>]
     /// Who's typing in the chats the windows show, all of it as it is now, when it changed.
     public var typing: Typists?
 
     public var isEmpty: Bool {
-        events.isEmpty && chats.isEmpty && messages.isEmpty && typing == nil
+        events.isEmpty && chats.isEmpty && messages.isEmpty && library.isEmpty && typing == nil
     }
 }
 
@@ -834,7 +872,7 @@ struct Unreached: Error {
 }
 
 enum Kind: Sendable {
-    case chats, messages
+    case chats, messages, library
 }
 
 /// A watch or a move in flight.
@@ -859,6 +897,8 @@ struct Win: Sendable {
     let kind: Kind
     /// The folder or the chat.
     let of: String
+    /// A library window's kind and filters, which a move and a watch again keep.
+    let filter: LibraryFilter?
     /// Where the caller wants it.
     var place: Place
     /// Where jawd last put it.
@@ -874,18 +914,20 @@ struct Win: Sendable {
     /// Unwatched while a request for it was in flight.
     var closing = false
 
-    init(kind: Kind, of: String, place: Place) {
+    init(kind: Kind, of: String, place: Place, filter: LibraryFilter? = nil) {
         self.kind = kind
         self.of = of
+        self.filter = filter
         self.place = place
     }
 
     /// Whether it shows `chat`, for who's typing there: a chat list among its rows, a conversation
-    /// as its chat.
+    /// as its chat; a library shows nobody typing.
     func shows(_ chat: String) -> Bool {
         switch kind {
         case .chats: ids.contains(chat)
         case .messages: of == chat
+        case .library: false
         }
     }
 }
@@ -914,6 +956,7 @@ struct State: Sendable {
     var events: [Event] = []
     var chats: [WindowID: Merged<ChatRow>] = [:]
     var messages: [WindowID: Merged<MessageRow>] = [:]
+    var library: [WindowID: Merged<LibraryRow>] = [:]
     /// Who's typing in the chats the windows show, as jawd last said, and whether that changed since
     /// the caller last drained.
     var typing: Typists = [:]
@@ -991,6 +1034,13 @@ struct State: Sendable {
         guard var w = windows[window], !w.closing else { return }
         w.seq = max(w.seq ?? update.seq, update.seq)
         messages[window, default: Merged()].add(update, ids: &w.ids)
+        windows[window] = w
+    }
+
+    mutating func mergeLibrary(_ window: WindowID, _ update: Update<LibraryRow>) {
+        guard var w = windows[window], !w.closing else { return }
+        w.seq = max(w.seq ?? update.seq, update.seq)
+        library[window, default: Merged()].add(update, ids: &w.ids)
         windows[window] = w
     }
 }

@@ -29,9 +29,14 @@ public struct Update<R: WindowRow>: Sendable {
     public var older: Bool?
     public var newer: UInt64?
     public var moved: Moved?
+    /// A library window's counts of each kind, when they changed.
+    public var counts: LibraryCounts?
+    /// A library window's note, as a watch's or move's answer says it: nil in an update that says
+    /// nothing of it, and `.some(nil)` from an answer that had none.
+    public var note: String??
 
     public init(seq: UInt64 = 0, remove: [String] = [], upsert: [R] = [], total: UInt64? = nil, older: Bool? = nil,
-                newer: UInt64? = nil, moved: Moved? = nil)
+                newer: UInt64? = nil, moved: Moved? = nil, counts: LibraryCounts? = nil, note: String?? = nil)
     {
         self.seq = seq
         self.remove = remove
@@ -40,6 +45,8 @@ public struct Update<R: WindowRow>: Sendable {
         self.older = older
         self.newer = newer
         self.moved = moved
+        self.counts = counts
+        self.note = note
     }
 }
 
@@ -56,6 +63,8 @@ public struct Merged<R: WindowRow>: Sendable {
     var older: Bool?
     var newer: UInt64?
     var moved: Moved?
+    var kinds: LibraryCounts?
+    var note: String??
 
     public init() {}
 
@@ -82,15 +91,18 @@ public struct Merged<R: WindowRow>: Sendable {
         older = update.older ?? older
         newer = update.newer ?? newer
         moved = update.moved ?? moved
+        kinds = update.counts ?? kinds
+        if let said = update.note { note = said }
     }
 
     public var isEmpty: Bool {
-        remove.isEmpty && upsert.isEmpty && total == nil && older == nil && newer == nil && moved == nil
+        remove.isEmpty && upsert.isEmpty && total == nil && older == nil && newer == nil && moved == nil && kinds == nil
+            && note == nil
     }
 
     public func update() -> Update<R> {
         Update(seq: seq, remove: Array(remove), upsert: Array(upsert.values), total: total, older: older,
-               newer: newer, moved: moved)
+               newer: newer, moved: moved, counts: kinds, note: note)
     }
 
     /// The upserts it holds, for a test's check that a merge keeps no more than the window does.
@@ -370,5 +382,56 @@ public struct Messages<R: WindowRow>: Sendable {
     /// How many come before `sort`, counting no further than `most`.
     public func countBefore(_ sort: String, most: Int) -> Int {
         min(rows.lowerBound(sort), most)
+    }
+}
+
+/// A library window: its items from the largest `sort` down, newest first, with how many of each kind
+/// match its filters.
+public struct Library<R: WindowRow>: Sendable {
+    public var place: Place
+    var rows = Rows<R>()
+    /// How many items of its kind match, every kind's for a window of all of them.
+    public var total: UInt64 = 0
+    /// Whether more items come after its last row.
+    public var older = false
+    public var counts: LibraryCounts?
+    /// What it can't hold yet and why, as jawd's latest answer said.
+    public var note: String?
+    public var seq: UInt64 = 0
+    public var loaded = false
+
+    public init(place: Place) {
+        self.place = place
+    }
+
+    /// Applies an update; returns the ids that left.
+    @discardableResult
+    public mutating func apply(_ update: Update<R>) -> [String] {
+        let gone = rows.apply(remove: update.remove, upsert: update.upsert)
+        if let total = update.total { self.total = total }
+        if let older = update.older { self.older = older }
+        if let counts = update.counts { self.counts = counts }
+        if let note = update.note { self.note = note }
+        if let moved = update.moved { place = moved.place }
+        seq = max(seq, update.seq)
+        loaded = true
+        return gone
+    }
+
+    public func get(_ id: String) -> R? {
+        rows.byID[id]
+    }
+
+    public var count: Int {
+        rows.byID.count
+    }
+
+    public var isEmpty: Bool {
+        rows.byID.isEmpty
+    }
+
+    /// Newest first.
+    public var list: [R] {
+        rows.order.reversed().map { rows.byID[$0.id]! }
     }
 }

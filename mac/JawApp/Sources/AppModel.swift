@@ -234,7 +234,7 @@ final class AppModel {
             say("not downloaded: \(why)", warn: true)
         case let .saved(ticket, message, path, why):
             savedAnswer(ticket, message, path, why)
-        case .push, .chats, .layout:
+        case .push, .chats, .layout, .library:
             break
         }
     }

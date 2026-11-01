@@ -51,6 +51,11 @@ public final class Jawd {
         client.watchMessages(chat, place)
     }
 
+    /// The library's window for `filter`: a kind's items, or the newest of every kind.
+    public func watchLibrary(_ filter: LibraryFilter, _ place: Place) -> WindowID {
+        client.watchLibrary(filter, place)
+    }
+
     public func move(_ window: WindowID, _ place: Place) {
         client.move(window, place)
     }
@@ -295,6 +300,9 @@ public final class Jawd {
         }
         for (window, update) in frame.messages.sorted(by: { $0.key < $1.key }) {
             out.append(.messages(window, update))
+        }
+        for (window, update) in frame.library.sorted(by: { $0.key < $1.key }) {
+            out.append(.library(window, update))
         }
         // After the windows, which may bring in the chats it's for.
         if let typing = frame.typing { out.append(.typing(typing)) }
@@ -610,6 +618,7 @@ public enum JawUpdate: Sendable {
     case link(LinkStep)
     case chats(WindowID, Update<ChatRow>)
     case messages(WindowID, Update<MessageRow>)
+    case library(WindowID, Update<LibraryRow>)
     /// Who's typing in each chat the windows show, all of it as it is now: a chat left out has
     /// nobody typing.
     case typing(Typists)

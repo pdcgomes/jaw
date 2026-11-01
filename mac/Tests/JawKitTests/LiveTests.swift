@@ -198,6 +198,52 @@ struct LiveTests {
                 "and the cancel")
     }
 
+    @Test func `the made-up account's library: each kind's newest, a photo window's previews under jawd's root, and a page by keyset`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let jawd = Jawd(socket: demo.socket, client: "jaw-mac-live", version: "0", focus: false) { _ in }
+        jawd.start()
+        defer { jawd.close() }
+        let every = jawd.watchLibrary(LibraryFilter(), .top(24))
+        let photo = jawd.watchLibrary(LibraryFilter(kind: .photo), .top(240))
+        var all = Library<LibraryRow>(place: .top(24)), photos = Library<LibraryRow>(place: .top(240))
+        var moves = 0
+        func until(seconds: Double = 30, _ done: () -> Bool) async -> Bool {
+            let end = Date().addingTimeInterval(seconds)
+            while Date() < end {
+                for case let .library(w, update) in jawd.drain() {
+                    if w == every { all.apply(update) }
+                    if w == photo {
+                        photos.apply(update)
+                        if update.moved?.place.around != .top, update.moved != nil { moves += 1 }
+                    }
+                }
+                if done() { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return done()
+        }
+        let kinds: Set<LibraryKind> = [.photo, .voice, .file, .link]
+        #expect(await until { kinds.isSubset(of: Set(all.list.map(\.kind))) && kinds.allSatisfy { (all.counts?[$0] ?? 0) > 0 } },
+                "a photo, a voice message, a file and a link: \(all.list.map(\.kind)), \(String(describing: all.counts))")
+        #expect(!all.older, "every kind's window isn't paged")
+        #expect(all.list.first { $0.kind == .file }?.file?.name == "sintra-saturday.txt")
+        #expect(all.list.first { $0.kind == .file }?.file?.type == "TXT")
+        #expect(all.list.first { $0.kind == .link }?.link?.host == "www.ipma.pt")
+
+        let lake = "3EB0DEMO00000008"
+        #expect(await until { photos.get(lake)?.media.map { $0.isHere && $0.preview(256) != nil && $0.preview(768) != nil } ?? false },
+                "the lake comes here with its previews: \(String(describing: photos.get(lake)?.media))")
+        let media = try #require(photos.get(lake)?.media)
+        for path in [media.path, media.preview(256), media.preview(768), media.thumbnail].compactMap(\.self) {
+            #expect(FileManager.default.fileExists(atPath: demo.home + "/" + path), "\(path) is under jawd's root")
+        }
+        jawd.move(photo, .around(lake, before: 0, after: 120))
+        #expect(await until { moves == 1 }, "the page around the lake lands")
+        #expect(photos.place == .around(lake, before: 0, after: 120) && photos.list.map(\.id) == [lake] && !photos.older,
+                "the lake and what's older, none twice: \(photos.list.map(\.id))")
+    }
+
     @Test func `find answers from a real jawd's index`() async throws {
         let demo = try DemoJawd()
         defer { demo.stop() }

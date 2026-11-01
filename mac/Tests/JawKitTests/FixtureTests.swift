@@ -37,6 +37,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "find": .find
         case "chats.watch": .chats
         case "messages.watch", "watch.move": .messages
+        case "library.watch": .library
         case "send.text", "send.poll": .reply(.sent)
         case "chat.start": .reply(.chat)
         case "message.info": .reply(.info)
@@ -49,7 +50,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         let value = try incoming(name, want)
         switch value {
         case .skip, .bad: Issue.record("\(name) doesn't decode: \(value)")
-        case let .push(method, _) where ["chats", "messages", "typing", "resync", "connection", "notice", "link"].contains(method):
+        case let .push(method, _) where ["chats", "messages", "library", "typing", "resync", "connection", "notice", "link"].contains(method):
             Issue.record("\(name) decodes only as an untyped push")
         default: break
         }
