@@ -969,8 +969,9 @@ extension AppModel {
         }
     }
 
-    /// media.save's answer: said in the status line, shown in the Finder when that was asked, or
-    /// handed to the drag's promise.
+    /// media.save's answer: handed to the drag's promise, which quarantines the file it puts where
+    /// it was dropped; or the copy quarantined the same way, as jawd doesn't yet (the Mac design's
+    /// P13), then said in the status line and shown in the Finder when that was asked.
     func savedAnswer(_ ticket: String, _ message: String, _ path: String?, _ why: String?) {
         let asked = saving.removeValue(forKey: ticket)
         if let done = asked?.done {
@@ -978,6 +979,7 @@ extension AppModel {
         }
         guard let path else { return say("not saved: \(why ?? "jawd didn't say why")", warn: true) }
         let url = URL(fileURLWithPath: path)
+        try? Opened.handOver(url, readOnly: false)
         saved[message] = url
         say(saved: url)
         if asked?.reveal == true { NSWorkspace.shared.activateFileViewerSelecting([url]) }
