@@ -706,6 +706,24 @@ async fn a_closed_communitys_last_is_the_newest_of_its_groups_messages_as_an_ope
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_closed_communitys_last_is_an_open_ones_when_two_groups_newest_messages_share_a_millisecond() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![
+        person(RUI, "Rui"),
+        community(BAIRRO, "Bairro"),
+        group(FESTA, "Festa", BAIRRO),
+        group(XADREZ, "Xadrez", BAIRRO),
+        said(FESTA, "f1", AT + 10),
+        said(XADREZ, "x1", AT + 10),
+    ])
+    .await;
+    let mut watcher = bed.watcher(64);
+    let open = Held::top(&mut watcher, "all").await;
+    let closed = Held::watch(&mut watcher, json!({"folder": "all", "around": "top", "after": 50, "open": []})).await;
+    assert_eq!(closed.row(BAIRRO)["last"], open.row(BAIRRO)["last"], "closed as open, in a tie");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_community_sits_among_the_pinned_at_its_own_place_above_its_groups() {
     let bed = Bed::new(brisk());
     bairro(&bed).await;
