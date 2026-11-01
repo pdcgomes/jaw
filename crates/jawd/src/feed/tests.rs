@@ -183,7 +183,7 @@ pub(super) struct Watcher {
     pub(super) windows: HashMap<String, Model>,
     seen: i64,
     resynced: Vec<String>,
-    batches: HashMap<String, usize>,
+    pub(super) batches: HashMap<String, usize>,
     /// Who it holds as typing, by chat, as the protocol keeps it, and the `typing` pushes it took,
     /// in order, each after the window pushes that came before it.
     typing: BTreeMap<String, Value>,
@@ -277,7 +277,7 @@ impl Watcher {
     }
 
     /// Runs the client for `long`, taking what it sends.
-    async fn run_for(&mut self, long: Duration) {
+    pub(super) async fn run_for(&mut self, long: Duration) {
         let until = Instant::now() + long;
         while let Ok(ready) = tokio::time::timeout_at(until.into(), self.client.ready()).await {
             if let Ready::Changes(Ok(changes)) = &ready {
@@ -5163,6 +5163,34 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     assert_eq!(told, [GROUP], "only the group's chat list is told, once");
     assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the two changes");
     assert!(committed < seq);
+}
+
+/// A photo in the open chat reaches its conversation before a library window of photos across
+/// chats that was watched first, as a lone message reaches it before the chat list.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_in_the_open_chat_reaches_its_conversation_before_the_library() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![Change::Message(text(OPEN, "first", 1_000, Some(OPEN), "hi"))]).await;
+    let mut watcher = bed.watcher(64);
+    // Watched first, so it would be read first if the order of watching decided.
+    let library = watcher.watch("library.watch", json!({"kind": "photo", "around": "top", "after": 20})).await;
+    let messages = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 50})).await;
+    let lone = Message { live: true, text: None, ..photo(OPEN, "lone", 2_000, OPEN) };
+    let seq = bed.apply(vec![Change::Message(lone)]).await;
+    while watcher.seen < seq || watcher.client.pending() {
+        let ready =
+            tokio::time::timeout(Duration::from_secs(10), watcher.client.ready()).await.expect("nothing happened");
+        if let Ready::Changes(Ok(changes)) = &ready {
+            watcher.seen = watcher.seen.max(changes.seq);
+        }
+        watcher.client.handle(ready).await;
+    }
+    let mut order = Vec::new();
+    while let Ok(line) = watcher.lines.try_recv() {
+        let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else { panic!("a reply among the pushes") };
+        order.push(push.params["watch"].as_str().unwrap().to_string());
+    }
+    assert_eq!(order, [messages, library]);
 }
 
 /// A photo of `sender`'s in `chat`, captioned.

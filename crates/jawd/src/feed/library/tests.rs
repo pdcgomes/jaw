@@ -923,3 +923,81 @@ fn a_file_says_what_it_is_by_its_extension_or_its_mime_type() {
     assert_eq!(mime_type("application/x-7z"), Some("7Z".into()));
     assert_eq!(mime_type("application/vnd.openxmlformats-officedocument.wordprocessingml.document"), None);
 }
+
+/// A chat renamed with nothing else changing reaches every library window holding one of its
+/// items, across chats as well as in it, as a fresh watch has it.
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_are_told_when_a_chat_their_items_are_in_is_renamed_alone() {
+    let bed = Bed::new(brisk());
+    shared(&bed).await;
+    bed.store.indexed().await.unwrap();
+    let mut w = bed.watcher(64);
+    let wants = [
+        json!({"kind": "photo", "around": "top", "after": 10}),
+        json!({"kind": "all", "around": "top", "after": 3}),
+        json!({"kind": "video", "person": "person:2", "around": "top", "after": 10}),
+        json!({"kind": "photo", "chat": CLIMBING, "around": "top", "after": 10}),
+    ];
+    let mut watched = Vec::new();
+    for want in &wants {
+        watched.push((w.watch("library.watch", want.clone()).await, want.clone()));
+    }
+    let renamed = Chat { id: CLIMBING.into(), name: Some("Escalada".into()), ..Chat::default() };
+    let seq = bed.apply(vec![Change::Chat(renamed)]).await;
+    w.settle(seq).await;
+    for (watch, want) in &watched {
+        let held = &w.windows[watch];
+        same(held, &fresh(&bed, want).await, &format!("renamed alone, {want}"));
+        let names: Vec<Value> =
+            held.ordered().iter().filter(|row| row["chat"] == CLIMBING).map(|row| row["chat_name"].clone()).collect();
+        assert!(!names.is_empty() && names.iter().all(|name| name == "Escalada"), "{want}: {names:?}");
+    }
+}
+
+/// A library window read again when nothing it holds changed is sent nothing, whichever window it
+/// is: total, older and counts go only when they change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_read_again_with_nothing_it_holds_changed_is_sent_nothing() {
+    let bed = Bed::new(brisk());
+    shared(&bed).await;
+    bed.store.indexed().await.unwrap();
+    let mut w = bed.watcher(64);
+    let wants = [
+        json!({"kind": "photo", "around": "top", "after": 10}),
+        json!({"kind": "photo", "around": "top", "after": 1}),
+        json!({"kind": "all", "around": "top", "after": 3}),
+        json!({"kind": "video", "person": "person:2", "around": "top", "after": 10}),
+        json!({"kind": "file", "chat": FAMILIA, "around": "top", "after": 10}),
+        json!({"kind": "photo", "text": "praia", "around": "top", "after": 10}),
+        json!({"kind": "link", "around": "top", "after": 10}),
+    ];
+    let mut watched = Vec::new();
+    for want in &wants {
+        watched.push((w.watch("library.watch", want.clone()).await, want.clone()));
+    }
+    let reads = bed.feed.reads();
+    // A text message with no link in Família's chat, and someone no row names: every window is read
+    // again, across chats for any message, Família's for its own, and all of them for anyone, and
+    // nothing any of them holds changes.
+    bed.apply(vec![
+        Change::Message(item(FAMILIA, "t9", 20_000, Some(ANA), "text", Some("até logo"))),
+        Change::Person(Person {
+            jids: vec!["351910000009@s.whatsapp.net".into()],
+            name: Some("Zé".into()),
+            ..Person::default()
+        }),
+    ])
+    .await;
+    bed.store.indexed().await.unwrap();
+    w.settle(bed.feed.seq() as i64).await;
+    w.run_for(crate::feed::tests::ms(200)).await;
+    assert!(
+        bed.feed.reads() >= reads + wants.len() as u64,
+        "every window was read again: {} reads",
+        bed.feed.reads() - reads
+    );
+    for (watch, want) in &watched {
+        assert_eq!(w.batches.get(watch), None, "{want}: a push with nothing in it changed");
+        same(&w.windows[watch], &fresh(&bed, want).await, &format!("{want}"));
+    }
+}
