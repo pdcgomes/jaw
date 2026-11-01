@@ -128,6 +128,7 @@ The terminal's Ctrl-R records with a live level; Enter sends, and Esc cancels.
 The Mac draws someone typing as WhatsApp does (0de10c7): a bubble after the newest message, and the header's counting dots. jawd's typing and the terminal's landed on 30 October (9b3fbdf4..7e047803), moving the socket to protocol 2, whose chat rows carry no typing; presence is being built on `presence`.
 
 - **Typing, done** ([its plan](2026-10-30-jaw-mac-typing-plan.md)): JawKit keeps who's typing as each watch's answer and the `typing` push say it, as jaw-client keeps it, and the bubble, the header's who's typing, the status line's left half and the chat list's row follow it, in the terminal's words, the names first in a group.
+- **The roster too:** since step 2.1 the roster reads who's typing or recording in each person's one-to-one chat from the app's typing map, which the panes and the chat list read (`AppModel.rosterTyping()` into `RosterController.typing`), so it shows someone typing while a list or a pane shows their chat, as jawd sends typing only for the chats a window shows.
 - **Presence, next:** once jawd serves it, the header and the status line's left half show online or last seen, faint where jawd isn't following someone, from the answer's `presence` and the `presence` push, as the typing plan's last section says.
 - **The check:** the `presence` push; the `typing` push's row is out.
 
