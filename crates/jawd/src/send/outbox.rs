@@ -402,9 +402,12 @@ fn pause(inner: &Inner, attempts: i64) -> Duration {
 /// with a file waits, in its place in its chat's order, until its file is uploaded; one that waited
 /// so in this run can't have gone before it, whenever it was queued, since nothing sends it unready.
 async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<AtomicBool>) -> Next {
-    // Taken before the row is read, so a copy ready after it is a change still to see.
+    // Taken before the row is read, so a copy ready after it is a change still to see, and so is a
+    // commit that takes the row, as any deletion of its message takes an HD copy's.
     let mut copies = inner.copies.clone();
     copies.mark_unchanged();
+    let mut taken = inner.store.copies_taken();
+    taken.mark_unchanged();
     let mut connected = inner.connected.subscribe();
     if !*connected.borrow_and_update() {
         return Next::After(Box::pin(async move {
@@ -455,8 +458,19 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
         Some("failed") => return Next::Done,
         Some(_) => {
             waited.store(true, Ordering::Relaxed);
+            #[cfg(test)]
+            inner.waiting_for_copies.fetch_add(1, Ordering::SeqCst);
             return Next::After(Box::pin(async move {
-                let _ = tokio::time::timeout(COPY_LOOK_AGAIN, copies.changed()).await;
+                let changed = async {
+                    tokio::select! {
+                        Ok(()) = copies.changed() => {}
+                        Ok(()) = taken.changed() => {}
+                        else => std::future::pending().await,
+                    }
+                };
+                let _ = tokio::time::timeout(COPY_LOOK_AGAIN, changed).await;
+                #[cfg(test)]
+                inner.waiting_for_copies.fetch_sub(1, Ordering::SeqCst);
             }));
         }
     }

@@ -371,12 +371,7 @@ async fn delete_for_everyone(inner: &Arc<Inner>, target: &Target, key: Option<St
         ..Default::default()
     };
     let raw = e2e::Message { protocol_message: Some(Box::new(protocol)), ..Default::default() };
-    let done = act(inner, target, Amendment::Revoke, at, raw, key, "keep the deletion").await?;
-    // The HD copy it took may be at the front of the chat's queue, waiting for its file.
-    if let Some(media) = &inner.media {
-        media.copies_withdrawn();
-    }
-    Ok(done)
+    act(inner, target, Amendment::Revoke, at, raw, key, "keep the deletion").await
 }
 
 /// The app-state mutation that deletes a message for you on your other devices, as WhatsApp's own

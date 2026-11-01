@@ -1938,3 +1938,36 @@ async fn a_video_whose_hd_copy_a_deletion_takes_while_its_sd_copy_is_made_never_
     assert!(!made.is_empty() && made.iter().all(|v| v == "sd"), "the HD copy whose rows had gone was made: {made:?}");
     rig.world.gate_uploads(false);
 }
+
+/// The round-two audit's P6: a deletion that takes the HD copy waiting for its file at the front of
+/// its chat's queue, from your phone, from history or for you, wakes its row, so what's sent to the
+/// chat after it goes at once, rather than once the row looks again, up to 30 s later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_taking_the_hd_copy_at_the_front_of_its_chats_queue_lets_what_comes_after_go_at_once() {
+    for deleted in ["from your phone", "from history", "for you"] {
+        let home = tempfile::tempdir().unwrap();
+        let picked = tempfile::tempdir().unwrap();
+        let rig = Rig::on(home.path(), world()).await;
+        let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+        let waiting = until(Duration::from_secs(30), || rig.sending.waiting_for_copies() > 0).await;
+        assert!(waiting, "deleted {deleted}: the HD copy's row waits for its upload, held half sent");
+        if deleted == "for you" {
+            rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+        } else {
+            let lane = if deleted == "from history" { Lane::Background } else { Lane::Live };
+            rig.store.apply(lane, vec![revoked_from_your_phone(&id)]).await.unwrap();
+        }
+        let hd: i64 =
+            rig.query(|db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?)).await;
+        assert_eq!(hd, 0, "deleted {deleted}, its HD copy is taken");
+        let woken = until(Duration::from_secs(5), || rig.sending.waiting_for_copies() == 0).await;
+        assert!(woken, "deleted {deleted}, the HD copy's row still waits for the copy it no longer has");
+        let started = std::time::Instant::now();
+        let text = rig.call("send.text", json!({ "chat": ANA, "text": "after" })).await.unwrap();
+        let text = text["message"].as_str().unwrap().to_string();
+        rig.until(&text, "sent", sent).await;
+        let took = started.elapsed();
+        rig.world.gate_uploads(false);
+        assert!(took < Duration::from_secs(10), "deleted {deleted}, a text sent after it waited {took:?}");
+    }
+}

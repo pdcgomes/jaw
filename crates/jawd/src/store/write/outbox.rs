@@ -3691,6 +3691,8 @@ mod tests {
             Some(true),
             "once the merge is known, the sender withdraws the HD copy of the copy merging with the one being deleted"
         );
+        let mut taken = store.copies_taken();
+        taken.mark_unchanged();
         merged(&store).await;
         let revokes = on(&store, |db| {
             Ok(db.query_row(
@@ -3702,6 +3704,10 @@ mod tests {
         .await;
         assert_eq!(revokes, 1, "the message kept is the one your deletion is on its way for");
         assert_eq!(hd_left(&store).await, 0, "and its HD copy, folded into it, is left neither to go nor to retry");
+        assert!(
+            taken.has_changed().unwrap(),
+            "the fold that took the HD copy says so, for whatever waits for its file"
+        );
     }
 
     /// As the test above, but the merge is known before you delete the message, from either chat:
@@ -3719,8 +3725,11 @@ mod tests {
             store.apply(Lane::Live, vec![acting(aimed, "p1", "x1", Amendment::Revoke, 5_000)]).await.unwrap();
             assert_eq!(hd_left(&store).await, 2, "aimed at {aimed}, the deletion is done to the copy kept");
             assert_eq!(withdraws(&store, h1).await, Some(true), "aimed at {aimed}, the sender withdraws the HD copy");
+            let mut taken = store.copies_taken();
+            taken.mark_unchanged();
             store.apply(Lane::Live, vec![Change::Outbox(Step::Withdrawn { outbox: h1 })]).await.unwrap();
             assert_eq!(hd_left(&store).await, 0, "aimed at {aimed}, the writer takes it as it withdraws it");
+            assert!(taken.has_changed().unwrap(), "aimed at {aimed}, and says so, for whatever waits for its file");
             merged(&store).await;
             assert_eq!(hd_left(&store).await, 0, "aimed at {aimed} ({n}), nothing of it is back after the fold");
         }

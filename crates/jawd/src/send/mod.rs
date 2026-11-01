@@ -146,6 +146,9 @@ struct Inner {
     /// Stops the next `send.media` between keeping its files and writing them, as `pausing` does.
     #[cfg(test)]
     attaching: Pause,
+    /// How many attempts wait for their copy, having read their rows.
+    #[cfg(test)]
+    waiting_for_copies: std::sync::atomic::AtomicUsize,
 }
 
 /// Where a test stops jawd the next time it gets there, with what it notifies as it stops and
@@ -204,6 +207,8 @@ impl Sending {
             acting: Pause::default(),
             #[cfg(test)]
             attaching: Pause::default(),
+            #[cfg(test)]
+            waiting_for_copies: Default::default(),
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -244,6 +249,12 @@ impl Sending {
         let pause = (Arc::default(), Arc::default());
         *self.inner.attaching.lock().expect("the test's pause") = Some(pause.clone());
         pause
+    }
+
+    /// How many attempts wait for their copy, having read their rows.
+    #[cfg(test)]
+    pub(crate) fn waiting_for_copies(&self) -> usize {
+        self.inner.waiting_for_copies.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Whether WhatsApp says who's typing now: it can be reached, and has been told you're online,
