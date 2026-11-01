@@ -2343,13 +2343,15 @@ fn located(db: &Connection, stamps: &mut Stamps, chat_jid: &str, id: &str) -> Re
 
 /// Folds message `gone` into `kept`, the same message in the chat being kept: a later edit, a star,
 /// the live envelope, a raw protobuf, its reactions, receipts, votes, answers and media go to the
-/// kept one, a deletion for everyone sticks, and `gone` is removed.
+/// kept one, a deletion for everyone sticks, the sooner time to go and either's view-once mark are
+/// kept, with its opening, and `gone` is removed.
 fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
     let seq = stamps.seq(MESSAGE, Some(kept));
     // An event's edit says where and when as well as what it's called. A kept copy deleted for
     // everyone takes none of the other's words, nor its raw protobuf, which the deletion cleared.
     db.prepare_cached(
         "UPDATE messages AS k SET
+            expires_at = iif(g.expires_at < coalesce(k.expires_at, g.expires_at + 1), g.expires_at, k.expires_at),
             text = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.text, k.text),
             spans = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans),
             summary = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary),
@@ -2364,6 +2366,17 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     )?
     .execute(params![kept, gone, seq, STATUS_RANKS])?;
     stamps.record(db, MESSAGE, kept, Some(chat), seq)?;
+    // A copy only ever brings a message's time sooner, and never makes a view-once message an
+    // ordinary one: one to open once says only what it is, whichever copy said more, and an
+    // opening of the copy that goes is the kept one's, so closing it erases it.
+    let (kind, once, expires_at): (String, bool, Option<i64>) =
+        db.prepare_cached(FOLDED)?.query_row([kept, gone], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    stamps.expires(expires_at);
+    if once && convert::once_kind(&kind) {
+        db.prepare_cached("UPDATE messages SET view_once = 1 WHERE n = ?1")?.execute([kept])?;
+        expiry::marked(db, stamps, kept)?;
+    }
+    db.prepare_cached(OPENED_FOLDED)?.execute([kept, gone])?;
     db.prepare_cached(
         "INSERT INTO reactions (message, sender, emoji, at, mine) SELECT ?1, sender, emoji, at, mine FROM reactions
             WHERE message = ?2
@@ -2427,6 +2440,13 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     // The send that went to the kept copy may be one nothing can send again.
     outbox::tidied(db, stamps, kept)
 }
+
+/// Folded message ?1's kind, whether it or its copy ?2 is marked view-once, and when it goes.
+const FOLDED: &str =
+    "SELECT k.kind, k.view_once OR g.view_once, k.expires_at FROM messages k, messages g WHERE k.n = ?1 AND g.n = ?2";
+/// The opening of message ?2, folded into ?1, as ?1's, going at the sooner time if both were opened.
+const OPENED_FOLDED: &str = "INSERT INTO opened (message, until) SELECT ?1, until FROM opened WHERE message = ?2
+    ON CONFLICT (message) DO UPDATE SET until = min(until, excluded.until)";
 
 /// How many bits of a message's t count messages within one millisecond.
 pub(super) const SAME_MS_BITS: u32 = 20;

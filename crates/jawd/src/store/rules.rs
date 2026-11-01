@@ -295,6 +295,75 @@ async fn merged(store: &Store) {
     panic!("the merge never finished");
 }
 
+/// In Ana's chat `chat`, a message and a photo, each as one copy of them says: with a time to go
+/// and to open once, or with no time and as an ordinary photo, its caption edited since.
+fn copies(chat: &str, timed: bool) -> Vec<Change> {
+    const LATER: i64 = 4_102_444_800_000;
+    let goes = Message { expires_at: timed.then_some(LATER), ..message(chat, "goes", AT, "gone in time") };
+    let photo = Message { kind: "image", ..message(chat, "once", AT + 1, "") };
+    let photo = if timed {
+        Message { text: None, summary: "View once photo".into(), view_once: true, ..photo }
+    } else {
+        let caption = "a caption";
+        Message {
+            text: Some(caption.into()),
+            spans: Some(serde_json::json!([{ "t": "text", "s": caption }]).to_string()),
+            summary: caption.into(),
+            edited_at: Some(AT + 50),
+            raw: Some(Packed::new(b"the photo and its caption")),
+            ..photo
+        }
+    };
+    vec![Change::Message(goes), Change::Message(photo)]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_folded_into_one_keep_the_sooner_time_to_go_the_view_once_mark_and_its_opening() {
+    for (timed, plain) in [(ANA_LID, ANA), (ANA, ANA_LID)] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let mut changes = copies(timed, true);
+        changes.extend(copies(plain, false));
+        apply(&store, changes).await;
+        let (opened, until) = (
+            query(&store, move |db| {
+                Ok(db.query_row(
+                    "SELECT m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = 'once'",
+                    [timed],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await,
+            AT + 3_600_000_000,
+        );
+        let open = expiry::Once::Opened { n: opened, until, jid: timed.into(), id: "once".into(), receipt: vec![] };
+        assert_eq!(apply(&store, vec![Change::Once(open)]).await.changed, 1);
+        joined(&store).await;
+        merged(&store).await;
+        let kept: (Option<i64>, bool, Option<String>, Option<String>, String, Option<i64>) = query(&store, |db| {
+            Ok(db.query_row(
+                "SELECT g.expires_at, o.view_once, o.text, o.spans, o.summary, p.until
+                FROM messages g JOIN messages o ON o.id = 'once' LEFT JOIN opened p ON p.message = o.n
+                WHERE g.id = 'goes'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?)
+        })
+        .await;
+        assert_eq!(
+            kept,
+            (Some(4_102_444_800_000), true, None, None, "View once photo".into(), Some(until)),
+            "the copies with a time and the mark under {timed}, the others under {plain}"
+        );
+        let once = n_of(&store, "once").await;
+        assert_eq!(apply(&store, vec![Change::Once(expiry::Once::Closed { n: once })]).await.changed, 1);
+        let left: i64 =
+            query(&store, |db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'once'", [], |r| r.get(0))?))
+                .await;
+        assert_eq!(left, 0, "closing it erases it, opened under {timed}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn what_names_a_message_still_in_a_chat_being_merged_finds_it_there() {
     let home = tempfile::tempdir().unwrap();
