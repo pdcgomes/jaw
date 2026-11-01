@@ -5513,3 +5513,117 @@ async fn a_conversation_is_told_its_persons_presence_by_its_answer_and_by_a_push
     assert_eq!(watcher.presence_told, wants, "nothing told once it's closed");
     assert!(watcher.presences.is_empty(), "{:?}", watcher.presences);
 }
+
+/// The person jaw.db knows `jid` as, by their n.
+async fn person_by_jid(bed: &Bed, jid: &'static str) -> i64 {
+    bed.store
+        .reads()
+        .query(Priority::Interactive, move |db| {
+            Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid], |r| r.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+/// A conversation watched again from `since`, as after a reconnect, says its person's presence as a
+/// fresh watch does, though none of its rows changed meanwhile (the presence audit's T2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_watched_again_from_since_says_its_persons_presence_as_a_fresh_watch_does() {
+    use crate::store::folders::{Presence, Step};
+    let (bed, _typing, _hearing) = typing_bed(NEVER).await;
+    let ana = person_by_jid(&bed, OPEN).await;
+    let conversation = json!({"chat": OPEN, "around": "newest", "before": 5});
+    let held = bed.watcher(64).call("messages.watch", conversation.clone()).await.unwrap();
+    assert_eq!(held["presence"], presence_of(ana, "hidden", None, false), "{held}");
+    let have: Vec<Value> = held["rows"].as_array().unwrap().iter().map(|row| row["id"].clone()).collect();
+
+    // While its interface is gone, jawd follows her and she comes online, which moves none of its rows.
+    let following = Step::Following { people: vec![ana] };
+    let online = Step::Presence { jid: OPEN.into(), state: Presence::Online };
+    bed.apply(vec![Change::Folders(following), Change::Folders(online)]).await;
+
+    // Back, it watches again from `since` with the rows it holds; a fresh interface watches the same.
+    let mut again = conversation.clone();
+    again["since"] = held["seq"].clone();
+    again["have"] = json!(have);
+    let again = bed.watcher(64).call("messages.watch", again).await.unwrap();
+    let fresh = bed.watcher(64).call("messages.watch", conversation).await.unwrap();
+    assert_eq!(fresh["presence"], presence_of(ana, "online", None, true), "a fresh watch says how she is: {fresh}");
+    assert_eq!(again["presence"], fresh["presence"], "and so does one from since: {again}");
+    assert_eq!(again["rows"], json!([]), "none of the rows it holds changed since: {again}");
+}
+
+/// A move of a one-to-one chat's conversation answers with its person's presence, as its watch does,
+/// faint while jawd isn't following them (the presence audit's T3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversations_move_answers_with_its_persons_presence_as_its_watch_does() {
+    use crate::store::folders::{Presence, Step};
+    let (bed, _typing, _hearing) = typing_bed(NEVER).await;
+    let ana = person_by_jid(&bed, OPEN).await;
+    let seen = 1_792_000_000_000;
+    bed.apply(vec![Change::Folders(Step::Presence { jid: OPEN.into(), state: Presence::Away(Some(seen)) })]).await;
+    let mut watcher = bed.watcher(64);
+    let conversation = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 5})).await;
+    let faint = presence_of(ana, "seen", Some(seen), false);
+    assert_eq!(watcher.presences.get(OPEN), Some(&faint), "the watch's answer");
+    let moved = watcher.call("watch.move", json!({"watch": conversation, "around": "newest", "before": 2})).await;
+    let moved = moved.unwrap();
+    assert_eq!(moved["presence"], faint, "the move's answer: {moved}");
+    assert_eq!(watcher.presences.get(OPEN), Some(&faint), "which its interface holds");
+}
+
+/// Runs a connection for `long` while its interface reads nothing.
+async fn unread(watcher: &mut Watcher, long: Duration) {
+    let until = Instant::now() + long;
+    while let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await {
+        if let Ready::Changes(Ok(changes)) = &ready {
+            watcher.seen = watcher.seen.max(changes.seq);
+        }
+        watcher.client.handle(ready).await;
+    }
+}
+
+/// A presence push that finds its connection's queue full waits for room, as window updates do,
+/// and goes then as the person is: one read of her conversation finds her message, whose push takes
+/// the queue's only room, and her coming online, followed, which waits (the presence audit's T4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_presence_push_that_finds_no_room_waits_for_it_and_goes_as_they_are_then() {
+    use crate::store::folders::{Presence, Step};
+    // Its window isn't dropped for falling behind while it reads nothing.
+    let (bed, _typing, _hearing) = typing_bed_paced(NEVER, Timing { behind: Duration::from_secs(60), ..brisk() }).await;
+    let ana = person_by_jid(&bed, OPEN).await;
+    let mut watcher = bed.watcher(1);
+    watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 5})).await;
+    assert_eq!(watcher.presences.get(OPEN), Some(&presence_of(ana, "hidden", None, false)));
+    // Its connection takes all that was written before, up to a message in another chat, so the
+    // next read of her conversation is the one that finds what follows.
+    let elsewhere = bed.apply(vec![Change::Message(text(&person(5), "other", 30_000, Some(&person(5)), "olá"))]).await;
+    watcher.settle(elsewhere).await;
+    let came = text(OPEN, "now", 20_000, Some(OPEN), "cheguei");
+    let following = Step::Following { people: vec![ana] };
+    let online = Step::Presence { jid: OPEN.into(), state: Presence::Online };
+    let seq = bed.apply(vec![Change::Message(came), Change::Folders(following), Change::Folders(online)]).await;
+    // Its connection takes the change while its interface reads nothing.
+    let end = Instant::now() + TYPED;
+    while watcher.seen < seq || watcher.lines.is_empty() {
+        assert!(Instant::now() < end, "the change was never taken");
+        unread(&mut watcher, ms(20)).await;
+    }
+    // Long enough for the presence it owes to find no room.
+    unread(&mut watcher, ms(300)).await;
+    assert_eq!(watcher.lines.len(), 1, "its queue is full");
+    // It reads the message, and is told she's online.
+    let online = presence_of(ana, "online", None, true);
+    let end = Instant::now() + TYPED;
+    while watcher.presences.get(OPEN) != Some(&online) {
+        assert!(Instant::now() < end, "its interface was left with {:?}: {:?}", watcher.presences, watcher.pushes);
+        if let Ok(line) = watcher.lines.try_recv() {
+            watcher.take(&line);
+        }
+        if let Ok(ready) = tokio::time::timeout(ms(10), watcher.client.ready()).await {
+            watcher.client.handle(ready).await;
+        }
+    }
+    assert_eq!(watcher.pushes.first().map(|(method, _)| method.as_str()), Some("messages"), "{:?}", watcher.pushes);
+    assert_eq!(watcher.presence_told, [(OPEN.to_string(), online)], "her presence once there was room");
+}

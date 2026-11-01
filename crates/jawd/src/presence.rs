@@ -767,6 +767,120 @@ mod tests {
         }
     }
 
+    /// Presence follows connections as sync's own loop counts them, its reach read as jawd's start
+    /// reads it: a keepalive timeout and its restore keep whom the connection follows, asking for
+    /// nobody again and keeping who was around; Connected after a timeout, and a drop and its
+    /// reconnect, are new connections, which forget who was around and ask for everyone again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_presence_follows_connections_as_syncs_loop_counts_them() {
+        use pb::connection::State;
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let named = (0..5).map(|n| {
+            Change::Person(Person { jids: vec![jid(n)], name: Some(format!("Person {n:03}")), ..Person::default() })
+        });
+        store.apply(Lane::Live, named.collect()).await.unwrap();
+        let engine = DemoEngine::with(vec![crate::engine::demo::connected()]);
+        let world = engine.world();
+        let (events, _engine_events) = mpsc::channel(1024);
+        let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+        let feed = Feed::start(store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+        let (out, _lines) = mpsc::channel(64);
+        let mut client = feed.client(out);
+        let watched = serde_json::json!({"folder": "all", "around": "top", "after": 10});
+        client.call("roster.watch", watched).await.unwrap();
+        let (_focus, focused) = watch::channel(true);
+        let (pushes, _) = broadcast::channel(256);
+        let live: crate::sync::Shared = Arc::new(Mutex::new(crate::sync::Live::default()));
+        let connection = live.clone();
+        let reach = Arc::new(move || {
+            let live = connection.lock().expect("live state");
+            (reachable(live.connection.state), live.ended())
+        });
+        let connections = live.lock().unwrap().connections();
+        let looking = Looking { focused, pushes: pushes.subscribe(), reach, connections };
+        let limits = Limits { per_minute: 100, ..Limits::default() };
+        let following = Following::default();
+        following.start(store.clone(), Some(supervisor), feed.clone(), looking, limits);
+        let (say, incoming) = mpsc::channel(64);
+        let running = tokio::spawn(crate::sync::run(
+            incoming,
+            store.clone(),
+            live.clone(),
+            pushes.clone(),
+            None,
+            home.path().to_path_buf(),
+            following.clone(),
+            crate::feed::Typing::default(),
+        ));
+        let event = |state: State| {
+            let said = pb::Connection {
+                state: state as i32,
+                jid: "351910000001:12@s.whatsapp.net".into(),
+                ..Default::default()
+            };
+            crate::engine::Incoming {
+                event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Connection(said)) },
+                ack: None,
+            }
+        };
+        let count = |sql: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .reads()
+                    .query(crate::work::Priority::Interactive, move |db| {
+                        Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let followed = || count("SELECT count(*) FROM people WHERE followed");
+        let around = || count("SELECT count(*) FROM people WHERE presence = 'online'");
+        async fn until_n<F: std::future::Future<Output = i64>>(what: &str, n: i64, mut now: impl FnMut() -> F) {
+            let began = Instant::now();
+            while now().await != n {
+                assert!(began.elapsed() < Duration::from_secs(20), "{what} didn't happen");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        say.send(event(State::Connecting)).await.unwrap();
+        say.send(event(State::Connected)).await.unwrap();
+        until("the five asked for", || asked(&world).len() >= 5).await;
+        until_n("the five followed", 5, followed).await;
+        following.heard(pb::PresenceUpdate { jid: jid(0), unavailable: false, last_seen_ms: 0 });
+        until_n("Person 000 around", 1, around).await;
+
+        // A keepalive timeout and its restore: the same connection.
+        say.send(event(State::KeepaliveTimeout)).await.unwrap();
+        until_n("nobody known during the timeout", 0, followed).await;
+        assert_eq!(around().await, 1, "who was around stays, faint");
+        say.send(event(State::KeepaliveRestored)).await.unwrap();
+        until_n("the five known again", 5, followed).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(asked(&world).len(), 5, "none asked for again on the same connection");
+        assert_eq!(around().await, 1);
+
+        // A timeout whatsmeow ends by connecting again: a new connection.
+        say.send(event(State::KeepaliveTimeout)).await.unwrap();
+        say.send(event(State::Connected)).await.unwrap();
+        until("the five asked for again on the new connection", || asked(&world).len() >= 10).await;
+        until_n("who was around forgotten on the new connection", 0, around).await;
+        until_n("the five followed on the new connection", 5, followed).await;
+
+        // A drop and its reconnect: a new connection.
+        say.send(event(State::Disconnected)).await.unwrap();
+        say.send(event(State::Connected)).await.unwrap();
+        until("the five asked for again after the drop", || asked(&world).len() >= 15).await;
+        until_n("the five followed after the drop", 5, followed).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(asked(&world).len(), 15, "each asked for once on each connection");
+        running.abort();
+        drop(client);
+    }
+
     /// A keepalive timeout leaves WhatsApp unreachable on the same connection: nobody's known while
     /// it lasts, each keeping the state last heard, and once its pings get through again those the
     /// connection followed are known again at once, none asked for again or counted twice; only a

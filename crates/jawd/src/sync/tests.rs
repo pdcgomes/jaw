@@ -3156,3 +3156,49 @@ async fn what_waits_for_an_event_past_what_its_own_transaction_takes_is_taken_in
     }
     assert_eq!(store.count("openings").unwrap(), 0, "and nothing is left to take");
 }
+
+/// Each end of a connection is counted under the same lock as the state that follows it, so
+/// presence reads the two together: Connecting, Disconnected, StreamReplaced, Connected after a
+/// keepalive timeout, a logout and an engine's stop each end one; a keepalive timeout and its
+/// restore end none, nor does a restore heard late; and the count never moves while the state still
+/// says WhatsApp can be reached, but at the Connected that begins a new connection.
+#[test]
+fn audit_each_connections_end_is_counted_with_its_state_and_a_keepalive_timeout_ends_none() {
+    use pb::connection::State;
+    let event = |state: State| pb::Connection {
+        state: state as i32,
+        jid: "351910000001:12@s.whatsapp.net".into(),
+        ..Default::default()
+    };
+    let reach = |live: &Live| (crate::presence::reachable(live.connection.state), live.ended());
+    let mut live = Live::default();
+    let steps: &[(State, bool, u64)] = &[
+        (State::Connecting, false, 1),
+        (State::Connected, true, 1),
+        (State::KeepaliveTimeout, false, 1),
+        (State::KeepaliveRestored, true, 1),
+        (State::KeepaliveTimeout, false, 1),
+        (State::KeepaliveRestored, true, 1),
+        // whatsmeow ends a timeout that lasts by connecting again, with no Disconnected.
+        (State::KeepaliveTimeout, false, 1),
+        (State::Connected, true, 2),
+        // A drop and its reconnect, with no Connecting between.
+        (State::Disconnected, false, 3),
+        (State::Connected, true, 3),
+        // A restore heard after the word that changed it is let go.
+        (State::KeepaliveRestored, true, 3),
+        (State::StreamReplaced, false, 4),
+        (State::Connecting, false, 5),
+        (State::Connected, true, 5),
+        (State::LoggedOut, false, 6),
+    ];
+    for (n, &(state, reachable, ended)) in steps.iter().enumerate() {
+        apply(&mut live, &event(state));
+        assert_eq!(reach(&live), (reachable, ended), "after step {n}, {state:?}");
+    }
+    let shared: Shared = Arc::new(Mutex::new(live));
+    let (pushes, _) = broadcast::channel(16);
+    restarting(&shared, &pushes);
+    assert_eq!(reach(&shared.lock().unwrap()), (false, 7), "the engine stopping ends one too");
+    assert_eq!(*shared.lock().unwrap().connections().borrow(), 7, "and presence's watch says so");
+}
