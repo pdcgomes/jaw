@@ -920,6 +920,63 @@ async fn a_full_outbox_refuses_it_and_keeps_the_recording() {
     );
 }
 
+/// What's left of message `id` and of anything to send: its rows, the outbox's, and jaw's copies.
+async fn left_of(rig: &Rig, id: &str) -> (i64, i64, i64, Vec<String>) {
+    let id = id.to_string();
+    let (messages, outbox, outgoing) = rig
+        .store
+        .reads()
+        .query(Priority::Interactive, move |db| {
+            let messages: i64 = db.query_row("SELECT count(*) FROM messages WHERE id = ?1", [&id], |r| r.get(0))?;
+            let outbox: i64 = db.query_row("SELECT count(*) FROM outbox", [], |r| r.get(0))?;
+            let outgoing: i64 = db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get(0))?;
+            Ok((messages, outbox, outgoing))
+        })
+        .await
+        .unwrap();
+    (messages, outbox, outgoing, rig.files("media/outgoing"))
+}
+
+/// The ID the stopped recording's message would have: its file's name.
+fn recording_id(rig: &Rig) -> String {
+    let names = rig.recordings();
+    let [name] = names.as_slice() else { panic!("one recording: {names:?}") };
+    name.trim_end_matches(".ogg").to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_bytes_past_their_bound_refuse_it_and_keep_the_recording() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    rig.recorded(&heard).await;
+    {
+        let db = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
+                VALUES ((SELECT n FROM chats WHERE id = '{RUI}'), 'big', 1, 1, 'audio', 1, 'failed', 1);
+            INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
+                VALUES (last_insert_rowid(), '{RUI}', 'big', 'audio', x'', 'failed', 0, 0);
+            INSERT INTO outgoing (outbox, message, variant, kind, source, bytes, state, error)
+                VALUES (last_insert_rowid(), (SELECT n FROM messages WHERE id = 'big'), 'sd', 'audio',
+                    'media/outgoing/big.ogg', 8000000000, 'failed', 'the upload failed');"
+        ))
+        .unwrap();
+    }
+    let id = recording_id(&rig);
+    let e = rig.call("voice.send", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::LIMIT, "{e:?}");
+    assert_eq!(e.data.as_ref().map(|d| d["limit"].clone()), Some(json!("media")), "{e:?}");
+    assert_eq!(rig.recordings().len(), 1, "the recording is kept as it was");
+    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    let (messages, outbox, outgoing, copies) = left_of(&rig, &id).await;
+    assert_eq!(
+        (messages, outbox, outgoing, copies),
+        (0, 1, 1, Vec::<String>::new()),
+        "and nothing of it kept to send: the outbox holds the failed send alone"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disappearing_chats_timer_goes_with_it_and_it_goes_without_ffmpeg() {
     let home = tempfile::tempdir().unwrap();
