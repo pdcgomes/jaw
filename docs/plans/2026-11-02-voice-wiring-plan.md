@@ -101,9 +101,17 @@ Tests: an integration test reads the built jawd and finds its `NSMicrophoneUsage
 
 As disappearing sends a view-once message's: jawd's own accepted `voice.play` of someone else's voice message not yet played (J7) writes, in one synced commit before it answers, that it was played and an outbox row of kind `played` whose raw is the engine's `MarkRead` with `type` `played`, sent once, settled by its `Done`, never "may have gone"; the row's `voice` gains `played`, from what's kept, and a `played-self` receipt from your phone marks it played too. Nothing of it is built before disappearing lands; if it hasn't by then, this plan stops here and says so.
 
+What keeps it to once is a durable mark, as view-once's `opened` is (the audit's O2):
+
+- **The mark:** a table of jaw's own, `played` (`message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE`, `at INTEGER NOT NULL`, STRICT), a row for each of someone else's voice messages played here or on another of your devices. It's `-- Class: jaw's own`, in `kept.rs`, never dropped; its migration is a schema step, a new table, empty, costing the same however big jaw.db is, taking the next number when it lands. It's bounded by the voice messages jaw.db holds, going with its message, and `status`'s `stored` counts it.
+- **Once:** the mark goes in as `opened`'s does, `INSERT … SELECT … FROM messages WHERE n = ?1 AND kind = 'voice' AND NOT mine ON CONFLICT (message) DO NOTHING`, and the `played` outbox row is written in the same transaction only when that insert inserts, in the synced commit `voice.play` answers after. So the mark and the receipt are committed together or not at all: a replay, a second interface's play, or a start after a crash finds the mark and sends nothing more.
+- **Your other devices:** the drain already makes `played-self`, and `played` from you, the `Opened` amendment for a view-once message (`sync/drain.rs`). For a voice message the writer takes the same amendment as the mark, with no outbox row, so jaw sends no receipt for one you played on your phone; one for a message jaw doesn't have yet waits in `pending` as `opened` does.
+- **The row:** `voice.played` is read from the mark by its primary key, pinned in the plan test, and the mark going in gives the message a new version and its event, so windows show it.
+- **The outbox's words:** `send/actions.rs` says a `played` row is "telling its sender you opened their view-once message"; for a voice message's it says "telling its sender you played their voice message", by its target's kind.
+
 Done when: playing someone else's voice message sends its played receipt once, however often it's played and however jawd stops; its row says `played`.
 
-Tests: the receipt sent once to the demo engine after the commit; a replay of `voice.play`, a restart before it's sent, and your phone's own played receipt each change nothing twice; your own message sends none.
+Tests: the receipt sent once to the demo engine after the commit, the mark and its outbox row in that one commit; a replay of `voice.play`, a restart before it's sent, and your phone's own played receipt each change nothing twice; a `played-self` receipt that comes before its message marks it once it arrives and sends nothing; your own message sends none and leaves no mark.
 
 ## The protocol
 
