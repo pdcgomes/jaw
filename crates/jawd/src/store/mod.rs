@@ -2724,6 +2724,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_kept_in_quarantine_is_a_step_of_its_own() {
+        let chat = "351910000001@s.whatsapp.net";
+        let batch = vec![
+            Change::Quarantined {
+                source: "inbox",
+                reference: "1".into(),
+                error: "converting it panicked: as asked".into(),
+            },
+            Change::Message(text(chat, "b", 2_000, "second")),
+            Change::Person(Person::default()),
+            Change::Drained(Drained::Inbox(2)),
+        ];
+        for lane in [Lane::Live, Lane::Background] {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            inbox_rows(&store, 2).await;
+            let applied = store.apply(lane, batch.clone()).await.unwrap();
+            assert_eq!(applied.quarantined, 1, "the row after it failed, in the {lane:?} lane");
+            let kept: Vec<(String, String, String)> = query(&store, |db| {
+                Ok(db
+                    .prepare("SELECT source, ref, error FROM quarantine ORDER BY ref")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .await;
+            let named: Vec<_> =
+                kept.iter().map(|(source, reference, _)| (source.as_str(), reference.as_str())).collect();
+            assert_eq!(named, [("inbox", "1"), ("inbox", "2")], "each under its own name, in the {lane:?} lane");
+            assert!(kept[0].2.contains("panicked") && kept[1].2.contains("needs at least one JID"), "{kept:?}");
+            assert_eq!(store.count("inbox").unwrap(), 2, "both rows stay");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_inboxs_seq_never_goes_back_once_it_has_drained() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();

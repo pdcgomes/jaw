@@ -15,6 +15,8 @@ use crate::store::read::{self, Around};
 const ANA: &str = "351910000002@s.whatsapp.net";
 const GROUP: &str = "120363000000000001@g.us";
 const AT: i64 = 1_792_000_000_000;
+/// A message whose conversion panics once it has made its changes, in the inbox or in history.
+pub(super) const PANICS: &str = "3EB0PANICS";
 
 #[test]
 fn connection_events_set_the_account_and_connection() {
@@ -209,6 +211,146 @@ async fn the_inbox_is_converted_once_even_when_jawd_stops_in_the_middle() {
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
     let ana = chats.iter().find(|c| c.id == ANA).unwrap();
     assert_eq!(ana.unread, 2, "two of Ana's messages arrived live");
+}
+
+/// What the quarantine keeps: each row's source, reference and when, and whether it panicked.
+async fn quarantined(store: &Store) -> Vec<(String, String, i64, bool)> {
+    query(store, |db| {
+        Ok(db
+            .prepare("SELECT source, ref, at, error LIKE 'converting it panicked: %' FROM quarantine ORDER BY n")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+/// What a column of a table holds, in order.
+async fn column<T: rusqlite::types::FromSql + Send + 'static>(store: &Store, sql: &'static str) -> Vec<T> {
+    query(store, move |db| Ok(db.prepare(sql)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)).await
+}
+
+/// What `jawd status` says jaw.db holds.
+fn stored(home: &Path, store: &Store) -> jaw_proto::Stored {
+    let (pushes, _) = broadcast::channel(1);
+    let state = crate::state::State::new(
+        home,
+        Err(("demo", "not started".into())),
+        Vec::new(),
+        knowing(),
+        Some(store.clone()),
+        pushes,
+    )
+    .unwrap();
+    state.status().stored.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the_rows_after_it_go_on() {
+    let home = tempfile::tempdir().unwrap();
+    let event = |chat: &str, id: &str, at: i64| {
+        let sender = if chat == GROUP { "100000000001@lid" } else { chat };
+        live_message(chat, sender, id, at, text(&format!("words of {id}"))).encode_to_vec()
+    };
+    let kept = {
+        let store = Store::open(home.path()).unwrap();
+        // From before the converter started, so the background lane takes them.
+        for (id, at) in [("m1", AT), (PANICS, AT + 1_000), ("m3", AT + 2_000)] {
+            store.inbox("message", 0, event(ANA, id, at), None);
+        }
+        until("the inbox", || store.count("inbox").unwrap() == 3).await;
+        let converter = converting(&store);
+        until("the row after it", || store.count("messages WHERE id = 'm3'").unwrap() == 1).await;
+        // As they arrive, so the live lane takes them.
+        for (id, at) in [(PANICS, AT + 3_000), ("m5", AT + 4_000)] {
+            store.inbox("message", 0, event(GROUP, id, at), None);
+        }
+        until("the live row after it", || store.count("messages WHERE id = 'm5'").unwrap() == 1).await;
+        converter.abort();
+        let _ = converter.await;
+        let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
+        assert_eq!(ids, ["m1", "m3", "m5"], "nothing of either panicking message is kept");
+        assert_eq!(
+            column::<i64>(&store, "SELECT seq FROM inbox ORDER BY seq").await,
+            [2, 4],
+            "each stays in the inbox"
+        );
+        let kept = quarantined(&store).await;
+        let named: Vec<_> = kept
+            .iter()
+            .map(|(source, reference, _, panicked)| (source.as_str(), reference.as_str(), *panicked))
+            .collect();
+        assert_eq!(named, [("inbox", "2", true), ("inbox", "4", true)], "each is kept in quarantine, saying why");
+        let status = stored(home.path(), &store);
+        assert_eq!((status.inbox, status.quarantined), (2, 2), "jawd status counts them");
+        kept
+    };
+    // jawd starts again, with a row behind them.
+    let store = Store::open(home.path()).unwrap();
+    store.inbox("message", 0, event(ANA, "m6", AT + 5_000), None);
+    until("the inbox", || store.count("inbox").unwrap() == 3).await;
+    let converter = converting(&store);
+    until("the row after them", || store.count("messages WHERE id = 'm6'").unwrap() == 1).await;
+    converter.abort();
+    let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
+    assert_eq!(ids, ["m1", "m3", "m5", "m6"]);
+    assert_eq!(column::<i64>(&store, "SELECT seq FROM inbox ORDER BY seq").await, [2, 4]);
+    let again = quarantined(&store).await;
+    assert_eq!(again.len(), 2, "each is kept once: {again:?}");
+    for ((source, reference, at, _), before) in again.iter().zip(&kept) {
+        assert_eq!((source, reference), (&before.0, &before.1));
+        assert!(*at > before.2, "{reference} was tried again at the start, and panicked again");
+    }
+    let status = stored(home.path(), &store);
+    assert_eq!((status.inbox, status.quarantined), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the_rows_after_it_go_on() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        for (n, id) in ["h1", PANICS, "h3"].into_iter().enumerate() {
+            let info = WebMessageInfo {
+                key: MessageKey {
+                    remote_jid: Some(ANA.into()),
+                    from_me: Some(false),
+                    id: Some(id.into()),
+                    participant: None,
+                },
+                message: Some(text(&format!("words of {id}"))),
+                message_timestamp: Some((AT / 1000) as u64 + n as u64),
+                ..Default::default()
+            };
+            db.execute(
+                "INSERT INTO history_raw (chat, id, at, raw) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![ANA, id, AT, info.encode_to_vec()],
+            )
+            .unwrap();
+        }
+    }
+    let mut kept: Vec<(String, String, i64, bool)> = Vec::new();
+    // Converted at two starts: the second takes the row that panicked again, and keeps it once.
+    for start in 0..2 {
+        drain::history_raw(store.clone(), knowing()).await;
+        let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
+        assert_eq!(ids, ["h1", "h3"], "the row after it is converted, and nothing of it is kept");
+        let left: Vec<String> = column(&store, "SELECT id FROM history_raw").await;
+        assert_eq!(left, [PANICS], "it stays raw");
+        let now = quarantined(&store).await;
+        let named: Vec<_> = now
+            .iter()
+            .map(|(source, reference, _, panicked)| (source.as_str(), reference.as_str(), *panicked))
+            .collect();
+        assert_eq!(named, [("history_raw", format!("{ANA} {PANICS}").as_str(), true)], "at start {start}");
+        if let Some(before) = kept.first() {
+            assert!(now[0].2 > before.2, "tried again at the second start");
+        }
+        assert_eq!(stored(home.path(), &store).quarantined, 1);
+        kept = now;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

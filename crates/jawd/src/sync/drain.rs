@@ -4,8 +4,11 @@
 //! background lane; what arrives live goes in the live lane, a few dozen at a time so the inbox's
 //! own commits are never held up for long. History kept raw by an earlier jawd is converted
 //! the same way, in the background lane, alongside. Neither converts anything until jaw.db keeps
-//! the account's own JIDs, which the engine says when it connects; until then the rows wait.
+//! the account's own JIDs, which the engine says when it connects; until then the rows wait. A
+//! row whose conversion panics stays where it is, kept in quarantine, and the rows after it go on.
 
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
 
 use prost::Message as _;
@@ -57,86 +60,128 @@ pub fn history_notification(message: &e2e::Message) -> Option<&e2e::HistorySyncN
     protocol.history_sync_notification.as_ref()
 }
 
+impl Converted {
+    /// Takes in what one row converted to, after what the rows before it did.
+    fn join(&mut self, row: Converted) {
+        self.changes.extend(row.changes);
+        self.offers.extend(row.offers);
+        self.my_name = row.my_name.or(self.my_name.take());
+        self.pictures.extend(row.pictures);
+        self.thumbnails.extend(row.thumbnails);
+    }
+}
+
 /// Converts inbox rows. A row whose kind this jawd doesn't know stays in the inbox for one that
-/// does.
+/// does. Each row converts on its own, so one whose conversion panics leaves nothing of itself:
+/// it stays in the inbox too, kept in quarantine, and the rows after it go on.
 pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
     let mut out = Converted::default();
     for row in rows {
-        let drained = match row.kind.as_str() {
-            "message" => message(row, me, &mut out),
-            "app_state" => match pb::AppState::decode(row.payload.as_slice()) {
-                Ok(state) => {
-                    let applied = app_state::mutation(&state.index, &state.value);
-                    out.my_name = applied.my_name.or(out.my_name.take());
-                    out.changes.push(Change::AppState {
-                        index: state.index,
-                        value: state.value,
-                        seq: row.seq,
-                        at: applied.at,
-                        changes: applied.changes,
-                    });
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "push_name" => match pb::PushName::decode(row.payload.as_slice()) {
-                Ok(name) => {
-                    out.changes.extend(people::push_name(&name));
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "group" => match pb::GroupInfo::decode(row.payload.as_slice()) {
-                Ok(group) => {
-                    out.changes.extend(people::group(&group));
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "group_change" => match pb::GroupChange::decode(row.payload.as_slice()) {
-                Ok(change) => {
-                    out.changes.extend(people::group_change(&change));
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "picture" => match pb::Picture::decode(row.payload.as_slice()) {
-                Ok(picture) if picture.removed => {
-                    let none = Chat {
-                        id: picture.jid,
-                        avatar: Some(String::new()),
-                        avatar_id: Some(super::avatars::NONE.into()),
-                        ..Chat::default()
-                    };
-                    out.changes.push(Change::Chat(none));
-                    true
-                }
-                Ok(picture) => {
-                    out.pictures.push(picture.jid);
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "receipt" => match pb::Receipt::decode(row.payload.as_slice()) {
-                Ok(receipt) => {
-                    out.changes.extend(receipt_changes(&receipt));
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "media_retry" => match pb::MediaRetried::decode(row.payload.as_slice()) {
-                Ok(answer) => {
-                    out.changes.extend(media_answer(&answer));
-                    true
-                }
-                Err(e) => undecodable(row, e),
-            },
-            "bench" => true,
-            _ => false,
-        };
-        if drained {
-            out.changes.push(Change::Drained(Drained::Inbox(row.seq)));
+        match catch_unwind(AssertUnwindSafe(|| convert_row(row, me))) {
+            Ok(converted) => out.join(converted),
+            Err(panic) => {
+                let why = panicked(&*panic);
+                eprintln!(
+                    "jawd: inbox row {} ({}) panicked as it was converted, so it's kept as it is, in quarantine: {why}",
+                    row.seq, row.kind
+                );
+                out.changes.push(Change::Quarantined {
+                    source: "inbox",
+                    reference: row.seq.to_string(),
+                    error: format!("converting it panicked: {why}"),
+                });
+            }
         }
+    }
+    out
+}
+
+/// What a panic said, as a panic's payload is a `&str` or a `String` when it says anything.
+fn panicked(panic: &(dyn Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or(panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("for no reason it gave")
+}
+
+/// What one inbox row converts to, ending with its removal once it's converted.
+fn convert_row(row: &Row, me: &Me) -> Converted {
+    let mut out = Converted::default();
+    let drained = match row.kind.as_str() {
+        "message" => message(row, me, &mut out),
+        "app_state" => match pb::AppState::decode(row.payload.as_slice()) {
+            Ok(state) => {
+                let applied = app_state::mutation(&state.index, &state.value);
+                out.my_name = applied.my_name.or(out.my_name.take());
+                out.changes.push(Change::AppState {
+                    index: state.index,
+                    value: state.value,
+                    seq: row.seq,
+                    at: applied.at,
+                    changes: applied.changes,
+                });
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "push_name" => match pb::PushName::decode(row.payload.as_slice()) {
+            Ok(name) => {
+                out.changes.extend(people::push_name(&name));
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "group" => match pb::GroupInfo::decode(row.payload.as_slice()) {
+            Ok(group) => {
+                out.changes.extend(people::group(&group));
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "group_change" => match pb::GroupChange::decode(row.payload.as_slice()) {
+            Ok(change) => {
+                out.changes.extend(people::group_change(&change));
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "picture" => match pb::Picture::decode(row.payload.as_slice()) {
+            Ok(picture) if picture.removed => {
+                let none = Chat {
+                    id: picture.jid,
+                    avatar: Some(String::new()),
+                    avatar_id: Some(super::avatars::NONE.into()),
+                    ..Chat::default()
+                };
+                out.changes.push(Change::Chat(none));
+                true
+            }
+            Ok(picture) => {
+                out.pictures.push(picture.jid);
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "receipt" => match pb::Receipt::decode(row.payload.as_slice()) {
+            Ok(receipt) => {
+                out.changes.extend(receipt_changes(&receipt));
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "media_retry" => match pb::MediaRetried::decode(row.payload.as_slice()) {
+            Ok(answer) => {
+                out.changes.extend(media_answer(&answer));
+                true
+            }
+            Err(e) => undecodable(row, e),
+        },
+        "bench" => true,
+        _ => false,
+    };
+    if drained {
+        out.changes.push(Change::Drained(Drained::Inbox(row.seq)));
     }
     out
 }
@@ -268,6 +313,8 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
         out.thumbnails.push((sha256, jpeg.to_vec()));
     }
     out.changes.extend(changes);
+    #[cfg(test)]
+    assert_ne!(id, super::tests::PANICS, "a conversion that panics once it has made its changes, as a test asks");
     true
 }
 
@@ -514,27 +561,50 @@ pub async fn history_raw(store: Store, live: Shared) {
 
 /// History rows as changes, each followed by its row's removal. A row that becomes a message keeps
 /// its raw there; any other (an edit, a live location's last place, a status, an empty shell) is
-/// kept whole in history_kept, since it can't be fetched again. A row that doesn't decode stays.
+/// kept whole in history_kept, since it can't be fetched again. A row that doesn't decode stays,
+/// and so does one whose conversion panics, kept in quarantine, while the rows after it go on.
 pub fn history_rows(rows: Vec<(String, String, Vec<u8>)>, me: &Me) -> Vec<Change> {
     let mut changes = Vec::new();
     for (chat, id, raw) in rows {
-        match WebMessageInfo::decode(raw.as_slice()) {
-            Ok(mut info) => {
-                if info.key.remote_jid.as_deref() != Some(chat.as_str()) {
-                    info.key.remote_jid = Some(chat.clone());
-                }
-                let converted = convert::message(&info, me, false);
-                let its_row =
-                    converted.iter().any(|c| matches!(c, Change::Message(m) if m.id == id && m.raw.is_some()));
+        let mut info = match WebMessageInfo::decode(raw.as_slice()) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("jawd: a message of history in {chat} doesn't decode, so it's kept raw: {e}");
+                continue;
+            }
+        };
+        if info.key.remote_jid.as_deref() != Some(chat.as_str()) {
+            info.key.remote_jid = Some(chat.clone());
+        }
+        match catch_unwind(AssertUnwindSafe(|| history_row(&info, &chat, &id, &raw, me))) {
+            Ok(converted) => {
                 changes.extend(converted);
-                if !its_row {
-                    changes
-                        .push(Change::HistoryKept { id: format!("history_raw {chat} {id}"), raw: Packed::new(&raw) });
-                }
                 changes.push(Change::Drained(Drained::History { chat, id }));
             }
-            Err(e) => eprintln!("jawd: a message of history in {chat} doesn't decode, so it's kept raw: {e}"),
+            Err(panic) => {
+                let why = panicked(&*panic);
+                eprintln!(
+                    "jawd: message {id} of history in {chat} panicked as it was converted, so it's kept raw, in quarantine: {why}"
+                );
+                changes.push(Change::Quarantined {
+                    source: "history_raw",
+                    reference: format!("{chat} {id}"),
+                    error: format!("converting it panicked: {why}"),
+                });
+            }
         }
     }
+    changes
+}
+
+/// What history row `id` in `chat` converts to, before its row's removal.
+fn history_row(info: &WebMessageInfo, chat: &str, id: &str, raw: &[u8], me: &Me) -> Vec<Change> {
+    let mut changes = convert::message(info, me, false);
+    let its_row = changes.iter().any(|c| matches!(c, Change::Message(m) if m.id == id && m.raw.is_some()));
+    if !its_row {
+        changes.push(Change::HistoryKept { id: format!("history_raw {chat} {id}"), raw: Packed::new(raw) });
+    }
+    #[cfg(test)]
+    assert_ne!(id, super::tests::PANICS, "a conversion that panics once it has made its changes, as a test asks");
     changes
 }

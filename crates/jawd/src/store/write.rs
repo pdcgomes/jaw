@@ -688,13 +688,14 @@ fn record_quarantine(db: &Connection, source: &str, reference: &str, error: &str
     Ok(())
 }
 
-/// The changes split where each raw row's conversion ends: at each Drained, the changes before it
-/// go with it. Changes after the last Drained, or in a batch without one, are a group each.
+/// The changes split where each raw row's conversion ends: at each Drained, or a Quarantined row
+/// that didn't convert, the changes before it go with it. Changes after the last of those, or in a
+/// batch without one, are a group each.
 pub(super) fn groups(changes: &[Change]) -> Vec<std::ops::Range<usize>> {
     let mut groups = Vec::new();
     let mut start = 0;
     for (i, change) in changes.iter().enumerate() {
-        if matches!(change, Change::Drained(_)) {
+        if matches!(change, Change::Drained(_) | Change::Quarantined { .. }) {
             groups.push(start..i + 1);
             start = i + 1;
         }
