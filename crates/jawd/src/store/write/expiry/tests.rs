@@ -11,7 +11,7 @@ use super::*;
 use crate::store::contacts::CONTACTS;
 use crate::store::kinds::KINDS;
 use crate::store::outbox::{Step, Written};
-use crate::store::write::links::PLACES;
+use crate::store::write::links::{EVENTS, PLACES};
 use crate::store::write::{Packed, now_ms};
 use crate::store::{
     Amend, Amendment, Applied, Change, Chat, Lane, Message, Person, Store, index_against_text, read, schema,
@@ -1104,6 +1104,26 @@ fn gone_but_for(home: &Path, word: &str, before: &[usize], what: &str) {
     assert!(blocks.is_empty(), "{what}: {word} is left in {blocks:?}");
 }
 
+/// Where `word`, which a change took out, is left, as `gone_but_for` looks: none when it's gone.
+fn left_of(home: &Path, word: &str, before: &[usize]) -> Vec<String> {
+    let mut left = Vec::new();
+    let pages: Vec<_> = pages_holding(home, word.as_bytes())
+        .into_iter()
+        .filter(|(page, owner)| owner.is_some() || !before.contains(page))
+        .collect();
+    if !pages.is_empty() {
+        left.push(format!("in these pages, by their b-tree: {pages:?}"));
+    }
+    if holds(&std::fs::read(home.join("jaw.db-wal")).unwrap_or_default(), word.as_bytes()) {
+        left.push("in the WAL".into());
+    }
+    let blocks: Vec<_> = index_blocks(home, word).into_iter().filter(|(_, blocks)| *blocks > 0).collect();
+    if !blocks.is_empty() {
+        left.push(format!("in {blocks:?}"));
+    }
+    left
+}
+
 /// A photo with `caption`, as WhatsApp sends one, with its thumbnail if it has one.
 fn photo_of(caption: &str, thumbnail: Option<Vec<u8>>) -> e2e::Message {
     e2e::Message {
@@ -1664,6 +1684,151 @@ async fn a_message_of_yours_waiting_to_go_with_a_timer_deleted_or_revoked_leaves
         assert_eq!(store.count("outbox").unwrap(), 0, "{what}: WhatsApp has it");
         gone_but_for(home.path(), "gnuwaiting", &before, &format!("{what}, once WhatsApp has it"));
     }
+}
+
+/// How a case of the test below changes its message.
+enum How {
+    /// A change, in the live lane.
+    Change(Box<Change>),
+    /// A backfill, run to its end over every message, as its migration leaves it.
+    Backfill(&'static str),
+}
+
+/// Whatever changes or takes away what a message with a time to go, or one opening once, says,
+/// takes its words out of the contentless indexes too, by the whole merges it notes (round three's
+/// T6): an edit, an event's edit, a revoke, a deletion for you, a copy with a newer edit, a
+/// view-once copy after a plain one, and the places, events and kinds backfills reading a message
+/// again, each of a captioned photo, whose words library_fts holds, or of a message with links,
+/// whose words links_fts and library_fts hold, where the path can have one. Each among thirty
+/// captioned photos and thirty messages with links in the same segments, so its index's segment
+/// isn't rewritten when its entry goes and only a whole merge takes its words out.
+#[tokio::test(flavor = "multi_thread")]
+async fn whatever_changes_a_disappearing_photo_or_link_takes_its_words_out_of_the_contentless_indexes() {
+    let amend = |what: Amendment| {
+        How::Change(Box::new(Change::Amend(Amend {
+            chat: ANA.into(),
+            target: "goes".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: AT + 95,
+            what,
+            raw: None,
+        })))
+    };
+    let newer = || Amendment::Edit { text: Some("newer words".into()), spans: None, summary: "newer words".into() };
+    let deleted = || How::Change(Box::new(Change::DeleteMessage { chat: ANA.into(), id: "goes".into() }));
+    let copy_of = |message: &Message| {
+        How::Change(Box::new(Change::Message(Message {
+            text: Some("newer words".into()),
+            spans: None,
+            summary: "newer words".into(),
+            edited_at: Some(AT + 95),
+            ..message.clone()
+        })))
+    };
+    let photo = Message { at: AT + 90, expires_at: Some(LATER), ..captioned("goes", "gnuchanged by the sea") };
+    let link = linked("goes", "gnuchanged", 90);
+    let event = Message {
+        kind: "event",
+        detail: Some(serde_json::json!({ "event": { "name": "see https://gnuchanged.example" } }).to_string()),
+        raw: Some(Packed(raw_of(
+            "goes",
+            e2e::Message {
+                event_message: Some(Box::new(e2e::EventMessage {
+                    name: Some("Jantar de anos".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ))),
+        ..link.clone()
+    };
+    let place = Message {
+        kind: "location",
+        raw: Some(Packed(raw_of(
+            "goes",
+            e2e::Message {
+                location_message: Some(Box::new(e2e::LocationMessage {
+                    degrees_latitude: Some(38.7118),
+                    degrees_longitude: Some(-9.1301),
+                    name: Some("Miradouro".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ))),
+        ..link.clone()
+    };
+    let unshown = Message {
+        kind: "unknown",
+        edited_at: Some(AT + 60),
+        raw: Some(Packed(raw_of("goes", wrapped(photo_of("a caption", None))))),
+        ..link.clone()
+    };
+    let plain = Message { at: AT + 90, ..captioned("goes", "gnuchanged by the sea") };
+    let once = Message { text: None, spans: None, summary: "View once photo".into(), view_once: true, ..plain.clone() };
+    let event_edit = Amendment::EventEdit {
+        text: Some("newer words".into()),
+        spans: None,
+        summary: "newer words".into(),
+        detail: Some(serde_json::json!({ "event": { "name": "newer words" } }).to_string()),
+    };
+    let cases: Vec<(&str, Message, How)> = vec![
+        ("an edit of a captioned photo", photo.clone(), amend(newer())),
+        ("an edit of a message with links", link.clone(), amend(newer())),
+        ("an event's edit of an event with links", event.clone(), amend(event_edit)),
+        ("a revoke of a captioned photo", photo.clone(), amend(Amendment::Revoke)),
+        ("a revoke of a message with links", link.clone(), amend(Amendment::Revoke)),
+        ("a deletion for you of a captioned photo", photo.clone(), deleted()),
+        ("a deletion for you of a message with links", link.clone(), deleted()),
+        ("a copy of a captioned photo with a newer edit", photo.clone(), copy_of(&photo)),
+        ("a copy of a message with links with a newer edit", link.clone(), copy_of(&link)),
+        ("a view-once copy of a captioned photo", plain, How::Change(Box::new(Change::Message(once)))),
+        ("the places backfill reading a location with links again", place, How::Backfill(PLACES)),
+        ("the events backfill reading an event with links again", event, How::Backfill(EVENTS)),
+        ("the kinds backfill making a row with links one to open once", unshown, How::Backfill(KINDS)),
+    ];
+    // Every case is looked at before the test fails, so a rule switched off shows each it breaks.
+    let mut problems = Vec::new();
+    for (what, message, how) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let mut changes = several_of_each();
+        changes.insert(30, Change::Message(message));
+        apply(&store, changes).await;
+        store.indexed().await.unwrap();
+        let held: Vec<_> = index_blocks(home.path(), "gnuchanged").into_iter().filter(|(_, held)| *held > 0).collect();
+        let contentless = held.iter().filter(|(index, _)| *index != "messages_fts").count();
+        assert!(held.len() >= 2 && contentless > 0, "{what}: its words are in the contentless indexes: {held:?}");
+        let before = free_holding(&store, home.path(), b"gnuchanged").await;
+        match how {
+            How::Change(change) => assert_eq!(apply(&store, vec![*change]).await.changed, 1, "{what}"),
+            How::Backfill(name) => {
+                let db = Connection::open(home.path().join("jaw.db")).unwrap();
+                db.busy_timeout(Duration::from_secs(10)).unwrap();
+                db.execute("INSERT INTO backfills (name, after, upto) SELECT ?1, 0, max(n) FROM messages", [name])
+                    .unwrap();
+                let left = || {
+                    db.query_row("SELECT count(*) FROM backfills WHERE name = ?1", [name], |r| r.get::<_, i64>(0))
+                        .unwrap()
+                };
+                for _ in 0..20 {
+                    if left() == 0 {
+                        break;
+                    }
+                    store.apply(Lane::Background, vec![Change::Backfill(name)]).await.unwrap();
+                }
+                assert_eq!(left(), 0, "{what}: the backfill is done");
+            }
+        }
+        settled(&store).await;
+        let left = left_of(home.path(), "gnuchanged", &before);
+        if !left.is_empty() {
+            problems.push(format!("{what}: its words are left {}", left.join("; ")));
+        }
+        still_found(&store, what).await;
+    }
+    assert!(problems.is_empty(), "{} of the cases leave words behind:\n{}", problems.len(), problems.join("\n"));
 }
 
 /// Thirty captioned photos and thirty messages with links that stay, put in the segments of every
