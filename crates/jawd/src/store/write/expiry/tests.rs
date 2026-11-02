@@ -9,8 +9,11 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::*;
 use crate::store::kinds::KINDS;
+use crate::store::write::links::PLACES;
 use crate::store::write::{Packed, now_ms};
-use crate::store::{Amend, Amendment, Applied, Change, Chat, Lane, Message, Store, index_against_text, read, schema};
+use crate::store::{
+    Amend, Amendment, Applied, Change, Chat, Lane, Message, Person, Store, index_against_text, read, schema,
+};
 use crate::work::Priority;
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -667,13 +670,9 @@ async fn an_erased_messages_words_and_raw_protobuf_are_gone_from_jaw_db_and_its_
     let n = n_of(&store, "goes").await.unwrap();
     let erased = store.apply_durable(vec![Change::Expire { n, at: LATER + 100 }]).await.unwrap();
     assert_eq!(erased.changed, 1);
-    // The links' index is contentless, so its words go once the writer has merged it whole.
+    // The links' indexes are contentless, so their words go once the writer has merged them whole.
     store.indexed().await.unwrap();
-    let noted: Option<String> = query(&store, |db| {
-        Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [LINKS_ERASED], |r| r.get(0)).optional()?)
-    })
-    .await;
-    assert_eq!(noted, None, "the merge it waited for is done");
+    assert!(merged(&store).await, "the merges it waited for are done");
     // Nothing truncates the WAL here, as at a clean stop: the writer empties it once it's idle.
     assert!(wal_emptied(&store).await, "the WAL the erasure left is emptied");
     let after = files(home.path());
@@ -938,17 +937,21 @@ fn linked(id: &str, site: &str, k: i64) -> Message {
     }
 }
 
-/// When sync_state says links_fts is to be merged whole for an erasure, if it does.
+/// When sync_state says a contentless index is to be merged whole for an erasure, if it does.
 async fn merge_noted(store: &Store) -> Option<String> {
     query(store, |db| {
-        Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [LINKS_ERASED], |r| r.get(0)).optional()?)
+        Ok(db
+            .query_row("SELECT value FROM sync_state WHERE key IN (?1, ?2)", [LINKS_ERASED, LIBRARY_ERASED], |r| {
+                r.get(0)
+            })
+            .optional()?)
     })
     .await
 }
 
-/// Waits up to five seconds for the whole merge sync_state notes to be done.
+/// Waits up to ten seconds for the whole merges sync_state notes to be done.
 async fn merged(store: &Store) -> bool {
-    for _ in 0..250 {
+    for _ in 0..500 {
         if merge_noted(store).await.is_none() {
             return true;
         }
@@ -958,8 +961,9 @@ async fn merged(store: &Store) -> bool {
 }
 
 /// Killed after an erasure's commit, before the whole merge of links_fts it leaves to do has begun,
-/// jawd started again still does it: the erasure notes it in the same commit. The erasure's own
-/// secure-delete has taken its link's words out already, in the SQLite jaw bundles.
+/// jawd started again still does it: the erasure notes it in the same commit. A merge step has
+/// taken its link's words out of their segment already, which holds three, a third of them erased:
+/// FTS5 rewrites a level once a tenth of its entries are deleted.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_merge_an_erasure_leaves_to_do_is_noted_with_it_so_a_kill_before_it_begins_loses_nothing() {
     let home = tempfile::tempdir().unwrap();
@@ -974,6 +978,7 @@ async fn the_merge_an_erasure_leaves_to_do_is_noted_with_it_so_a_kill_before_it_
     // The next whole merge waits ten minutes after that one began, so a kill now finds it to do.
     let second = n_of(&store, "second").await.unwrap();
     store.apply_durable(vec![Change::Expire { n: second, at: LATER + 2 }]).await.unwrap();
+    store.indexed().await.unwrap();
     assert!(merge_noted(&store).await.is_some(), "the erasure notes the merge it leaves to do");
     let killed = killed(home.path());
     let left = files(killed.path());
@@ -981,6 +986,509 @@ async fn the_merge_an_erasure_leaves_to_do_is_noted_with_it_so_a_kill_before_it_
     let again = Store::open(killed.path()).unwrap();
     assert!(merge_noted(&again).await.is_some(), "a kill keeps the merge noted");
     assert!(merged(&again).await, "and started again, jawd does it");
+}
+
+/// The pages of jaw.db that hold `needle`, each with the b-tree that has it, or none for a page no
+/// b-tree has, a free one.
+fn pages_holding(home: &Path, needle: &[u8]) -> Vec<(usize, Option<String>)> {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+    let bytes = std::fs::read(home.join("jaw.db")).unwrap();
+    let mut pages = Vec::new();
+    for (k, _) in bytes.chunks(size as usize).enumerate().filter(|(_, page)| holds(page, needle)) {
+        let owner =
+            db.query_row("SELECT name FROM dbstat WHERE pageno = ?1", [k as i64 + 1], |r| r.get(0)).optional().unwrap();
+        pages.push((k + 1, owner));
+    }
+    pages
+}
+
+/// How many blocks of each search index's segments hold `word`.
+fn index_blocks(home: &Path, word: &str) -> Vec<(&'static str, i64)> {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    ["messages_fts", "links_fts", "library_fts"]
+        .into_iter()
+        .map(|index| (index, blocks_holding(&db, index, word)))
+        .collect()
+}
+
+/// The free pages of jaw.db that hold `needle`, once all that's committed is in it: what pages
+/// freed under FAST before a change keep until they're used again, as the design says.
+async fn free_holding(store: &Store, home: &Path, needle: &[u8]) -> Vec<usize> {
+    store.truncate().await.unwrap();
+    pages_holding(home, needle).into_iter().filter(|(_, owner)| owner.is_none()).map(|(page, _)| page).collect()
+}
+
+/// Asserts that `needle`, which a change took out, is nowhere in jaw.db or its WAL but in pages
+/// that were free and held it before the change (`before`).
+fn bytes_gone_but_for(home: &Path, needle: &[u8], before: &[usize], what: &str) {
+    let left: Vec<_> = pages_holding(home, needle)
+        .into_iter()
+        .filter(|(page, owner)| owner.is_some() || !before.contains(page))
+        .collect();
+    assert!(left.is_empty(), "{what}: left in these pages, by their b-tree, those free before {before:?}: {left:?}");
+    let wal = std::fs::read(home.join("jaw.db-wal")).unwrap_or_default();
+    assert!(!holds(&wal, needle), "{what}: left in the WAL");
+}
+
+/// Waits for what taking words out leaves to do: indexing and merging, each contentless index's
+/// whole merge, and emptying the WAL.
+async fn settled(store: &Store) {
+    store.indexed().await.unwrap();
+    assert!(merged(store).await, "the whole merges it left to do");
+    assert!(wal_emptied(store).await, "the WAL it left to empty");
+}
+
+/// Asserts that `word`, which a change took out, is nowhere in jaw.db or its WAL but in pages that
+/// were free and held it before the change (`before`), and in no index's blocks.
+fn gone_but_for(home: &Path, word: &str, before: &[usize], what: &str) {
+    bytes_gone_but_for(home, word.as_bytes(), before, &format!("{what}: {word}"));
+    let blocks: Vec<_> = index_blocks(home, word).into_iter().filter(|(_, blocks)| *blocks > 0).collect();
+    assert!(blocks.is_empty(), "{what}: {word} is left in {blocks:?}");
+}
+
+/// A photo with `caption`, as WhatsApp sends one, with its thumbnail if it has one.
+fn photo_of(caption: &str, thumbnail: Option<Vec<u8>>) -> e2e::Message {
+    e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            caption: Some(caption.into()),
+            mimetype: Some("image/jpeg".into()),
+            jpeg_thumbnail: thumbnail,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// Forty of Ana's messages that stay, in the same segments as what a test changes.
+fn forty_others() -> Vec<Change> {
+    (0..40i64)
+        .map(|k| Change::Message(message(ANA, &format!("o{k:02}"), AT + k, &format!("other words number{k}"), None)))
+        .collect()
+}
+
+/// An erased photo's caption leaves the library's index, which holds what items say apart from the
+/// messages': it's contentless, so a deletion leaves the words in their segment until a merge
+/// rewrites it, and the writer merges it whole after the erasure. Among sixty captions in three
+/// segments, as an index holds them, so it isn't one a segment holds alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erased_photos_caption_leaves_the_librarys_index_holding_sixty() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    for batch in 0..3i64 {
+        let photos = (0..20i64).map(|k| {
+            let goes = (batch, k) == (1, 7);
+            let caption =
+                if goes { "zebrafinch on the beach".to_string() } else { format!("finch{batch}x{k} on the beach") };
+            let photo = captioned(&format!("p{batch}{k:02}"), &caption);
+            Change::Message(Message { at: AT + batch * 100 + k, expires_at: goes.then_some(LATER), ..photo })
+        });
+        apply(&store, photos.collect()).await;
+        store.indexed().await.unwrap();
+    }
+    let library = |home: &Path| index_blocks(home, "zebrafinch")[2].1;
+    assert!(library(home.path()) > 0, "the library holds its caption");
+    let before = free_holding(&store, home.path(), b"zebrafinch").await;
+    let n = n_of(&store, "p107").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    settled(&store).await;
+    gone_but_for(home.path(), "zebrafinch", &before, "its caption");
+    let found: i64 = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*) FROM library_fts WHERE library_fts MATCH 'beach'", [], |r| r.get(0))?)
+    })
+    .await;
+    assert_eq!(found, 59, "the others are still found");
+}
+
+/// An erased message's links leave both contentless indexes, links_fts and the library's, and no
+/// page their whole merges free keeps their words, as the merges zero what they free while an
+/// erasure's words wait in an index. Among three hundred messages with links in six segments.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erased_messages_links_leave_both_contentless_indexes_and_no_page_their_merges_free() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    for batch in 0..6i64 {
+        let links = (0..50i64).map(|k| {
+            let goes = (batch, k) == (2, 20);
+            let site = if goes { "wombatgalore".to_string() } else { format!("site{batch}x{k}") };
+            let message = linked(&format!("l{batch}{k:02}"), &site, 0);
+            Change::Message(Message { at: AT + batch * 100 + k, expires_at: goes.then_some(LATER), ..message })
+        });
+        apply(&store, links.collect()).await;
+        store.indexed().await.unwrap();
+    }
+    let blocks = index_blocks(home.path(), "wombatgalore");
+    assert!(blocks[1].1 > 0 && blocks[2].1 > 0, "both hold its link's words: {blocks:?}");
+    let before = free_holding(&store, home.path(), b"wombatgalore").await;
+    let n = n_of(&store, "l220").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    settled(&store).await;
+    gone_but_for(home.path(), "wombatgalore", &before, "its link's words");
+    let found: i64 = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*) FROM links_fts WHERE links_fts MATCH 'example'", [], |r| r.get(0))?)
+    })
+    .await;
+    assert_eq!(found, 299, "the others are still found");
+}
+
+/// While erasures' words wait in a contentless index for its whole merge, which comes ten minutes
+/// after the last one began, a merge step taking them out before it zeroes the pages it frees too:
+/// FTS5 rewrites a level once a tenth of its entries are deleted, as sixty of three hundred links,
+/// erased together, make it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_pages_it_frees() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // A first erasure, whose whole merges go at once, so the next wait ten minutes after they began.
+    apply(&store, vec![Change::Message(linked("first", "quokkafirst", 1))]).await;
+    store.indexed().await.unwrap();
+    let first = n_of(&store, "first").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n: first, at: LATER + 1 }]).await.changed, 1);
+    settled(&store).await;
+    let goes = |batch: i64, k: i64| (k % 5 == 0).then(|| format!("numbat{batch}x{k}"));
+    for batch in 0..6i64 {
+        let links = (0..50i64).map(|k| {
+            let site = goes(batch, k).unwrap_or_else(|| format!("site{batch}x{k}"));
+            let message = linked(&format!("w{batch}{k:02}"), &site, 0);
+            Change::Message(Message { at: AT + batch * 100 + k, expires_at: goes(batch, k).map(|_| LATER), ..message })
+        });
+        apply(&store, links.collect()).await;
+        store.indexed().await.unwrap();
+    }
+    store.truncate().await.unwrap();
+    let words: Vec<String> = (0..6i64).flat_map(|batch| (0..50i64).filter_map(move |k| goes(batch, k))).collect();
+    let before: Vec<Vec<usize>> = words
+        .iter()
+        .map(|word| {
+            let pages = pages_holding(home.path(), word.as_bytes());
+            pages.into_iter().filter(|(_, owner)| owner.is_none()).map(|(page, _)| page).collect()
+        })
+        .collect();
+    let due: Vec<i64> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT n FROM messages WHERE expires_at IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(due.len(), 60);
+    let erasures = due.into_iter().map(|n| Change::Expire { n, at: LATER }).collect();
+    assert_eq!(apply(&store, erasures).await.changed, 60);
+    store.indexed().await.unwrap();
+    assert!(merge_noted(&store).await.is_some(), "their whole merges wait for their ten minutes");
+    assert!(wal_emptied(&store).await);
+    for (word, before) in words.iter().zip(&before) {
+        gone_but_for(home.path(), word, before, "taken out by a merge before its whole merge");
+    }
+}
+
+/// An edit of a message with a time to go takes what it said first out of messages_fts's segments
+/// as an erasure does, rather than marking it deleted there, and its erasure takes the rest, so
+/// nothing it said is left. Among forty other messages, so a segment holds several.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_a_disappearing_message_takes_its_first_text_out_and_its_erasure_the_rest() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, forty_others()).await;
+    apply(&store, vec![Change::Message(message(ANA, "goes", AT + 50, "alphaoriginal remark here", Some(LATER)))]).await;
+    store.indexed().await.unwrap();
+    let first = free_holding(&store, home.path(), b"alphaoriginal").await;
+    let edit = Amendment::Edit {
+        text: Some("betaedited remark here".into()),
+        spans: None,
+        summary: "betaedited remark here".into(),
+    };
+    let amend = Amend {
+        chat: ANA.into(),
+        target: "goes".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: AT + 60,
+        what: edit,
+        raw: None,
+    };
+    assert_eq!(apply(&store, vec![Change::Amend(amend)]).await.changed, 1);
+    settled(&store).await;
+    gone_but_for(home.path(), "alphaoriginal", &first, "its first text, once edited");
+    assert_eq!(said(&store, "goes").await.0.as_deref(), Some("betaedited remark here"));
+    let edited = free_holding(&store, home.path(), b"betaedited").await;
+    let n = n_of(&store, "goes").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    settled(&store).await;
+    gone_but_for(home.path(), "betaedited", &edited, "its edited text, once erased");
+    gone_but_for(home.path(), "alphaoriginal", &first, "its first text, once erased");
+}
+
+/// Whatever changes what a message with a time to go, or one opening once, says, or takes it away,
+/// takes its earlier words out as an erasure takes them, so they don't outlive it: an edit, an
+/// event's edit, a revoke, a deletion for you, a copy bringing a newer edit, and a photo's view-once
+/// copy after a plain one kept its caption. Each among forty other messages in its segments.
+#[tokio::test(flavor = "multi_thread")]
+async fn whatever_changes_what_a_disappearing_or_view_once_message_said_leaves_nothing_of_it() {
+    let amend = |what: Amendment| {
+        Change::Amend(Amend {
+            chat: ANA.into(),
+            target: "goes".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: AT + 60,
+            what,
+            raw: None,
+        })
+    };
+    let goes = message(ANA, "goes", AT + 50, "gnuold words here", Some(LATER));
+    let event = Message {
+        kind: "event",
+        detail: Some(serde_json::json!({ "event": { "name": "gnuold words here" } }).to_string()),
+        ..goes.clone()
+    };
+    let plain = Message { expires_at: None, ..captioned("goes", "gnuold words here") };
+    let cases: Vec<(&str, Message, Change)> = vec![
+        (
+            "an edit",
+            goes.clone(),
+            amend(Amendment::Edit { text: Some("newer words".into()), spans: None, summary: "newer words".into() }),
+        ),
+        (
+            "an event's edit",
+            event,
+            amend(Amendment::EventEdit {
+                text: Some("newer words".into()),
+                spans: None,
+                summary: "newer words".into(),
+                detail: Some(serde_json::json!({ "event": { "name": "newer words" } }).to_string()),
+            }),
+        ),
+        ("a revoke", goes.clone(), amend(Amendment::Revoke)),
+        ("a deletion for you", goes.clone(), Change::DeleteMessage { chat: ANA.into(), id: "goes".into() }),
+        (
+            "a copy with a newer edit",
+            goes.clone(),
+            Change::Message(Message {
+                text: Some("newer words".into()),
+                summary: "newer words".into(),
+                edited_at: Some(AT + 60),
+                ..goes.clone()
+            }),
+        ),
+        (
+            "a view-once copy",
+            plain.clone(),
+            Change::Message(Message {
+                text: None,
+                spans: None,
+                summary: "View once photo".into(),
+                view_once: true,
+                ..plain
+            }),
+        ),
+    ];
+    for (what, message, change) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        apply(&store, forty_others()).await;
+        apply(&store, vec![Change::Message(message)]).await;
+        store.indexed().await.unwrap();
+        assert!(index_blocks(home.path(), "gnuold")[0].1 > 0, "{what}: its words are in the index");
+        let before = free_holding(&store, home.path(), b"gnuold").await;
+        assert_eq!(apply(&store, vec![change]).await.changed, 1, "{what}");
+        settled(&store).await;
+        gone_but_for(home.path(), "gnuold", &before, what);
+        let others: i64 = query(&store, |db| {
+            Ok(db.query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'other'", [], |r| r.get(0))?)
+        })
+        .await;
+        assert_eq!(others, 40, "{what}: the others are still found");
+    }
+}
+
+/// Ana's LID, under which her messages came before her number and LID were joined.
+const ANA_LID: &str = "100000000002@lid";
+
+/// Joins Ana's number and LID, and takes merge steps until her LID's chat has merged into her
+/// number's.
+async fn chats_joined(store: &Store) {
+    let joined = Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() };
+    apply(store, vec![Change::Person(joined)]).await;
+    let merging = || async {
+        query(store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?)).await
+    };
+    for _ in 0..50 {
+        if merging().await == 0 {
+            return;
+        }
+        store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    }
+    panic!("the chats never merged");
+}
+
+/// Two copies of a photo, one plain with its caption and one sent to be opened once, folded into
+/// one as Ana's chats merge, leave nothing of the caption the plain copy's row kept, whichever chat
+/// holds which: a fold where either copy opens once or has a time to go takes what the copy that
+/// goes says, and what the one kept said, as an erasure takes it, its caption taken out of the one
+/// kept as the fold marks it. The raw protobuf the one kept keeps holds its caption by design, for
+/// its opening, so the row's says another here. The copy to open once brings a raw protobuf whose
+/// thumbnail spills past a page. Among forty captioned photos in the indexes' segments.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_folded_with_its_view_once_copy_leaves_nothing_of_the_caption_its_plain_copy_kept() {
+    for (plain_in, once_in) in [(ANA_LID, ANA), (ANA, ANA_LID)] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let others =
+            (0..40i64).map(|k| Change::Message(captioned(&format!("o{k:02}"), &format!("photo{k} by the sea"))));
+        apply(&store, others.collect()).await;
+        let caption = "gnucaption by the sea";
+        let plain = Message {
+            chat: plain_in.into(),
+            sender: Some(plain_in.into()),
+            raw: Some(Packed(raw_of("once", photo_of("by the sea", None)))),
+            ..captioned("once", caption)
+        };
+        let raw = Packed(raw_of("once", wrapped(photo_of("by the sea", Some(noise(11, 20_000))))));
+        let window = raw.0[raw.0.len() / 2..raw.0.len() / 2 + 64].to_vec();
+        let once = Message {
+            chat: once_in.into(),
+            sender: Some(once_in.into()),
+            text: None,
+            spans: None,
+            summary: "View once photo".into(),
+            view_once: true,
+            raw: Some(raw),
+            ..captioned("once", "")
+        };
+        apply(&store, vec![Change::Message(plain), Change::Message(once)]).await;
+        store.indexed().await.unwrap();
+        let blocks = index_blocks(home.path(), "gnucaption");
+        assert!(blocks[0].1 > 0 && blocks[2].1 > 0, "the plain copy's caption is found: {blocks:?}");
+        let before = free_holding(&store, home.path(), b"gnucaption").await;
+        let raw_before = free_holding(&store, home.path(), &window).await;
+        chats_joined(&store).await;
+        settled(&store).await;
+        gone_but_for(home.path(), "gnucaption", &before, &format!("the caption the plain copy under {plain_in} kept"));
+        if once_in == ANA_LID {
+            bytes_gone_but_for(home.path(), &window, &raw_before, "the raw protobuf of the copy that went");
+        }
+        let said = said(&store, "once").await;
+        assert_eq!(said, (None, None, Some("View once photo".into())), "the photo opens once, plain under {plain_in}");
+    }
+}
+
+/// A whole merge that comes after the WAL an erasure left was emptied, as one waiting for its time
+/// after the last whole merge does, has the WAL emptied again once it's done, so jaw.db takes the
+/// pages it zeroed at once rather than at the checkpointer's next pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whole_merge_after_the_wal_an_erasure_left_was_emptied_has_it_emptied_again() {
+    let home = tempfile::tempdir().unwrap();
+    let limits = crate::store::Limits { whole_merge_every: Duration::from_secs(8), ..crate::store::LIMITS };
+    let store = Store::open_with(home.path(), limits).unwrap();
+    for batch in 0..6i64 {
+        let links = (0..50i64).map(|k| {
+            let goes = (batch, k) == (2, 20);
+            let site = if goes { "wombatlater".to_string() } else { format!("site{batch}x{k}") };
+            let message = linked(&format!("l{batch}{k:02}"), &site, 0);
+            let expires_at = (goes || (batch, k) == (0, 0)).then_some(LATER);
+            Change::Message(Message { at: AT + batch * 100 + k, expires_at, ..message })
+        });
+        apply(&store, links.collect()).await;
+        store.indexed().await.unwrap();
+    }
+    // The first erasure's whole merges go at once, so the next wait eight seconds after they began.
+    let first = n_of(&store, "l000").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n: first, at: LATER }]).await.changed, 1);
+    settled(&store).await;
+    let before = free_holding(&store, home.path(), b"wombatlater").await;
+    let n = n_of(&store, "l220").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER }]).await.changed, 1);
+    assert!(wal_emptied(&store).await, "the WAL the erasure left is emptied first");
+    assert!(merge_noted(&store).await.is_some(), "while its whole merges wait");
+    assert!(merged(&store).await, "they're done");
+    assert!(wal_emptied(&store).await, "and the WAL they left is emptied too");
+    gone_but_for(home.path(), "wombatlater", &before, "its link's words");
+}
+
+/// The kinds backfill making a row it couldn't show one to open once, which an edit had given
+/// words, takes those words out as an erasure takes them: a photo sent to be opened once says only
+/// what it is. Among forty other messages in the index's segments.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_kinds_backfill_making_a_row_one_to_open_once_leaves_nothing_of_the_words_it_had() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, forty_others()).await;
+    let unshown = Message {
+        kind: "unknown",
+        edited_at: Some(AT + 60),
+        raw: Some(Packed(raw_of("goes", wrapped(photo_of("a caption", None))))),
+        ..message(ANA, "goes", AT + 50, "gnuedit words here", None)
+    };
+    apply(&store, vec![Change::Message(unshown)]).await;
+    store.indexed().await.unwrap();
+    assert!(index_blocks(home.path(), "gnuedit")[0].1 > 0, "its words are in the index");
+    let before = free_holding(&store, home.path(), b"gnuedit").await;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) SELECT 'kinds', 0, max(n) FROM messages", []).unwrap();
+    let left =
+        || db.query_row("SELECT count(*) FROM backfills WHERE name = 'kinds'", [], |r| r.get::<_, i64>(0)).unwrap();
+    for _ in 0..20 {
+        if left() == 0 {
+            break;
+        }
+        store.apply(Lane::Background, vec![Change::Backfill(KINDS)]).await.unwrap();
+    }
+    assert_eq!(left(), 0, "the backfill is done");
+    drop(db);
+    settled(&store).await;
+    gone_but_for(home.path(), "gnuedit", &before, "the words the edit gave it");
+    assert_eq!(said(&store, "goes").await, (None, None, Some("View once photo".into())));
+}
+
+/// A backfill reading a message with a time to go again from its raw protobuf takes what its row
+/// said before out as an erasure takes it: a location whose row has words an earlier converter
+/// gave it, read again as this one reads it. Among forty other messages in the index's segments.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backfill_reading_a_disappearing_message_again_leaves_nothing_of_what_its_row_said() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, forty_others()).await;
+    let location = e2e::Message {
+        location_message: Some(Box::new(e2e::LocationMessage {
+            degrees_latitude: Some(38.7118),
+            degrees_longitude: Some(-9.1301),
+            name: Some("Miradouro".into()),
+            address: Some("Largo de Santa Luzia, Lisboa".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let place = Message {
+        kind: "location",
+        summary: "Location: gnuplace Miradouro".into(),
+        detail: Some(serde_json::json!({ "location": { "name": "gnuplace Miradouro" } }).to_string()),
+        raw: Some(Packed(raw_of("place", location))),
+        ..message(ANA, "place", AT + 50, "gnuplace Miradouro", Some(LATER))
+    };
+    apply(&store, vec![Change::Message(place)]).await;
+    store.indexed().await.unwrap();
+    let before = free_holding(&store, home.path(), b"gnuplace").await;
+    // The places backfill left to do over every message, as a migration leaves it.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) SELECT 'places', 0, max(n) FROM messages", []).unwrap();
+    let left =
+        || db.query_row("SELECT count(*) FROM backfills WHERE name = 'places'", [], |r| r.get::<_, i64>(0)).unwrap();
+    for _ in 0..20 {
+        if left() == 0 {
+            break;
+        }
+        store.apply(Lane::Background, vec![Change::Backfill(PLACES)]).await.unwrap();
+    }
+    assert_eq!(left(), 0, "the backfill is done");
+    drop(db);
+    settled(&store).await;
+    gone_but_for(home.path(), "gnuplace", &before, "what its row said before");
+    assert_eq!(said(&store, "place").await.0.as_deref(), Some("Miradouro\nLargo de Santa Luzia, Lisboa"));
 }
 
 fn opened(chat: &str, id: &str) -> Change {
