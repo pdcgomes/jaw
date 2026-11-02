@@ -397,6 +397,20 @@ async fn voices_left(store: &Store) -> Option<(i64, i64)> {
     .await
 }
 
+/// jawd's state over `store` in `home`, whose `status` says what's left of each backfill as
+/// `jawd status` does.
+fn jawd_over(home: &std::path::Path, store: &Store) -> crate::state::State {
+    let live = std::sync::Arc::new(std::sync::Mutex::new(crate::sync::starting(store, true)));
+    let engine = Err(("go", "no engine in this test".to_string()));
+    let pushes = tokio::sync::broadcast::channel(16).0;
+    crate::state::State::new(home, engine, Vec::new(), live, Some(store.clone()), pushes).unwrap()
+}
+
+/// What `jawd status` says is left of the voices backfill.
+fn voices_said(jawd: &crate::state::State) -> u64 {
+    jawd.status().stored.expect("status reads jaw.db").voices_backfill
+}
+
 /// Takes the voices backfill's steps until it's done, as `backfilled` takes the locations'.
 async fn voices_backfilled(store: &Store) {
     let mut steps = store.backfill_steps(links::VOICES);
@@ -418,7 +432,8 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
     drop(db);
     let store = Store::open(home.path()).unwrap();
     assert_eq!(voices_left(&store).await, Some((0, 150)), "the migration leaves the backfill to do");
-    assert_eq!(store.backfill_left(links::VOICES).unwrap(), 150, "as jawd status says");
+    let jawd = jawd_over(home.path(), &store);
+    assert_eq!(voices_said(&jawd), 150, "as jawd status says");
     let before = rows(&store).await;
     assert!(before[4].4.as_ref().unwrap().get("voice").is_none(), "a voice message from before has no voice");
     let since = last_event(&store).await;
@@ -426,6 +441,7 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
     store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
     let (after, _) = voices_left(&store).await.expect("more to look at");
     assert!((5..=64).contains(&after), "a step looks at 64 messages at most: {after}");
+    assert_eq!(voices_said(&jawd), 150 - after as u64, "jawd status says what's left");
     let first = rows(&store).await;
     let waveform: Vec<u8> = (0..64).map(|i| ((i * 7 + 5) % 101) as u8).collect();
     assert_eq!(first[4].4.as_ref().unwrap()["voice"], json!({ "seconds": 14, "waveform": waveform }));
@@ -435,6 +451,7 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
     assert_eq!(first[144], before[144], "and a voice message the step hasn't reached is as it was");
 
     voices_backfilled(&store).await;
+    assert_eq!(voices_said(&jawd), 0, "and once it's done, that nothing is");
     let after = rows(&store).await;
     for (n, (now, was)) in after.iter().zip(&before).enumerate() {
         let n = n as i64 + 1;
