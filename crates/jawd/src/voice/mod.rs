@@ -97,6 +97,10 @@ struct Inner {
     folder: Arc<folder::Folder>,
     /// What `status` says, as the voice task last left it.
     status: Mutex<VoiceStatus>,
+    /// Holds the voice task before it takes anything more, while set, for the tests of what
+    /// waits for it meanwhile.
+    #[cfg(test)]
+    hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Voice {
@@ -125,6 +129,8 @@ impl Voice {
         let (audio, events) = jaw_voice::Voice::start(speaker, microphone);
         let audio = Arc::new(audio);
         let (asks, asked) = mpsc::channel(ASKS);
+        #[cfg(test)]
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let inner = Arc::new(Inner {
             asks: asks.clone(),
             audio: audio.clone(),
@@ -134,6 +140,8 @@ impl Voice {
                 removed_at_start: folder.removed_at_start,
                 ..VoiceStatus::default()
             }),
+            #[cfg(test)]
+            hold: hold.clone(),
         });
         let (heard, hearing) = mpsc::channel(jaw_voice::EVENTS);
         // The thread's events come on a channel of its own, which a thread of ours drains into the
@@ -162,9 +170,17 @@ impl Voice {
             plays: 0,
             say_again: None,
             status: Arc::downgrade(&inner),
+            #[cfg(test)]
+            hold,
         };
         tokio::spawn(task.run(asked, hearing));
         Ok(Voice { inner })
+    }
+
+    /// Holds the voice task once it has taken what it's taking, while `held`.
+    #[cfg(test)]
+    pub fn hold(&self, held: bool) {
+        self.inner.hold.store(held, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Answers one of the voice methods, for the connection numbered `connection`.
@@ -317,11 +333,17 @@ struct Task {
     /// When WhatsApp is next told again that you're recording.
     say_again: Option<Instant>,
     status: std::sync::Weak<Inner>,
+    #[cfg(test)]
+    hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Task {
     async fn run(mut self, mut asked: mpsc::Receiver<Ask>, mut hearing: mpsc::Receiver<Event>) {
         loop {
+            #[cfg(test)]
+            while self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             let again = self.say_again;
             tokio::select! {
                 ask = asked.recv() => match ask {

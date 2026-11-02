@@ -727,6 +727,95 @@ async fn a_connection_ending_throws_its_recording_away() {
     assert_eq!(rig.voice.status().recording, None);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_recorded_and_closes_its_socket_throws_its_recording_away() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    let socket = jaw_proto::local::socket(home.path());
+    let listener = crate::sock::listen(&socket).unwrap();
+    let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&rig.store, true)));
+    let engine = Err(("demo", "the rig's sending has an engine of its own".to_string()));
+    let state =
+        crate::state::State::new(home.path(), engine, Vec::new(), live, Some(rig.store.clone()), rig.pushes.clone())
+            .unwrap()
+            .with_voice(rig.voice.clone());
+    tokio::spawn(crate::sock::serve(Arc::new(state), listener));
+    let mut pushes = rig.pushes.subscribe();
+    let connection = tokio::task::spawn_blocking(move || {
+        let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0").unwrap();
+        connection.call("voice.record", json!({ "chat": ANA })).unwrap();
+        connection
+    })
+    .await
+    .unwrap();
+    heard_all(&heard).await;
+    let connection = tokio::task::spawn_blocking(move || {
+        let mut connection = connection;
+        connection.call("voice.stop", json!({})).unwrap();
+        connection
+    })
+    .await
+    .unwrap();
+    assert_eq!(rig.recordings().len(), 1, "stopped, it waits to be sent");
+    drop(connection);
+    recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
+    assert!(rig.recordings().is_empty(), "{:?}", rig.recordings());
+    assert_eq!(rig.voice.status().recording, None);
+
+    // One closed while it records stops the microphone there and then.
+    let path = jaw_proto::local::socket(home.path());
+    let connection = tokio::task::spawn_blocking(move || {
+        let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+        connection.call("voice.record", json!({ "chat": ANA })).unwrap();
+        connection
+    })
+    .await
+    .unwrap();
+    recordings(&mut pushes, "a level", |p| p["state"] == "recording").await;
+    drop(connection);
+    recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
+    assert!(rig.recordings().is_empty(), "nor its part: {:?}", rig.recordings());
+    assert_eq!(rig.voice.status().recording, None);
+    let waited = tokio::time::timeout(PATIENCE, async {
+        while rig.said().last() != Some(&(ANA.to_string(), PAUSED_SAID)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(waited.await.is_ok(), "WhatsApp is told you've stopped: {:?}", rig.said());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_ending_while_the_voice_tasks_requests_are_full_still_throws_its_recording_away() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.voice.call("voice.record", json!({ "chat": ANA }), 7).await.unwrap();
+    heard_all(&heard).await;
+    rig.voice.call("voice.stop", json!({}), 7).await.unwrap();
+    // Held, the voice task takes one of the 72 requests that come at most, and its requests fill.
+    rig.voice.hold(true);
+    let waiting: Vec<_> = (0..ASKS + 8)
+        .map(|_| {
+            let voice = rig.voice.clone();
+            tokio::spawn(async move { voice.call("voice.pause", json!({}), 8).await })
+        })
+        .collect();
+    let full = tokio::time::timeout(PATIENCE, async {
+        while rig.voice.inner.asks.capacity() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    assert!(full.await.is_ok(), "the voice task's requests never filled");
+    rig.voice.ended(7);
+    rig.voice.hold(false);
+    for waited in waiting {
+        waited.await.unwrap().unwrap();
+    }
+    recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
+    assert!(rig.recordings().is_empty(), "{:?}", rig.recordings());
+    assert_eq!(rig.voice.status().recording, None);
+}
+
 impl Rig {
     /// What the demo's WhatsApp was sent as message `id`, each time it was sent.
     fn sent(&self, id: &str) -> Vec<wa_proto::wa_web_protobufs_e2e::Message> {
