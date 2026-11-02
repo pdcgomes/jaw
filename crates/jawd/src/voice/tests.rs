@@ -837,6 +837,19 @@ async fn a_recording_goes_to_whatsapp_as_a_voice_note_with_its_waveform_length_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn voice_send_answers_after_a_synced_commit() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    rig.media.hold_making(true);
+    rig.recorded(&heard).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let synced = rig.store.storage().synced_commits;
+    rig.call("voice.send", json!({ "key": "jaw-voice-synced" })).await.unwrap();
+    let after = rig.store.storage().synced_commits;
+    assert!(after > synced, "voice.send was answered before its message reached the disk: {synced} then {after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sending_while_it_records_stops_it_first() {
     let home = tempfile::tempdir().unwrap();
     let (rig, _) = Rig::recording(home.path(), tone(30.0), 1.0, jaw_voice::RECORDING_LIMIT).await;
