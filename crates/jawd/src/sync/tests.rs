@@ -1735,6 +1735,42 @@ async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without
     assert_eq!(store.count("messages").unwrap(), 1, "nothing twice");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_stays_in_the_spool_while_its_drain_cant_commit_and_goes_once_it_has() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    notifications(&store, 1).await;
+    // Nothing but settings, so the commit that drains it is the only write it makes.
+    let settings = wa_proto::wa_web_protobufs_history_sync::HistorySync {
+        sync_type: 2,
+        global_settings: Some(Default::default()),
+        ..Default::default()
+    };
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().insert("here".to_string(), Blob::Here(settings.encode_to_vec()));
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    // Another connection holds jaw.db's write lock, so the drain can't commit, as with a full disk,
+    // and the writer tries it again until it can.
+    let outside = Connection::open(home.path().join("jaw.db")).unwrap();
+    outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut trouble = store.trouble();
+    let spool = home.path().join("spool");
+    let file = spool.join("offer-here.pb");
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(offers, store.clone(), supervisor, knowing(), spool, Merges::default()));
+    offered.send(offer(1, "here")).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), trouble.wait_for(Option::is_some)).await.unwrap().unwrap();
+    assert!(file.exists(), "the blob stays while its drain can't commit");
+    assert_eq!(store.count("inbox").unwrap(), 1, "and so does its notification");
+    outside.execute_batch("ROLLBACK").unwrap();
+    until("the notification's drain", || store.count("inbox").unwrap() == 0).await;
+    until("the blob to leave the spool", || !file.exists()).await;
+    fetching.abort();
+    assert_eq!(store.count("history_kept").unwrap(), 1, "what it carried, kept before it went");
+    assert_eq!(engine.asked("history"), 1, "fetched once");
+}
+
 /// A connection event as the engine sends it, for the account 351910000001 (Pedro).
 fn connection_event(state: pb::connection::State) -> crate::engine::Incoming {
     let linked = !matches!(state, pb::connection::State::Unlinked);
