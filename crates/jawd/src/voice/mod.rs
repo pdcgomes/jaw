@@ -1,31 +1,64 @@
-//! Voice messages, played on jawd's machine (see protocol/README.md's "Voice"). jawd owns
-//! jaw-voice's audio thread, started with it and holding no device while nothing plays, and one
-//! task, the voice task, is all that drives it: every `voice.*` request and every event of the
-//! thread's goes through it in order, so one thing plays at a time and its state is in one place. A
-//! voice message plays from its file in the cache, which media wants first, at interactive
-//! priority, when it isn't there; the thread's events become the `playback` push, to every
-//! connection. What a connection plays stops when it ends, unless another has played something
-//! since.
+//! Voice messages, played and recorded on jawd's machine (see protocol/README.md's "Voice"). jawd
+//! owns jaw-voice's audio thread, started with it and holding no device while nothing plays or
+//! records, and one task, the voice task, is all that drives it: every `voice.*` request and every
+//! event of the thread's goes through it in order, so one thing plays or records at a time and its
+//! state is in one place. A voice message plays from its file in the cache, which media wants
+//! first, at interactive priority, when it isn't there. A recording goes to a name of its own in the
+//! recordings folder (`folder`), WhatsApp told you're recording while it lasts, and is listened to
+//! from its file once it's stopped. The thread's events become the `playback` and `recording`
+//! pushes, to every connection. A recording lasts while jawd runs and is the connection's that
+//! asked for it: it's thrown away when that connection ends, or jawd stops, whether it's still
+//! going or stopped; and what a connection plays stops when it ends, unless another has played
+//! something since.
 
+mod folder;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use jaw_proto::voice::{Playback, PlaybackState, VoicePlay, VoiceSeek, VoiceSpeed, VoiceStatus};
+use jaw_proto::voice::{
+    Playback, PlaybackState, Recording as RecordingPush, RecordingState, VoicePlay, VoiceRecord, VoiceSeek, VoiceSpeed,
+    VoiceStatus,
+};
 use jaw_proto::{Error, Push, code};
-use jaw_voice::{Event, Microphone, Speaker, Speed};
+use jaw_voice::{Event, Microphone, Recorded, RecordingEnd, Speaker, Speed};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::media::{Media, VoiceCopy};
+use crate::send::Sending;
+use crate::store::{Store, read};
+use crate::work::Priority;
 
 /// The requests waiting for the voice task.
 const ASKS: usize = 64;
+
+/// What jawd may change about voice; the defaults are the protocol's.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// The longest recording, 15 minutes, which jaw-voice never passes.
+    pub limit: Duration,
+    /// How often WhatsApp is told again that you're recording, within typing's quiet spell.
+    pub recording_again: Duration,
+    /// The free space a recording needs to start: room for it, the copy kept to send it, and
+    /// what jaw keeps free besides.
+    pub room: u64,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { limit: jaw_voice::RECORDING_LIMIT, recording_again: Duration::from_secs(5), room: 64_000_000 }
+    }
+}
+
+/// Where a request's answer goes.
+type Answer = oneshot::Sender<Result<Value, Error>>;
 
 /// What a connection asked the voice task, and where its answer goes.
 enum Ask {
@@ -33,16 +66,16 @@ enum Ask {
         method: String,
         params: Value,
         connection: u64,
-        answer: oneshot::Sender<Result<Value, Error>>,
+        answer: Answer,
     },
-    /// A connection ended, and what it played with it.
+    /// A connection ended, and what it played and recorded with it.
     Ended(u64),
     /// The file a play waited for is in the cache, or can't be: `play` names the play.
     Downloaded {
         play: u64,
         file: Result<PathBuf, Error>,
     },
-    /// jawd is stopping: nothing plays after the answer.
+    /// jawd is stopping: nothing plays or records after the answer.
     Stop(oneshot::Sender<()>),
 }
 
@@ -55,23 +88,47 @@ pub struct Voice {
 struct Inner {
     asks: mpsc::Sender<Ask>,
     audio: Arc<jaw_voice::Voice>,
+    folder: Arc<folder::Folder>,
     /// What `status` says, as the voice task last left it.
     status: Mutex<VoiceStatus>,
 }
 
 impl Voice {
-    /// Starts the audio thread on `speaker` and `microphone`, and the voice task, which finds files
-    /// through `media` and pushes `playback` to `pushes`.
+    /// Prepares the recordings folder in `home`, then starts the audio thread on `speaker` and
+    /// `microphone`, and the voice task, which finds voice messages' files through `media`, the
+    /// chats recordings are for in `store`, tells WhatsApp you're recording through `sending`, and
+    /// pushes `playback` and `recording` to `pushes`.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
+        home: &Path,
+        store: Store,
         media: Media,
+        sending: Sending,
         pushes: broadcast::Sender<Push>,
         speaker: impl Speaker + 'static,
         microphone: impl Microphone + 'static,
-    ) -> Voice {
+        config: Config,
+    ) -> anyhow::Result<Voice> {
+        let folder = Arc::new(folder::Folder::prepare(home)?);
+        if folder.removed_at_start > 0 {
+            eprintln!("jawd: removed {} recordings a stopped jawd left", folder.removed_at_start);
+        }
+        if !folder.hard_links {
+            eprintln!("jawd: the recordings folder takes no hard links, so jawd can't record");
+        }
         let (audio, events) = jaw_voice::Voice::start(speaker, microphone);
         let audio = Arc::new(audio);
         let (asks, asked) = mpsc::channel(ASKS);
-        let inner = Arc::new(Inner { asks: asks.clone(), audio: audio.clone(), status: Mutex::default() });
+        let inner = Arc::new(Inner {
+            asks: asks.clone(),
+            audio: audio.clone(),
+            folder: folder.clone(),
+            status: Mutex::new(VoiceStatus {
+                hard_links: folder.hard_links,
+                removed_at_start: folder.removed_at_start,
+                ..VoiceStatus::default()
+            }),
+        });
         let (heard, hearing) = mpsc::channel(jaw_voice::EVENTS);
         // The thread's events come on a channel of its own, which a thread of ours drains into the
         // task's, so the task waits on one runtime's channels alone.
@@ -85,9 +142,23 @@ impl Voice {
                 }
             })
             .expect("the voice events' thread starts");
-        let task = Task { audio, media, pushes, asks, playing: None, plays: 0, status: Arc::downgrade(&inner) };
+        let task = Task {
+            audio,
+            store,
+            media,
+            sending,
+            pushes,
+            asks,
+            config,
+            folder,
+            playing: None,
+            recording: None,
+            plays: 0,
+            say_again: None,
+            status: Arc::downgrade(&inner),
+        };
         tokio::spawn(task.run(asked, hearing));
-        Voice { inner }
+        Ok(Voice { inner })
     }
 
     /// Answers one of the voice methods, for the connection numbered `connection`.
@@ -101,14 +172,15 @@ impl Voice {
     }
 
     /// The methods `call` answers.
-    pub const METHODS: &[&str] = &["voice.play", "voice.pause", "voice.seek", "voice.speed"];
+    pub const METHODS: &[&str] =
+        &["voice.play", "voice.pause", "voice.seek", "voice.speed", "voice.record", "voice.stop", "voice.cancel"];
 
-    /// Connection `connection` has ended: what it plays stops.
+    /// Connection `connection` has ended: what it plays stops, and its recording is thrown away.
     pub fn ended(&self, connection: u64) {
         let _ = self.inner.asks.try_send(Ask::Ended(connection));
     }
 
-    /// Stops what plays, as jawd stops.
+    /// Stops what plays and throws away the recording, going or stopped, as jawd stops.
     pub async fn stop(&self) {
         let (stopped, stopping) = oneshot::channel();
         if self.inner.asks.send(Ask::Stop(stopped)).await.is_ok() {
@@ -119,18 +191,18 @@ impl Voice {
     pub fn status(&self) -> VoiceStatus {
         let mut status = self.inner.status.lock().expect("voice status").clone();
         let stats = self.inner.audio.stats();
-        status.underruns = stats.underruns;
-        status.overruns = stats.overruns;
-        status.dropped_events = stats.dropped_events;
-        status.concealed = stats.concealed;
+        (status.underruns, status.overruns, status.dropped_events, status.concealed) =
+            (stats.underruns, stats.overruns, stats.dropped_events, stats.concealed);
+        (status.files, status.bytes) = self.inner.folder.counts();
         status
     }
 }
 
-/// What plays: a voice message, by its ID.
+/// What plays: a voice message, by its ID, or the stopped recording.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum What {
     Message(String),
+    Recording,
 }
 
 /// The audio thread's name for play `play` of `what`: numbered, so the events of a play that ended
@@ -138,13 +210,19 @@ enum What {
 fn key(play: u64, what: &What) -> String {
     match what {
         What::Message(id) => format!("{play} message:{id}"),
+        What::Recording => format!("{play} recording"),
     }
 }
 
 /// The play and what plays that a key names.
 fn from_key(key: &str) -> Option<(u64, What)> {
     let (play, what) = key.split_once(' ')?;
-    Some((play.parse().ok()?, What::Message(what.strip_prefix("message:")?.to_string())))
+    let what = match what.strip_prefix("message:") {
+        Some(id) => What::Message(id.to_string()),
+        None if what == "recording" => What::Recording,
+        None => return None,
+    };
+    Some((play.parse().ok()?, what))
 }
 
 /// How what plays is.
@@ -170,26 +248,62 @@ struct Playing {
     speed: Speed,
 }
 
+/// How the recording is.
+enum Rec {
+    /// Asked for: `voice.record` is answered once the thread has started it, with its first level,
+    /// or refused it.
+    Starting(Answer),
+    Going,
+    /// Asked to stop: these are answered once it's synced and in place, or thrown away.
+    Stopping(Vec<Answer>),
+    /// Asked to be thrown away while it went or stopped: these are answered once it is.
+    Cancelling(Vec<Answer>),
+    /// Synced and in place under its name, to listen to, send or throw away.
+    Stopped(Recorded),
+}
+
+struct Recording {
+    chat: String,
+    /// The ID made for the message it may become, which names its file.
+    id: String,
+    path: PathBuf,
+    /// The connection that asked for it.
+    connection: u64,
+    now: Rec,
+    seconds: f64,
+    /// Whether WhatsApp has been told you're recording.
+    said: bool,
+}
+
 struct Task {
     audio: Arc<jaw_voice::Voice>,
+    store: Store,
     media: Media,
+    sending: Sending,
     pushes: broadcast::Sender<Push>,
     /// For the waits a play starts, which say when its file is in.
     asks: mpsc::Sender<Ask>,
+    config: Config,
+    folder: Arc<folder::Folder>,
     playing: Option<Playing>,
+    recording: Option<Recording>,
     /// Numbers each play, so a later one leaves an earlier waiting for nothing, and the thread's
     /// events of each are told apart.
     plays: u64,
+    /// When WhatsApp is next told again that you're recording.
+    say_again: Option<Instant>,
     status: std::sync::Weak<Inner>,
 }
 
 impl Task {
     async fn run(mut self, mut asked: mpsc::Receiver<Ask>, mut hearing: mpsc::Receiver<Event>) {
         loop {
+            let again = self.say_again;
             tokio::select! {
                 ask = asked.recv() => match ask {
                     Some(Ask::Stop(stopped)) => {
                         self.stop_playing();
+                        self.throw_away(Vec::new()).await;
                         self.publish();
                         let _ = stopped.send(());
                     }
@@ -197,9 +311,12 @@ impl Task {
                     None => return,
                 },
                 event = hearing.recv() => match event {
-                    Some(event) => self.heard(event),
+                    Some(event) => self.heard(event).await,
                     None => return,
                 },
+                () = tokio::time::sleep_until(again.unwrap_or_else(Instant::now)), if again.is_some() => {
+                    self.say("recording").await;
+                }
             }
             self.publish();
         }
@@ -207,13 +324,13 @@ impl Task {
 
     async fn ask(&mut self, ask: Ask) {
         match ask {
-            Ask::Call { method, params, connection, answer } => {
-                let answered = self.call(&method, params, connection).await;
-                let _ = answer.send(answered);
-            }
+            Ask::Call { method, params, connection, answer } => self.call(&method, params, connection, answer).await,
             Ask::Ended(connection) => {
                 if self.playing.as_ref().is_some_and(|p| p.connection == connection) {
                     self.stop_playing();
+                }
+                if self.recording.as_ref().is_some_and(|r| r.connection == connection) {
+                    self.throw_away(Vec::new()).await;
                 }
             }
             Ask::Downloaded { play, file } => self.downloaded(play, file),
@@ -223,28 +340,52 @@ impl Task {
         }
     }
 
-    async fn call(&mut self, method: &str, params: Value, connection: u64) -> Result<Value, Error> {
-        match method {
-            "voice.play" => self.play(params_of(method, params)?, connection).await,
+    async fn call(&mut self, method: &str, params: Value, connection: u64, answer: Answer) {
+        let answered = match method {
+            "voice.record" => match params_of::<VoiceRecord>(method, params) {
+                Ok(record) => return self.record(record.chat, connection, answer).await,
+                Err(e) => Err(e),
+            },
+            "voice.stop" => return self.stop_recording(answer),
+            "voice.cancel" => return self.cancel(answer).await,
+            "voice.play" => match params_of(method, params) {
+                Ok(play) => self.play(play, connection).await,
+                Err(e) => Err(e),
+            },
             "voice.pause" => self.pause(),
-            "voice.seek" => self.seek(params_of::<VoiceSeek>(method, params)?.at),
-            "voice.speed" => self.speed(speed_of(params_of::<VoiceSpeed>(method, params)?.speed)?),
+            "voice.seek" => params_of::<VoiceSeek>(method, params).and_then(|seek| self.seek(seek.at)),
+            "voice.speed" => {
+                params_of::<VoiceSpeed>(method, params).and_then(|s| speed_of(s.speed)).and_then(|s| self.speed(s))
+            }
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
-        }
+        };
+        let _ = answer.send(answered);
     }
 
     async fn play(&mut self, play: VoicePlay, connection: u64) -> Result<Value, Error> {
         let speed = play.speed.map_or(Ok(Speed::Normal), speed_of)?;
         let at = play.at.map(seconds_of).transpose()?;
-        let id = match (play.message, play.recording) {
-            (_, true) => return Err(Error::new(code::NOT_FOUND, "there's no recording to play")),
-            (Some(id), false) => id,
+        let (what, path, seconds, copy) = match (play.message, play.recording) {
+            (_, true) => {
+                let Some(recording) = self.recording.as_ref() else {
+                    return Err(Error::new(code::NOT_FOUND, "there's no recording to play"));
+                };
+                let Rec::Stopped(recorded) = &recording.now else {
+                    return Err(Error::new(code::NOT_ALLOWED, "jaw is still recording; stop it to listen first"));
+                };
+                (What::Recording, Some(recording.path.clone()), recorded.duration.as_secs_f64(), None)
+            }
+            (Some(id), false) => {
+                if self.recording.as_ref().is_some_and(|r| !matches!(r.now, Rec::Stopped(_))) {
+                    return Err(Error::new(code::NOT_ALLOWED, "jaw is recording; stop or send that first"));
+                }
+                let copy = self.media.voice_file(&id, play.chat.as_deref()).await?;
+                (What::Message(id), copy.path.clone(), copy.seconds.unwrap_or(0.0), Some(copy))
+            }
             (None, false) => return Err(bad_param("message", "voice.play names a voice message, or the recording")),
         };
-        let what = What::Message(id.clone());
-        let copy = self.media.voice_file(&id, play.chat.as_deref()).await?;
         let same = self.playing.as_ref().filter(|p| p.what == what).map(|p| (p.now, p.at));
-        // Without `at`, a message paused carries on where it paused; any other starts at 0.
+        // Without `at`, what's paused carries on where it paused; anything else starts at 0.
         let at = match same {
             Some((Now::Paused, _)) if at.is_none() => {
                 try_audio(self.audio.set_speed(speed))?;
@@ -257,7 +398,6 @@ impl Task {
             Some((Now::Held, held)) if at.is_none() => held,
             _ => at.unwrap_or(0.0),
         };
-        let seconds = copy.seconds.unwrap_or(0.0);
         // One waiting for its file, or held before it, gives way: to another message, pushed
         // stopped, or to this one, which carries on from here.
         if same.is_some_and(|(now, _)| matches!(now, Now::Waiting | Now::Held)) {
@@ -267,16 +407,16 @@ impl Task {
         }
         self.plays += 1;
         let play = self.plays;
-        match copy.path.clone() {
-            Some(path) => {
+        match (path, copy) {
+            (Some(path), copy) => {
                 try_audio(self.audio.play(key(play, &what), path, Duration::from_secs_f64(at), speed))?;
                 self.playing = Some(Playing { what, play, connection, now: Now::Playing, at, seconds, speed });
-                if let Some(sha256) = copy.sha256.clone() {
+                if let Some(sha256) = copy.and_then(|c| c.sha256) {
                     let media = self.media.clone();
                     tokio::spawn(async move { media.used(sha256).await });
                 }
             }
-            None => {
+            (None, Some(copy)) => {
                 self.media.fetch_now(&copy).await?;
                 // What the thread plays stops now, and pushes `stopped` itself.
                 if self.playing.is_some() {
@@ -285,6 +425,7 @@ impl Task {
                 self.playing = Some(Playing { what, play, connection, now: Now::Waiting, at, seconds, speed });
                 self.wait_for(play, &copy);
             }
+            (None, None) => return Err(Error::new(code::INTERNAL, "the recording has no file")),
         }
         Ok(nothing())
     }
@@ -378,8 +519,162 @@ impl Task {
         }
     }
 
+    /// `voice.record`: answered once the thread has started it, or with why not.
+    async fn record(&mut self, chat: String, connection: u64, answer: Answer) {
+        if let Some(recording) = &self.recording {
+            let why = match recording.now {
+                Rec::Stopped(_) => "there's a recording stopped already; send it or throw it away first",
+                _ => "jaw is already recording; stop or cancel that first",
+            };
+            let _ = answer.send(Err(Error::new(code::NOT_ALLOWED, why)));
+            return;
+        }
+        let looked = chat.clone();
+        let known = self.store.reads().query(Priority::Interactive, move |db| read::chat_n(db, &looked)).await;
+        let refused = match known {
+            Err(e) => Some(Error::new(code::INTERNAL, format!("jawd couldn't read jaw.db: {e:#}"))),
+            Ok(None) => {
+                Some(Error::new(code::NOT_FOUND, format!("jawd has no chat {chat}; chat.start finds or makes one")))
+            }
+            Ok(Some(_)) if !self.folder.hard_links => Some(Error::new(
+                code::NOT_ALLOWED,
+                "jaw can't record here: jaw's folder takes no hard links, which putting a recording in place needs",
+            )),
+            Ok(Some(_)) => self.media.free_space().filter(|&free| free < self.config.room).map(|free| {
+                let mut error = Error::new(
+                    code::LIMIT,
+                    format!(
+                        "the disk has {} MB free, and a recording needs {} MB",
+                        free / 1_000_000,
+                        self.config.room / 1_000_000
+                    ),
+                );
+                error.data = Some(json!({ "limit": "disk" }));
+                error
+            }),
+        };
+        if let Some(error) = refused {
+            let _ = answer.send(Err(error));
+            return;
+        }
+        let id = match crate::send::new_id() {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = answer.send(Err(Error::new(code::INTERNAL, format!("jawd couldn't make a message ID: {e}"))));
+                return;
+            }
+        };
+        self.stop_playing();
+        let path = self.folder.path_for(&id);
+        if let Err(error) = try_audio(self.audio.record(path.clone(), self.config.limit)) {
+            let _ = answer.send(Err(error));
+            return;
+        }
+        self.recording =
+            Some(Recording { chat, id, path, connection, now: Rec::Starting(answer), seconds: 0.0, said: false });
+    }
+
+    /// `voice.stop`: answered once the recording is synced and in place under its name.
+    fn stop_recording(&mut self, answer: Answer) {
+        let Some(recording) = self.recording.as_mut() else {
+            let _ = answer.send(Err(Error::new(code::NOT_FOUND, "jaw isn't recording")));
+            return;
+        };
+        match &mut recording.now {
+            Rec::Going => match try_audio(self.audio.stop_recording()) {
+                Ok(()) => recording.now = Rec::Stopping(vec![answer]),
+                Err(error) => {
+                    let _ = answer.send(Err(error));
+                }
+            },
+            Rec::Stopping(waiting) => waiting.push(answer),
+            Rec::Stopped(_) => {
+                let _ = answer.send(Ok(nothing()));
+            }
+            Rec::Starting(_) | Rec::Cancelling(_) => {
+                let why = "the recording is starting or being thrown away; try again in a moment";
+                let _ = answer.send(Err(Error::new(code::NOT_ALLOWED, why)));
+            }
+        }
+    }
+
+    /// `voice.cancel`: the recording thrown away, going or stopped, answered once it is; with none,
+    /// there's nothing to throw away.
+    async fn cancel(&mut self, answer: Answer) {
+        match self.recording.as_ref().map(|r| &r.now) {
+            None => {
+                let _ = answer.send(Ok(nothing()));
+            }
+            Some(Rec::Starting(_)) => {
+                let why = "the recording is starting; try again in a moment";
+                let _ = answer.send(Err(Error::new(code::NOT_ALLOWED, why)));
+            }
+            Some(_) => self.throw_away(vec![answer]).await,
+        }
+    }
+
+    /// Throws the recording away, going or stopped, answering `answers` once it's gone.
+    async fn throw_away(&mut self, mut answers: Vec<Answer>) {
+        let Some(recording) = self.recording.as_mut() else {
+            for answer in answers {
+                let _ = answer.send(Ok(nothing()));
+            }
+            return;
+        };
+        let now = std::mem::replace(&mut recording.now, Rec::Cancelling(Vec::new()));
+        match now {
+            Rec::Going | Rec::Starting(_) => {
+                if let Rec::Starting(answer) = now {
+                    let _ = answer.send(Err(Error::new(code::NOT_FOUND, "the recording was thrown away")));
+                }
+                let _ = self.audio.cancel_recording();
+                recording.now = Rec::Cancelling(answers);
+            }
+            // Stopping, it ends in place, and is removed once it has.
+            Rec::Stopping(stopping) => {
+                for answer in stopping {
+                    let _ = answer.send(Err(Error::new(code::NOT_FOUND, "the recording was thrown away")));
+                }
+                recording.now = Rec::Cancelling(answers);
+            }
+            Rec::Cancelling(mut waiting) => {
+                waiting.append(&mut answers);
+                recording.now = Rec::Cancelling(waiting);
+            }
+            Rec::Stopped(_) => {
+                if self.playing.as_ref().is_some_and(|p| p.what == What::Recording) {
+                    self.stop_playing();
+                }
+                let recording = self.recording.take().expect("a recording");
+                self.folder.remove(&recording.path);
+                self.recorded(RecordingState::Cancelled, 0.0);
+                for answer in answers {
+                    let _ = answer.send(Ok(nothing()));
+                }
+            }
+        }
+    }
+
+    /// Tells WhatsApp you're recording in the recording's chat, or that you've stopped.
+    async fn say(&mut self, state: &str) {
+        let Some(recording) = self.recording.as_mut() else {
+            self.say_again = None;
+            return;
+        };
+        let recording_now = state == "recording";
+        if !recording_now && !recording.said {
+            return;
+        }
+        recording.said = recording_now;
+        let chat = recording.chat.clone();
+        self.say_again = recording_now.then(|| Instant::now() + self.config.recording_again);
+        if let Err(e) = self.sending.call("typing", json!({ "chat": chat, "state": state })).await {
+            eprintln!("jawd: can't say you're recording in {chat}: {}", e.message);
+        }
+    }
+
     /// What the audio thread said.
-    fn heard(&mut self, event: Event) {
+    async fn heard(&mut self, event: Event) {
         match event {
             Event::Playback { key, state, at, length, speed } => {
                 let Some((play, what)) = from_key(&key) else { return };
@@ -410,8 +705,123 @@ impl Task {
                 }
                 self.push(failed);
             }
-            _ => {}
+            Event::Recording { elapsed, level } => {
+                let Some(recording) = self.recording.as_mut() else { return };
+                recording.seconds = elapsed.as_secs_f64();
+                let seconds = recording.seconds;
+                if matches!(recording.now, Rec::Starting(_))
+                    && let Rec::Starting(answer) = std::mem::replace(&mut recording.now, Rec::Going)
+                {
+                    let _ = answer.send(Ok(nothing()));
+                    self.say("recording").await;
+                }
+                if matches!(self.recording.as_ref().map(|r| &r.now), Some(Rec::Going | Rec::Stopping(_))) {
+                    let level = Some(level);
+                    self.push_recording(RecordingPush { level, ..recorded(RecordingState::Recording, seconds) });
+                }
+            }
+            Event::RecordingSilent => {
+                let Some(seconds) = self.recording.as_ref().map(|r| r.seconds) else { return };
+                if let Some(inner) = self.status.upgrade() {
+                    inner.status.lock().expect("voice status").silent = true;
+                }
+                self.recorded(RecordingState::Silent, seconds);
+            }
+            Event::Recorded(made) => self.made(made).await,
+            Event::RecordingCancelled => {
+                let Some(recording) = self.recording.take() else { return };
+                self.say_ended(&recording).await;
+                self.folder.remove(&recording.path);
+                self.recorded(RecordingState::Cancelled, recording.seconds);
+                answer_all(recording.now, Ok(nothing()));
+            }
+            Event::RecordingFailed { error } => {
+                let Some(recording) = self.recording.take() else { return };
+                self.say_ended(&recording).await;
+                self.folder.remove(&recording.path);
+                let failed = RecordingPush { error: Some(error.to_string()), ..recorded(RecordingState::Failed, 0.0) };
+                self.push_recording(failed);
+                answer_all(recording.now, Err(Error::new(code::NOT_ALLOWED, error.to_string())));
+            }
+            // A recording refused never started: one waiting to start is told why, and one thrown
+            // away meanwhile is gone.
+            Event::RecordingRefused { error } => match self.recording.as_ref().map(|r| &r.now) {
+                Some(Rec::Starting(_)) => {
+                    let recording = self.recording.take().expect("a recording");
+                    answer_all(recording.now, Err(Error::new(code::NOT_ALLOWED, error.to_string())));
+                }
+                Some(Rec::Cancelling(_)) => {
+                    let recording = self.recording.take().expect("a recording");
+                    self.recorded(RecordingState::Cancelled, 0.0);
+                    answer_all(recording.now, Ok(nothing()));
+                }
+                _ => {}
+            },
         }
+    }
+
+    /// The recording is synced and in place: it's stopped, or, asked meanwhile to be thrown away,
+    /// removed.
+    async fn made(&mut self, made: Recorded) {
+        let Some(recording) = self.recording.as_mut() else {
+            self.folder.remove(&made.path);
+            return;
+        };
+        if made.path != recording.path {
+            self.folder.remove(&made.path);
+            return;
+        }
+        if let Some(inner) = self.status.upgrade() {
+            inner.status.lock().expect("voice status").gaps_ms = made.gaps.as_millis() as u64;
+        }
+        let seconds = made.duration.as_secs_f64();
+        recording.seconds = seconds;
+        let (end, reason) = match &made.end {
+            RecordingEnd::Stopped => ("stopped", None),
+            RecordingEnd::Capped => ("limit", None),
+            RecordingEnd::DeviceFailed(why) => ("interrupted", Some(why.clone())),
+        };
+        let push = RecordingPush {
+            waveform: made.waveform.to_vec(),
+            end: Some(end.into()),
+            reason,
+            ..recorded(RecordingState::Stopped, seconds)
+        };
+        match std::mem::replace(&mut recording.now, Rec::Stopped(made)) {
+            Rec::Cancelling(answers) => {
+                let recording = self.recording.take().expect("a recording");
+                self.say_ended(&recording).await;
+                self.folder.remove(&recording.path);
+                self.recorded(RecordingState::Cancelled, seconds);
+                for answer in answers {
+                    let _ = answer.send(Ok(nothing()));
+                }
+            }
+            now => {
+                self.say("paused").await;
+                self.push_recording(push);
+                answer_all(now, Ok(nothing()));
+            }
+        }
+    }
+
+    /// WhatsApp is told you've stopped recording in `recording`'s chat, if it was told you were.
+    async fn say_ended(&mut self, recording: &Recording) {
+        self.say_again = None;
+        if recording.said
+            && let Err(e) = self.sending.call("typing", json!({ "chat": recording.chat, "state": "paused" })).await
+        {
+            eprintln!("jawd: can't say you've stopped recording in {}: {}", recording.chat, e.message);
+        }
+    }
+
+    /// Pushes the recording's `state` at `seconds`, with nothing more to say.
+    fn recorded(&self, state: RecordingState, seconds: f64) {
+        self.push_recording(recorded(state, seconds));
+    }
+
+    fn push_recording(&self, recording: RecordingPush) {
+        push(&self.pushes, "recording", &recording);
     }
 
     /// The `playback` push for `what` in `state`, where it plays or waits now.
@@ -431,6 +841,7 @@ impl Task {
         let mut status = inner.status.lock().expect("voice status");
         status.playing = self.playing.as_ref().map(|p| match &p.what {
             What::Message(id) => id.clone(),
+            What::Recording => "recording".into(),
         });
         status.state = self.playing.as_ref().map(|p| {
             match p.now {
@@ -440,23 +851,44 @@ impl Task {
             }
             .to_string()
         });
+        status.recording = self.recording.as_ref().map(|r| {
+            match r.now {
+                Rec::Starting(_) | Rec::Going | Rec::Stopping(_) | Rec::Cancelling(_) => "recording",
+                Rec::Stopped(_) => "stopped",
+            }
+            .to_string()
+        });
+        status.seconds = self.recording.as_ref().map_or(0.0, |r| r.seconds);
+        if matches!(self.recording.as_ref().map(|r| &r.now), Some(Rec::Starting(_))) {
+            status.silent = false;
+        }
     }
+}
+
+/// Answers whoever waits on a recording that's `now`, with `answered`.
+fn answer_all(now: Rec, answered: Result<Value, Error>) {
+    let answers = match now {
+        Rec::Starting(answer) => vec![answer],
+        Rec::Stopping(answers) | Rec::Cancelling(answers) => answers,
+        Rec::Going | Rec::Stopped(_) => Vec::new(),
+    };
+    for answer in answers {
+        let _ = answer.send(answered.clone());
+    }
+}
+
+/// A `recording` push in `state` at `seconds`, its other fields to fill in.
+fn recorded(state: RecordingState, seconds: f64) -> RecordingPush {
+    RecordingPush { state, seconds, level: None, waveform: Vec::new(), end: None, reason: None, error: None }
 }
 
 /// A `playback` push naming `what`, its other fields to fill in.
 fn named(what: &What) -> Playback {
-    let message = match what {
-        What::Message(id) => Some(id.clone()),
+    let (message, recording) = match what {
+        What::Message(id) => (Some(id.clone()), false),
+        What::Recording => (None, true),
     };
-    Playback {
-        message,
-        recording: false,
-        state: PlaybackState::Stopped,
-        at: 0.0,
-        seconds: 0.0,
-        speed: 1.0,
-        error: None,
-    }
+    Playback { message, recording, state: PlaybackState::Stopped, at: 0.0, seconds: 0.0, speed: 1.0, error: None }
 }
 
 fn push(pushes: &broadcast::Sender<Push>, method: &str, params: &impl Serialize) {
@@ -475,7 +907,7 @@ fn params_of<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, Erro
 
 fn bad_param(param: &str, why: &str) -> Error {
     let mut error = Error::new(code::INVALID_PARAMS, why);
-    error.data = Some(serde_json::json!({ "param": param }));
+    error.data = Some(json!({ "param": param }));
     error
 }
 
@@ -485,7 +917,7 @@ fn speed_of(speed: f64) -> Result<Speed, Error> {
 
 /// A playhead's place, in seconds from the start.
 fn seconds_of(at: f64) -> Result<f64, Error> {
-    if at.is_finite() && at >= 0.0 && at < 86_400.0 {
+    if at.is_finite() && (0.0..86_400.0).contains(&at) {
         Ok(at)
     } else {
         Err(bad_param("at", "a playhead's place is a number of seconds from the start"))

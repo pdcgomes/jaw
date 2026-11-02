@@ -457,6 +457,11 @@ impl Media {
         let used = Change::Media(Step::Used { sha256, at: now_ms() });
         let _ = self.inner.store.apply(crate::store::Lane::Live, vec![used]).await;
     }
+
+    /// The free space on the disk jaw's folder is on, or what a test says it is.
+    pub fn free_space(&self) -> Option<u64> {
+        self.inner.free_space()
+    }
 }
 
 /// A voice message's file: its message, its copy's hash, its whole path while it's in the cache, and

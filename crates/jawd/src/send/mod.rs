@@ -331,6 +331,11 @@ impl Sending {
     ];
 }
 
+/// A new message's ID, in whatsmeow's format, as every message jawd makes is given one up front.
+pub(crate) fn new_id() -> std::io::Result<String> {
+    outbox::message_id()
+}
+
 /// The longest text a message or a draft can have, in characters, as WhatsApp allows.
 const TEXT_MOST: usize = 65_536;
 

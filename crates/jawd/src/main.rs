@@ -632,8 +632,16 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         send::Makers { previews: send::link::Previews::default(), media: Some(media.clone()) },
     )
     .await?;
-    let voice =
-        voice::Voice::start(media.clone(), pushes.clone(), jaw_voice::SystemSpeaker, jaw_voice::SystemMicrophone);
+    let voice = voice::Voice::start(
+        home,
+        store.clone(),
+        media.clone(),
+        sending.clone(),
+        pushes.clone(),
+        jaw_voice::SystemSpeaker,
+        jaw_voice::SystemMicrophone,
+        voice::Config::default(),
+    )?;
     let me = live.lock().expect("live state").me();
     typing.start(store.clone(), me, sending.hearing());
     let mut pools: Vec<Arc<dyn work::Report>> =
