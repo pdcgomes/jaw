@@ -221,6 +221,27 @@ func library(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
         #expect(window.list.map(\.id) == ["P3"], "P2, gone by the resync, goes")
     }
 
+    @Test func `a library window watched again around an item jawd no longer has is watched from the top, keeping as many items`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            guard method == "library.watch", params["around"]?.string == "P3" else { return library(method, params, id) }
+            return [#"{"id":\#(id),"error":{"code":3,"message":"jawd has no library item P3"}}"#]
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let w = jawd.watchLibrary(LibraryFilter(kind: .photo), .top(240))
+        _ = await drain(jawd) { all in all.contains { if case .library = $0 { true } else { false } } }
+        jawd.move(w, .around("P3", before: 100, after: 140))
+        _ = await drain(jawd) { all in all.contains { if case let .library(_, u) = $0 { u.moved != nil } else { false } } }
+
+        fake.drop()
+        let back = await drain(jawd) { all in helloed(all) == 1 && all.contains { if case .library = $0 { true } else { false } } }
+        let watches = requests(fake, "library.watch")
+        #expect(watches.map { $0["around"]?.string } == ["top", "P3", "top"], "around the item, then from the top as jawd says it's gone")
+        #expect(watches.last?["after"]?.int == 240 && watches.last?["kind"]?.string == "photo", "as many items, of its kind")
+        #expect(!back.contains { if case .windowFailed = $0 { true } else { false } }, "and the pane isn't told of a refusal")
+    }
+
     @Test func `the items on screen are named to jawd, 200 at most`() async throws {
         let fake = try FakeJawd(script: library)
         defer { fake.stop() }
