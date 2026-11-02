@@ -736,8 +736,18 @@ async fn start_on(
 /// Starts jawd, keeping the engine's supervisor in `supervised` as soon as there is one, so it's
 /// stopped however the start ends. Whoever calls it holds jaw.lock.
 async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &OnceLock<Supervisor>) -> Result<Started> {
+    start_watching(home, engine, options, supervised, disk::Disk::watch(home, disk::Config::default())).await
+}
+
+/// As `start`, with `disk` as the disk jaw's folder is on.
+async fn start_watching(
+    home: &Path,
+    engine: Chosen,
+    options: &Options,
+    supervised: &OnceLock<Supervisor>,
+    disk: disk::Disk,
+) -> Result<Started> {
     let (pushes, _) = tokio::sync::broadcast::channel(256);
-    let disk = disk::Disk::watch(home, disk::Config::default());
     tokio::spawn(disk::tell(disk.changes(), pushes.clone()));
     let store = store::Store::open_watched(home, disk.clone())?;
     disk.start();
@@ -1110,6 +1120,9 @@ fn bench_lanes(background: u32, interactive: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -1483,6 +1496,99 @@ mod tests {
         assert!(pushes > 0, "the window was busy");
         assert!(took < STOPPING / 3, "stopping took {took:?}");
         assert!(!socket.exists(), "the socket is removed");
+    }
+
+    /// The free space and size of the disk `folder` is on, as statfs says.
+    fn statfs(folder: &Path) -> (u64, u64) {
+        let name = CString::new(folder.as_os_str().as_bytes()).unwrap();
+        let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `name` is a NUL-terminated path and `stats` is a statfs to fill in.
+        assert_eq!(unsafe { libc::statfs(name.as_ptr(), &mut stats) }, 0, "statfs {}", folder.display());
+        #[cfg(target_os = "macos")]
+        let block = stats.f_bsize as u64;
+        #[cfg(not(target_os = "macos"))]
+        let block = stats.f_frsize as u64;
+        (stats.f_bavail as u64 * block, stats.f_blocks as u64 * block)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jawd_serving_says_its_folders_free_space_size_and_floor_and_keeps_its_ballast_there() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
+        let options = Options { no_notify: true, ..Options::default() };
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let disk = started.state.store().unwrap().disk().clone();
+        let (path, folder) = (socket.clone(), home.path().to_path_buf());
+        let said = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let began = Instant::now();
+            while connection.call("status", serde_json::Value::Null).unwrap()["disk"]["ballast"] != 64_000_000 {
+                assert!(began.elapsed() < Duration::from_secs(20), "the watchdog's first look makes the ballast");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let before = statfs(&folder);
+            disk.room();
+            let said = connection.call("status", serde_json::Value::Null).unwrap()["disk"].clone();
+            (said, before, statfs(&folder))
+        });
+        let (said, before, after) = tokio::time::timeout(Duration::from_secs(30), said).await.unwrap().unwrap();
+        let (free, size) = (said["free"].as_u64().unwrap(), said["size"].as_u64().unwrap());
+        assert_eq!(size, before.1, "the size of the disk jaw's folder is on: {said}");
+        let churn = 1_000_000_000;
+        assert!(
+            free + churn >= before.0.min(after.0) && free <= before.0.max(after.0) + churn,
+            "{free} bytes free, where statfs says {} and then {}",
+            before.0,
+            after.0
+        );
+        assert_eq!(said["floor"], 2_000_000_000u64.min(size / 100 * 5), "{said}");
+        assert!(said["paused"].is_null(), "{said}");
+        let ballast = std::fs::metadata(home.path().join("ballast")).unwrap();
+        assert_eq!(ballast.len(), 64_000_000);
+        assert!(ballast.blocks() * 512 >= 64_000_000, "it holds its room: {} blocks", ballast.blocks());
+        stop(started, &socket).await;
+    }
+
+    /// The next notice of the disk's a connection hears.
+    fn disk_notice(connection: &mut jaw_client::Connection) -> serde_json::Value {
+        loop {
+            let push = connection.push().unwrap();
+            if push.method == "notice" && push.params["text"].as_str().is_some_and(|text| text.contains("jaw's disk")) {
+                return push.params;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interface_connected_to_jawd_hears_when_its_disk_goes_below_the_floor_and_when_it_has_room_again() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
+        let options = Options { no_notify: true, ..Options::default() };
+        let (disk, fake) = disk::Disk::faked(home.path(), disk::Config::default(), 10_000_000_000, 500_000_000_000);
+        let demo = engine(EngineKind::Demo, home.path(), None);
+        let started = start_watching(home.path(), demo, &options, &OnceLock::new(), disk.clone()).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let told = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            connection.call("status", serde_json::Value::Null).unwrap();
+            fake.free.store(1_000_000_000, Ordering::Relaxed);
+            disk.room();
+            let low = disk_notice(&mut connection);
+            fake.free.store(10_000_000_000, Ordering::Relaxed);
+            disk.room();
+            (low, disk_notice(&mut connection))
+        });
+        let (low, back) = tokio::time::timeout(Duration::from_secs(20), told).await.expect("both notices").unwrap();
+        assert_eq!(low["tone"], "warning");
+        assert!(low["text"].as_str().unwrap().starts_with("jaw's disk has 1.0 GB free, under the 2.0 GB"), "{low}");
+        assert_eq!(back["tone"], "info");
+        assert!(back["text"].as_str().unwrap().contains("room again"), "{back}");
+        stop(started, &socket).await;
     }
 
     #[test]
