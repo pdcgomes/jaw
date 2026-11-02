@@ -14,7 +14,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::{
-    CHAT, MESSAGE, Packed, Stamps, amend_message, media, polls, record_quarantine, remove_row, transient, unpack,
+    CHAT, MESSAGE, Packed, Stamps, amend_message, expiry, media, polls, record_quarantine, remove_row, transient,
+    unpack,
 };
 use crate::convert::{self, Me, kinds::UNKNOWN};
 use crate::store::{Amend, Amendment, Change, Message};
@@ -168,25 +169,33 @@ fn show(
     // own, but only what can be opened once is one.
     let view_once = (once || message.view_once && !standing_in) && convert::once_kind(message.kind);
     let seq = stamps.seq(MESSAGE, Some(n));
-    let changed = db.prepare_cached(SHOWN)?.execute(params![
-        n,
-        message.kind,
-        message.text,
-        message.spans,
-        message.summary,
-        message.reply,
-        message.detail,
-        message.forwarded,
-        message.expires_at,
-        view_once,
-        message.mentions_me,
-        message.edited_at,
-        UNKNOWN,
-        seq,
-        standing_in,
-        convert::kinds::view_once(message.kind),
-    ])?;
-    if changed == 0 {
+    let shown = || {
+        Ok(db.prepare_cached(SHOWN)?.execute(params![
+            n,
+            message.kind,
+            message.text,
+            message.spans,
+            message.summary,
+            message.reply,
+            message.detail,
+            message.forwarded,
+            message.expires_at,
+            view_once,
+            message.mentions_me,
+            message.edited_at,
+            UNKNOWN,
+            seq,
+            standing_in,
+            convert::kinds::view_once(message.kind),
+        ])? > 0)
+    };
+    // What one with a time to go or to open once said before goes as an erasure takes it.
+    let changed = if view_once || message.expires_at.is_some() || expiry::erasable(db, n)? {
+        expiry::unsaid(db, stamps, &[n], |_| shown())?
+    } else {
+        shown()?
+    };
+    if !changed {
         return Ok(false);
     }
     if !message.poll.is_empty() {

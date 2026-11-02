@@ -1414,8 +1414,16 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
 }
 
 /// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back;
-/// a view-once message open here is open no more.
+/// a view-once message open here is open no more, and one with a time to go or to open once goes
+/// as an erasure takes it.
 fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
+    if expiry::erasable(db, n)? {
+        return expiry::unsaid(db, stamps, &[n], |stamps| tombstone_row(db, stamps, chat, n));
+    }
+    tombstone_row(db, stamps, chat, n)
+}
+
+fn tombstone_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     db.prepare_cached(
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
     )?
@@ -2412,8 +2420,17 @@ fn located(db: &Connection, stamps: &mut Stamps, chat_jid: &str, id: &str) -> Re
 /// Folds message `gone` into `kept`, the same message in the chat being kept: a later edit, a star,
 /// the live envelope, a raw protobuf, its reactions, receipts, votes, answers and media go to the
 /// kept one, a deletion for everyone sticks, the sooner time to go and either's view-once mark are
-/// kept, with its opening, and `gone` is removed.
+/// kept, with its opening, and `gone` is removed. If either has a time to go or opens once, what
+/// the copy that goes says, and what the kept one said before, go as an erasure takes them.
 fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
+    if expiry::erasable(db, kept)? || expiry::erasable(db, gone)? {
+        expiry::unsaid(db, stamps, &[kept, gone], |stamps| fold_copies(db, stamps, chat, kept, gone).map(|()| true))?;
+        return Ok(());
+    }
+    fold_copies(db, stamps, chat, kept, gone)
+}
+
+fn fold_copies(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
     let seq = stamps.seq(MESSAGE, Some(kept));
     // An event's edit says where and when as well as what it's called. A kept copy deleted for
     // everyone takes none of the other's words, nor its raw protobuf, which the deletion cleared.
@@ -2698,27 +2715,43 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     ];
     // A live copy keeps the raw protobuf a history copy brought, which may say more, and its
     // envelope is kept whatever comes after.
-    let changed: Option<i64> = if existing.is_some() {
-        db.prepare_cached(
-            "UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7,
-                summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13,
-                expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15,
-                view_once = ?16,
-                raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18,
-                mentions_me = ?20, envelope = coalesce(envelope, ?21)
-            WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4
-                OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9
-                OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13
-                OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15
-                OR view_once IS NOT ?16
-                OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw
-                OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope)
-            RETURNING n",
-        )?
-        .query_row(&fields[..21], |r| r.get(0))
-        .optional()?
-    } else {
-        Some(
+    let update = |db: &Connection| -> Result<Option<i64>> {
+        Ok(db
+            .prepare_cached(
+                "UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7,
+                    summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13,
+                    expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15,
+                    view_once = ?16,
+                    raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18,
+                    mentions_me = ?20, envelope = coalesce(envelope, ?21)
+                WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4
+                    OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9
+                    OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13
+                    OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15
+                    OR view_once IS NOT ?16
+                    OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw
+                    OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope)
+                RETURNING n",
+            )?
+            .query_row(&fields[..21], |r| r.get(0))
+            .optional()?)
+    };
+    let changed: Option<i64> = match &existing {
+        // A copy that changes what a message with a time to go or to open once says, or the links
+        // it has, takes what it said before as an erasure takes it.
+        Some(kept)
+            if (kept.text != text || kept.spans != spans || kept.detail != detail)
+                && (view_once || message.expires_at.is_some() || expiry::erasable(db, kept.n)?) =>
+        {
+            let mut updated = None;
+            expiry::unsaid(db, stamps, &[kept.n], |_| {
+                updated = update(db)?;
+                Ok(updated.is_some())
+            })?;
+            updated
+        }
+        Some(_) => update(db)?,
+        None => Some(
             db.prepare_cached(
                 "INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded,
                     edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t)
@@ -2727,7 +2760,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
                 RETURNING n",
             )?
             .query_row(fields, |r| r.get(0))?,
-        )
+        ),
     };
     // A copy that arrives live is given to jawd at once, for its thumbnail and perhaps its download;
     // one from history waits until it's shown or asked for, and a view-once one is never kept.
@@ -2984,22 +3017,27 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         // The phones can't edit a view-once message, and its row keeps no caption, so an edit of
         // one changes nothing.
         Amendment::Edit { .. } if once_now(db, n)? => 0,
-        Amendment::Edit { text, spans, summary } => db
-            .prepare_cached(
-                "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), edited_at = ?5, v = ?6
-                WHERE n = ?1 AND deleted = 0 AND (edited_at IS NULL OR edited_at <= ?5)",
-            )?
-            .execute(params![n, text, spans, summary, at, seq])?,
+        Amendment::Edit { text, spans, summary } => reworded(db, stamps, n, || {
+            Ok(db
+                .prepare_cached(
+                    "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), edited_at = ?5, v = ?6
+                    WHERE n = ?1 AND deleted = 0 AND (edited_at IS NULL OR edited_at <= ?5)",
+                )?
+                .execute(params![n, text, spans, summary, at, seq])?)
+        })?,
         Amendment::Revoke => {
             outbox::deleted_for_everyone(db, stamps, n)?;
             media::revoked(db, n)?;
-            db.prepare_cached(
-                "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
-                    summary = iif(mine, 'You deleted this message', 'This message was deleted'),
-                    reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
-                WHERE n = ?1 AND deleted = 0",
-            )?
-            .execute([n, seq])?
+            reworded(db, stamps, n, || {
+                Ok(db
+                    .prepare_cached(
+                        "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
+                            summary = iif(mine, 'You deleted this message', 'This message was deleted'),
+                            reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
+                        WHERE n = ?1 AND deleted = 0",
+                    )?
+                    .execute([n, seq])?)
+            })?
         }
         Amendment::Star { starred } => db
             .prepare_cached("UPDATE messages SET starred = ?2, v = ?3 WHERE n = ?1 AND starred IS NOT ?2")?
@@ -3078,13 +3116,15 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             changed
         }
         // Only a newer edit replaces what an event shows, so one arriving again changes nothing.
-        Amendment::EventEdit { text, spans, summary, detail } => db
-            .prepare_cached(
-                "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5,
-                    edited_at = ?6, v = ?7
-                WHERE n = ?1 AND kind = 'event' AND NOT deleted AND (edited_at IS NULL OR edited_at < ?6)",
-            )?
-            .execute(params![n, text, spans, summary, detail, at, seq])?,
+        Amendment::EventEdit { text, spans, summary, detail } => reworded(db, stamps, n, || {
+            Ok(db
+                .prepare_cached(
+                    "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5,
+                        edited_at = ?6, v = ?7
+                    WHERE n = ?1 AND kind = 'event' AND NOT deleted AND (edited_at IS NULL OR edited_at < ?6)",
+                )?
+                .execute(params![n, text, spans, summary, detail, at, seq])?)
+        })?,
         Amendment::DeleteForMe | Amendment::Opened | Amendment::Keep { .. } => 0,
     };
     if changed == 0 {
@@ -3097,6 +3137,21 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
     Ok(true)
+}
+
+/// Runs `change` of what message `n` says, which says how many rows it changed, taking its words
+/// as an erasure takes them if it has a time to go or opens once (`expiry::unsaid`), so what it
+/// said before doesn't outlive it.
+fn reworded(db: &Connection, stamps: &mut Stamps, n: i64, change: impl FnOnce() -> Result<usize>) -> Result<usize> {
+    if !expiry::erasable(db, n)? {
+        return change();
+    }
+    let mut changed = 0;
+    expiry::unsaid(db, stamps, &[n], |_| {
+        changed = change()?;
+        Ok(changed > 0)
+    })?;
+    Ok(changed)
 }
 
 /// Whether message `n` is one to open once: marked so, and of a kind that can be, which a row an

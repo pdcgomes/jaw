@@ -64,6 +64,7 @@ pub const WAL_ERASED: &str = "erased.wal";
 const NOTE_WAL_ERASED: &str = "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.wal', ?1)";
 const SECURE_DELETE_ON: &str = "PRAGMA secure_delete = 1";
 const SECURE_DELETE_FAST: &str = "PRAGMA secure_delete = FAST";
+const SECURE_DELETE_NOW: &str = "PRAGMA secure_delete";
 const MESSAGES_SECURE: &str = "INSERT INTO messages_fts (messages_fts, rank) VALUES ('secure-delete', ?1)";
 const LINKS_SECURE: &str = "INSERT INTO links_fts (links_fts, rank) VALUES ('secure-delete', ?1)";
 
@@ -77,6 +78,16 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
         return Ok(false);
     };
     erase(db, stamps, chat, n)
+}
+
+/// Whether message ?1 has a time to go or is marked to open once.
+const ERASABLE: &str = "SELECT expires_at IS NOT NULL OR view_once FROM messages WHERE n = ?1";
+
+/// Whether message `n` has a time to go or is marked to open once, so whatever changes what it
+/// says, or takes it away, takes its words as an erasure takes them (`unsaid`), lest they outlive
+/// it: an edit, a revoke, a deletion for you, a copy, a fold, a backfill's reading it again.
+pub(super) fn erasable(db: &Connection, n: i64) -> Result<bool> {
+    Ok(db.prepare_cached(ERASABLE)?.query_row([n], |r| r.get(0)).optional()?.unwrap_or(false))
 }
 
 /// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it.
@@ -318,6 +329,11 @@ pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<boo
 /// putting both back after it, whether it worked or not. Turning FTS5's `secure-delete` off writes
 /// out what the indexes hold of the transaction first, with it still on.
 pub(super) fn erasing<T>(db: &Connection, erase: impl FnOnce() -> Result<T>) -> Result<T> {
+    // Inside an erasure already, whose secure deletes are on until it ends, as when two copies
+    // folded together take a caption out.
+    if db.prepare_cached(SECURE_DELETE_NOW)?.query_row([], |r| r.get::<_, i64>(0))? == 1 {
+        return erase();
+    }
     zeroing(db, || {
         db.prepare_cached(MESSAGES_SECURE)?.execute([1])?;
         db.prepare_cached(LINKS_SECURE)?.execute([1])?;

@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::links::{EVENTS, PLACES, VOICES};
-use super::{CHAT, MESSAGE, Stamps, apply_pending, kinds, unpack};
+use super::{CHAT, MESSAGE, Stamps, apply_pending, expiry, kinds, unpack};
 use crate::store::Change;
 
 /// A message as its row keeps it, unless it's been deleted or edited since, which its raw protobuf
@@ -102,7 +102,13 @@ fn read_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
         return Ok(false);
     }
     let seq = stamps.seq(MESSAGE, Some(n));
-    db.prepare_cached(READ_AGAIN)?.execute(params![n, now.0, now.1, now.2, now.3, seq])?;
+    let read = || Ok(db.prepare_cached(READ_AGAIN)?.execute(params![n, now.0, now.1, now.2, now.3, seq])? > 0);
+    // What one with a time to go or to open once said before goes as an erasure takes it.
+    if expiry::erasable(db, n)? {
+        expiry::unsaid(db, stamps, &[n], |_| read())?;
+    } else {
+        read()?;
+    }
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     let seq = stamps.seq(CHAT, Some(chat));
     if db.prepare_cached(CHAT_SHOWS)?.execute(params![chat, n, seq])? > 0 {

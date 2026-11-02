@@ -2783,6 +2783,10 @@ INSERT INTO messages_fts (messages_fts, rank) VALUES ('secure-delete', ?1)
 INSERT INTO links_fts (links_fts, rank) VALUES ('secure-delete', ?1)
 
 -- src/store/write/expiry.rs
+SELECT expires_at IS NOT NULL OR view_once FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
 INSERT INTO opened (message, until) SELECT ?1, ?2 FROM messages WHERE n = ?1 AND view_once AND NOT mine ON CONFLICT (message) DO NOTHING
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
