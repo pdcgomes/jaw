@@ -736,6 +736,34 @@ async fn the_wal_an_erasure_leaves_is_emptied_once_no_reader_holds_it_and_a_kill
     assert!(wal_emptied(&again).await, "and started again, jawd does it");
 }
 
+/// The WAL a backlog of erasures leaves is emptied only once the writer has gone a second without
+/// a commit, so no batch of the backlog waits behind it: between erasures a few hundred
+/// milliseconds apart it's still to empty, and it's emptied a second after the last.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wal_a_backlog_of_erasures_leaves_is_emptied_only_once_a_second_goes_without_a_commit() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let due =
+        (0..8i64).map(|k| Change::Message(message(ANA, &format!("d{k}"), AT + k, &format!("due{k}"), Some(LATER))));
+    apply(&store, due.collect()).await;
+    store.indexed().await.unwrap();
+    let ns: Vec<i64> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT n FROM messages ORDER BY n")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    for (k, n) in ns.into_iter().enumerate() {
+        store.apply(Lane::Background, vec![Change::Expire { n, at: LATER }]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(wal_noted(&store).await.is_some(), "the WAL is still to empty after erasure {k}");
+    }
+    let last = std::time::Instant::now();
+    assert!(wal_emptied(&store).await, "it's emptied once they're done");
+    assert!(last.elapsed() >= Duration::from_millis(500), "a second after the last, not before");
+}
+
 /// Message `id` of Rui's, `raw` its raw protobuf, written and then deleted for you, as an ordinary
 /// deletion is; says whether jaw.db and its WAL still hold any of `raw` after it.
 async fn deleted_leaves(store: &Store, home: &Path, id: &'static str, raw: &[u8]) -> bool {

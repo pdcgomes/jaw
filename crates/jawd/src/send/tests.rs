@@ -1485,6 +1485,34 @@ async fn a_refused_timer_goes_back_to_a_setting_older_than_it_that_came_while_it
     assert_eq!(timer_of(&running, ANA).await, (0, Some(ours - 5_000)), "the phone's, the newest that took effect");
 }
 
+/// Of two settings older than a timer from jaw waiting for WhatsApp, the newer arriving first, as
+/// history can bring them, the waiting row keeps the newer as the one to put back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_timer_goes_back_to_the_newest_of_two_older_settings_that_came_while_it_waited_newest_first() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let was = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(was)]).await.unwrap();
+    running.connection(jaw_proto::ConnectionState::Offline);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap();
+    let ours = timer_of(&running, ANA).await.1.unwrap();
+    for (seconds, at) in [(0, ours - 5_000), (7_776_000, ours - 10_000)] {
+        let phone = Chat { id: ANA.into(), ephemeral: Some(seconds), ephemeral_at: Some(at), ..Chat::default() };
+        running.store.apply(Lane::Live, vec![Change::Chat(phone)]).await.unwrap();
+    }
+    assert_eq!(timer_of(&running, ANA).await, (604_800, Some(ours)), "jaw's, the newest, shows while it waits");
+    running.world.refuse_next(1);
+    running.connection(jaw_proto::ConnectionState::Online);
+    outbox_empty(&running, "the refusal").await;
+    assert_eq!(
+        timer_of(&running, ANA).await,
+        (0, Some(ours - 5_000)),
+        "the newer of the two, not the one that came last"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_timers_set_from_jaw_and_both_refused_go_back_to_the_one_from_before_both() {
     let home = tempfile::tempdir().unwrap();

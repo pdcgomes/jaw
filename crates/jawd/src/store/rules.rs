@@ -364,6 +364,50 @@ async fn copies_folded_into_one_keep_the_sooner_time_to_go_the_view_once_mark_an
     }
 }
 
+/// A fold that brings the copy kept a sooner time to go than the timer waits for tells the timer,
+/// which erases the message then. The copy that goes is given its time here behind the writer's
+/// back, so only the fold's commit says it, as when the timer has set that copy aside after its
+/// erasure failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fold_bringing_a_sooner_time_to_go_wakes_the_timer_and_the_message_goes_at_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let later = Message { expires_at: Some(now() + 3_600_000), ..message(ANA, "goes", AT, "gone at the sooner time") };
+    apply(
+        &store,
+        vec![Change::Message(later), Change::Message(message(ANA_LID, "goes", AT, "gone at the sooner time"))],
+    )
+    .await;
+    let _timer = crate::expiry::start(store.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let soon = now() + 500;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute(
+        "UPDATE messages SET expires_at = ?1 WHERE id = 'goes' AND chat = (SELECT n FROM chats WHERE id = ?2)",
+        rusqlite::params![soon, ANA_LID],
+    )
+    .unwrap();
+    drop(db);
+    joined(&store).await;
+    merged(&store).await;
+    let left = || async {
+        query(&store, |db| {
+            Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'goes'", [], |r| r.get::<_, i64>(0))?)
+        })
+        .await
+    };
+    for _ in 0..250 {
+        if left().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(left().await, 0, "the timer slept on to the later time");
+    assert!(now() >= soon, "and it went no sooner than its time");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn what_names_a_message_still_in_a_chat_being_merged_finds_it_there() {
     let home = tempfile::tempdir().unwrap();
