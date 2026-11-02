@@ -3199,16 +3199,16 @@ mod tests {
             waited.push(started.elapsed());
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        // Judged on the median: a live write may wait for the WAL to start again, RESTART_MOST and
-        // two syncs at most, and other processes' load can stall any one; live writes that waited
-        // for the history would wait for all of it.
+        // Live writes kept going in while the history did, however quickly it went: had they
+        // waited for it, there would be two, one before it and one after. They're judged on the
+        // median, since other processes' load can stall any one, and the slowest on what a wait
+        // for the WAL to start again allows, RESTART_MOST and two syncs, with room for that load.
         waited.sort();
         let (median, most) = (waited[waited.len() / 2], waited[waited.len() - 1]);
-        assert!(
-            median < Duration::from_secs(1),
-            "{} live writes waited {median:?} at the median, {most:?} at most",
-            waited.len()
-        );
+        let report = format!("{} live writes waited {median:?} at the median, {most:?} at most", waited.len());
+        assert!(waited.len() >= 20, "live writes waited for the history: {report}");
+        assert!(median < Duration::from_secs(1), "{report}");
+        assert!(most < RESTART_MOST + Duration::from_secs(2), "{report}");
         assert_eq!(batch.await.unwrap().changed, 20_000);
         let storage = store.storage();
         assert!(storage.background_waits > 0, "background work never waited for the checkpointer");
