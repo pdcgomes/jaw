@@ -825,6 +825,15 @@ async fn a_recording_goes_to_whatsapp_as_a_voice_note_with_its_waveform_length_a
     assert_eq!(rig.sent(&id).len(), 1);
     let e = rig.call("voice.send", json!({})).await.unwrap_err();
     assert_eq!(e.code, code::NOT_FOUND, "without one, there's nothing to send: {e:?}");
+
+    // The key given again with a new recording answers with the message it named, and the new
+    // recording, which isn't sent, stays stopped.
+    rig.recorded(&heard).await;
+    let reused = rig.call("voice.send", json!({ "key": "jaw-voice-1" })).await.unwrap();
+    assert_eq!(reused["message"], id.as_str());
+    assert_eq!(rig.recordings().len(), 1, "the new recording is kept");
+    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    assert_eq!(rig.world.sends().len(), 1, "and nothing more goes");
 }
 
 #[tokio::test(flavor = "multi_thread")]

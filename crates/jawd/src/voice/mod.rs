@@ -189,9 +189,15 @@ impl Voice {
         "voice.cancel",
     ];
 
-    /// Connection `connection` has ended: what it plays stops, and its recording is thrown away.
+    /// Connection `connection` has ended: what it plays stops, and its recording is thrown away. The
+    /// voice task is told at once, or, while its requests are many, as soon as there's room.
     pub fn ended(&self, connection: u64) {
-        let _ = self.inner.asks.try_send(Ask::Ended(connection));
+        if let Err(mpsc::error::TrySendError::Full(ask)) = self.inner.asks.try_send(Ask::Ended(connection))
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let asks = self.inner.asks.clone();
+            runtime.spawn(async move { asks.send(ask).await });
+        }
     }
 
     /// Stops what plays and throws away the recording, going or stopped, as jawd stops.
@@ -671,9 +677,16 @@ impl Task {
     }
 
     /// The recording being sent is a message of yours, its file going now that the outbox's copy
-    /// of it is synced; or it couldn't be, and it's stopped again, as it was.
+    /// of it is synced; or it couldn't be, and it's stopped again, as it was. A key that named an
+    /// earlier message answers with that one, as `send.text`'s does, and leaves this recording,
+    /// which wasn't sent, stopped.
     fn sent(&mut self, sent: Result<VoiceSent, Error>, answer: Answer) {
+        let ours = |sent: &VoiceSent, recording: &Recording| sent.message == recording.id;
         match sent {
+            Ok(sent) if !self.recording.as_ref().is_some_and(|r| ours(&sent, r)) => {
+                self.stopped_again();
+                let _ = answer.send(Ok(serde_json::to_value(sent).expect("jawd's own types serialize")));
+            }
             Ok(sent) => {
                 if self.playing.as_ref().is_some_and(|p| p.what == What::Recording) {
                     self.stop_playing();
@@ -684,13 +697,18 @@ impl Task {
                 let _ = answer.send(Ok(serde_json::to_value(sent).expect("jawd's own types serialize")));
             }
             Err(error) => {
-                if let Some(recording) = self.recording.as_mut()
-                    && let Rec::Sending(made) = std::mem::replace(&mut recording.now, Rec::Cancelling(Vec::new()))
-                {
-                    recording.now = Rec::Stopped(made);
-                }
+                self.stopped_again();
                 let _ = answer.send(Err(error));
             }
+        }
+    }
+
+    /// The recording being sent wasn't: it's stopped again, as it was, to send or throw away.
+    fn stopped_again(&mut self) {
+        if let Some(recording) = self.recording.as_mut()
+            && let Rec::Sending(made) = std::mem::replace(&mut recording.now, Rec::Cancelling(Vec::new()))
+        {
+            recording.now = Rec::Stopped(made);
         }
     }
 
