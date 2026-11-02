@@ -15,8 +15,22 @@ use crate::store::read::{self, Around};
 const ANA: &str = "351910000002@s.whatsapp.net";
 const GROUP: &str = "120363000000000001@g.us";
 const AT: i64 = 1_792_000_000_000;
-/// A message whose conversion panics once it has made its changes, in the inbox or in history.
-pub(super) const PANICS: &str = "3EB0PANICS";
+/// Messages whose conversion panics once it has made its changes, in the inbox or in history: those
+/// whose ID starts with this, each test's with IDs of its own. Their panic says which message it
+/// is, but for those whose ID starts with PANICS_PLAINLY, whose panic says only a literal.
+const PANICS: &str = "3EB0PANICS";
+const PANICS_PLAINLY: &str = "3EB0PANICSPLAINLY";
+
+/// The hook each conversion runs once it has made its changes, which panics for a message of
+/// PANICS.
+pub(super) fn panic_if_asked(id: &str) {
+    if id.starts_with(PANICS_PLAINLY) {
+        panic!("a conversion that panics as a test asks, saying only this");
+    }
+    if id.starts_with(PANICS) {
+        panic!("the conversion of {id} panics once it has made its changes, as a test asks");
+    }
+}
 
 #[test]
 fn connection_events_set_the_account_and_connection() {
@@ -213,11 +227,11 @@ async fn the_inbox_is_converted_once_even_when_jawd_stops_in_the_middle() {
     assert_eq!(ana.unread, 2, "two of Ana's messages arrived live");
 }
 
-/// What the quarantine keeps: each row's source, reference and when, and whether it panicked.
-async fn quarantined(store: &Store) -> Vec<(String, String, i64, bool)> {
+/// What the quarantine keeps: each row's source, reference, when and why.
+async fn quarantined(store: &Store) -> Vec<(String, String, i64, String)> {
     query(store, |db| {
         Ok(db
-            .prepare("SELECT source, ref, at, error LIKE 'converting it panicked: %' FROM quarantine ORDER BY n")?
+            .prepare("SELECT source, ref, at, error FROM quarantine ORDER BY n")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?)
     })
@@ -251,17 +265,19 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
         let sender = if chat == GROUP { "100000000001@lid" } else { chat };
         live_message(chat, sender, id, at, text(&format!("words of {id}"))).encode_to_vec()
     };
+    // The first one's panic says which it is, the second's only a literal.
+    let (said, plainly) = ("3EB0PANICSINBOX", "3EB0PANICSPLAINLYINBOX");
     let kept = {
         let store = Store::open(home.path()).unwrap();
         // From before the converter started, so the background lane takes them.
-        for (id, at) in [("m1", AT), (PANICS, AT + 1_000), ("m3", AT + 2_000)] {
+        for (id, at) in [("m1", AT), (said, AT + 1_000), ("m3", AT + 2_000)] {
             store.inbox("message", 0, event(ANA, id, at), None);
         }
         until("the inbox", || store.count("inbox").unwrap() == 3).await;
         let converter = converting(&store);
         until("the row after it", || store.count("messages WHERE id = 'm3'").unwrap() == 1).await;
         // As they arrive, so the live lane takes them.
-        for (id, at) in [(PANICS, AT + 3_000), ("m5", AT + 4_000)] {
+        for (id, at) in [(plainly, AT + 3_000), ("m5", AT + 4_000)] {
             store.inbox("message", 0, event(GROUP, id, at), None);
         }
         until("the live row after it", || store.count("messages WHERE id = 'm5'").unwrap() == 1).await;
@@ -277,9 +293,21 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
         let kept = quarantined(&store).await;
         let named: Vec<_> = kept
             .iter()
-            .map(|(source, reference, _, panicked)| (source.as_str(), reference.as_str(), *panicked))
+            .map(|(source, reference, _, error)| (source.as_str(), reference.as_str(), error.as_str()))
             .collect();
-        assert_eq!(named, [("inbox", "2", true), ("inbox", "4", true)], "each is kept in quarantine, saying why");
+        assert_eq!(
+            named,
+            [
+                (
+                    "inbox",
+                    "2",
+                    "converting it panicked: the conversion of 3EB0PANICSINBOX panics once it has made its changes, \
+                    as a test asks"
+                ),
+                ("inbox", "4", "converting it panicked: a conversion that panics as a test asks, saying only this"),
+            ],
+            "each is kept in quarantine, saying why"
+        );
         let status = stored(home.path(), &store);
         assert_eq!((status.inbox, status.quarantined), (2, 2), "jawd status counts them");
         kept
@@ -296,8 +324,8 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
     assert_eq!(column::<i64>(&store, "SELECT seq FROM inbox ORDER BY seq").await, [2, 4]);
     let again = quarantined(&store).await;
     assert_eq!(again.len(), 2, "each is kept once: {again:?}");
-    for ((source, reference, at, _), before) in again.iter().zip(&kept) {
-        assert_eq!((source, reference), (&before.0, &before.1));
+    for ((source, reference, at, error), before) in again.iter().zip(&kept) {
+        assert_eq!((source, reference, error), (&before.0, &before.1, &before.3));
         assert!(*at > before.2, "{reference} was tried again at the start, and panicked again");
     }
     let status = stored(home.path(), &store);
@@ -308,10 +336,11 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
 async fn a_history_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the_rows_after_it_go_on() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
+    let panics = "3EB0PANICSHISTORY";
     {
         let db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
-        for (n, id) in ["h1", PANICS, "h3"].into_iter().enumerate() {
+        for (n, id) in ["h1", panics, "h3"].into_iter().enumerate() {
             let info = WebMessageInfo {
                 key: MessageKey {
                     remote_jid: Some(ANA.into()),
@@ -330,20 +359,29 @@ async fn a_history_row_whose_conversion_panics_is_kept_in_quarantine_once_and_th
             .unwrap();
         }
     }
-    let mut kept: Vec<(String, String, i64, bool)> = Vec::new();
+    let mut kept: Vec<(String, String, i64, String)> = Vec::new();
     // Converted at two starts: the second takes the row that panicked again, and keeps it once.
     for start in 0..2 {
         drain::history_raw(store.clone(), knowing()).await;
         let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
         assert_eq!(ids, ["h1", "h3"], "the row after it is converted, and nothing of it is kept");
         let left: Vec<String> = column(&store, "SELECT id FROM history_raw").await;
-        assert_eq!(left, [PANICS], "it stays raw");
+        assert_eq!(left, [panics], "it stays raw");
         let now = quarantined(&store).await;
         let named: Vec<_> = now
             .iter()
-            .map(|(source, reference, _, panicked)| (source.as_str(), reference.as_str(), *panicked))
+            .map(|(source, reference, _, error)| (source.as_str(), reference.as_str(), error.as_str()))
             .collect();
-        assert_eq!(named, [("history_raw", format!("{ANA} {PANICS}").as_str(), true)], "at start {start}");
+        assert_eq!(
+            named,
+            [(
+                "history_raw",
+                format!("{ANA} 3EB0PANICSHISTORY").as_str(),
+                "converting it panicked: the conversion of 3EB0PANICSHISTORY panics once it has made its changes, as \
+                a test asks"
+            )],
+            "at start {start}"
+        );
         if let Some(before) = kept.first() {
             assert!(now[0].2 > before.2, "tried again at the second start");
         }

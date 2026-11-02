@@ -314,7 +314,7 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     }
     out.changes.extend(changes);
     #[cfg(test)]
-    assert_ne!(id, super::tests::PANICS, "a conversion that panics once it has made its changes, as a test asks");
+    super::tests::panic_if_asked(id);
     true
 }
 
@@ -605,6 +605,6 @@ fn history_row(info: &WebMessageInfo, chat: &str, id: &str, raw: &[u8], me: &Me)
         changes.push(Change::HistoryKept { id: format!("history_raw {chat} {id}"), raw: Packed::new(raw) });
     }
     #[cfg(test)]
-    assert_ne!(id, super::tests::PANICS, "a conversion that panics once it has made its changes, as a test asks");
+    super::tests::panic_if_asked(id);
     changes
 }
