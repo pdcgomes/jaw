@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,15 +22,25 @@ const AT: i64 = 1_792_000_000_000;
 const PANICS: &str = "3EB0PANICS";
 const PANICS_PLAINLY: &str = "3EB0PANICSPLAINLY";
 
+/// How many times each message of PANICS has panicked as it was converted, by its ID.
+static PANICKED: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+
 /// The hook each conversion runs once it has made its changes, which panics for a message of
-/// PANICS.
+/// PANICS, counting each time.
 pub(super) fn panic_if_asked(id: &str) {
+    if !id.starts_with(PANICS) {
+        return;
+    }
+    *PANICKED.lock().unwrap().entry(id.to_string()).or_default() += 1;
     if id.starts_with(PANICS_PLAINLY) {
         panic!("a conversion that panics as a test asks, saying only this");
     }
-    if id.starts_with(PANICS) {
-        panic!("the conversion of {id} panics once it has made its changes, as a test asks");
-    }
+    panic!("the conversion of {id} panics once it has made its changes, as a test asks");
+}
+
+/// How many times the message `id` of PANICS has panicked as it was converted.
+fn panicked(id: &str) -> usize {
+    PANICKED.lock().unwrap().get(id).copied().unwrap_or_default()
 }
 
 #[test]
@@ -281,6 +292,9 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
             store.inbox("message", 0, event(GROUP, id, at), None);
         }
         until("the live row after it", || store.count("messages WHERE id = 'm5'").unwrap() == 1).await;
+        // A converter that tried a row that panicked again at once would have by now.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!((panicked(said), panicked(plainly)), (1, 1), "each is tried once in this start");
         converter.abort();
         let _ = converter.await;
         let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
@@ -318,6 +332,8 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
     until("the inbox", || store.count("inbox").unwrap() == 3).await;
     let converter = converting(&store);
     until("the row after them", || store.count("messages WHERE id = 'm6'").unwrap() == 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((panicked(said), panicked(plainly)), (2, 2), "and once more at the next start");
     converter.abort();
     let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
     assert_eq!(ids, ["m1", "m3", "m5", "m6"]);
@@ -362,7 +378,10 @@ async fn a_history_row_whose_conversion_panics_is_kept_in_quarantine_once_and_th
     let mut kept: Vec<(String, String, i64, String)> = Vec::new();
     // Converted at two starts: the second takes the row that panicked again, and keeps it once.
     for start in 0..2 {
-        drain::history_raw(store.clone(), knowing()).await;
+        tokio::time::timeout(WAIT, drain::history_raw(store.clone(), knowing())).await.unwrap_or_else(|_| {
+            panic!("the pass over the history kept raw didn't end: {} panics so far", panicked(panics))
+        });
+        assert_eq!(panicked(panics), start + 1, "tried once in each start");
         let ids: Vec<String> = column(&store, "SELECT id FROM messages ORDER BY id").await;
         assert_eq!(ids, ["h1", "h3"], "the row after it is converted, and nothing of it is kept");
         let left: Vec<String> = column(&store, "SELECT id FROM history_raw").await;
