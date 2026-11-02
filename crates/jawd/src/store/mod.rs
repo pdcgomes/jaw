@@ -1830,7 +1830,8 @@ impl Writer {
 
     /// Merges MERGE_PAGES of FTS5's segments, messages', links' or the library's items', if any
     /// level has enough to merge; or begins merging a contentless index whole, once an erasure has
-    /// left words in it.
+    /// left words in it. Each merge of one an erasure has left words in, until its whole merge is
+    /// done, zeroes the pages it frees, which hold what it takes out of the segments it rewrites.
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
@@ -1838,37 +1839,51 @@ impl Writer {
         let whole = self.wholes.iter().position(|whole| whole.due(every).is_some_and(|due| due <= Instant::now()));
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut merged = false;
+        let mut wal = None;
         if let Some(index) = whole {
             // Every segment of the index made one, a step at a time as the steps after this go on
             // with it, so the words of the messages erased since, which a contentless index keeps
             // until a merge, go.
-            tx.execute(CONTENTLESS_MERGES[index], [-MERGE_PAGES])?;
+            expiry::zeroing(&tx, || Ok(tx.execute(CONTENTLESS_MERGES[index], [-MERGE_PAGES])?))?;
             merged = true;
         } else {
             // The messages' index first, then the links' and the items', each once the one before
-            // it has nothing to merge, a step's worth.
-            let merges = ["INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)"];
-            for merge in merges.into_iter().chain(CONTENTLESS_MERGES) {
+            // it has nothing to merge, a step's worth. An erasure takes its words out of the
+            // messages' segments itself.
+            let merges = [("INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)", false)];
+            let erased = self.wholes.iter().map(|whole| whole.erased.is_some());
+            for (merge, erased) in merges.into_iter().chain(CONTENTLESS_MERGES.into_iter().zip(erased)) {
                 let before = tx.total_changes();
-                tx.execute(merge, [MERGE_PAGES])?;
+                let step = || Ok(tx.execute(merge, [MERGE_PAGES])?);
+                if erased {
+                    expiry::zeroing(&tx, step)?;
+                } else {
+                    step()?;
+                }
                 merged = tx.total_changes() > before + 1;
                 if merged {
                     break;
                 }
             }
             if !merged {
-                // Each whole merge under way is done: the erasures before it began left nothing.
+                // Each whole merge under way is done: the erasures before it began left nothing,
+                // and the pages it freed are zeroed in the WAL, whose emptying writes them over
+                // jaw.db's.
                 for whole in &self.wholes {
                     if let Some(began) = whole.merging {
                         tx.execute(
                             "DELETE FROM sync_state WHERE key = ?1 AND value = ?2",
                             params![whole.note, began.to_string()],
                         )?;
+                        wal = Some(expiry::wal_noted(&tx)?);
                     }
                 }
             }
         }
         tx.commit()?;
+        if wal.is_some() {
+            self.wal_erased = wal;
+        }
         if let Some(index) = whole {
             let whole = &mut self.wholes[index];
             (whole.merging, whole.merged) = (whole.erased, Some(Instant::now()));

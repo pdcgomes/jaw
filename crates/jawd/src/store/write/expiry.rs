@@ -318,19 +318,25 @@ pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<boo
 /// putting both back after it, whether it worked or not. Turning FTS5's `secure-delete` off writes
 /// out what the indexes hold of the transaction first, with it still on.
 pub(super) fn erasing<T>(db: &Connection, erase: impl FnOnce() -> Result<T>) -> Result<T> {
-    secure_delete(db, SECURE_DELETE_ON, 1)?;
-    let erased = (|| -> Result<T> {
+    zeroing(db, || {
         db.prepare_cached(MESSAGES_SECURE)?.execute([1])?;
         db.prepare_cached(LINKS_SECURE)?.execute([1])?;
         let erased = erase()?;
         db.prepare_cached(MESSAGES_SECURE)?.execute([0])?;
         db.prepare_cached(LINKS_SECURE)?.execute([0])?;
         Ok(erased)
-    })();
+    })
+}
+
+/// Runs `zero` with every page it frees zeroed, as an erasure and a merge taking out what one left
+/// in a contentless index free them, putting FAST back after it, whether it worked or not.
+pub(crate) fn zeroing<T>(db: &Connection, zero: impl FnOnce() -> Result<T>) -> Result<T> {
+    secure_delete(db, SECURE_DELETE_ON, 1)?;
+    let zeroed = zero();
     let fast = secure_delete(db, SECURE_DELETE_FAST, FAST);
-    let erased = erased?;
+    let zeroed = zeroed?;
     fast?;
-    Ok(erased)
+    Ok(zeroed)
 }
 
 /// Sets `secure_delete` with `pragma`, checking it reads back as `expected`.
