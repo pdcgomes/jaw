@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import JawKit
 
 /// Where a picture is drawn from: jawd's previews, at most 256 and 768 pixels on their long side,
@@ -72,19 +73,42 @@ public struct PictureSlot: Sendable, Hashable {
     /// The decodes it can be drawn from at `scale`, best first, and its blurred thumbnail, which is
     /// a quarter of its pixels each way, since a blur loses nothing drawn larger and the cache
     /// keeps previews in what that leaves.
-    public func keys(_ scale: CGFloat) -> (previews: [PictureKey], thumbnail: PictureKey?) {
+    public func keys(_ scale: CGFloat, _ space: PictureSpace = .sRGB) -> (previews: [PictureKey], thumbnail: PictureKey?) {
         let (w, h) = pixels(scale)
         let previews = source.previews(for: CGFloat(max(w, h))).map {
-            PictureKey(path: $0, width: w, height: h, fit: fit, blurred: false, jpeg: source.jpeg)
+            PictureKey(path: $0, width: w, height: h, fit: fit, blurred: false, jpeg: source.jpeg, space: space)
         }
         return (previews, source.thumbnail.map {
-            PictureKey(path: $0, width: max(w / 4, 1), height: max(h / 4, 1), fit: fit, blurred: true, jpeg: source.jpeg)
+            PictureKey(path: $0, width: max(w / 4, 1), height: max(h / 4, 1), fit: fit, blurred: true, jpeg: source.jpeg, space: space)
         })
     }
 }
 
+/// The colours a picture is decoded in: sRGB, or those of the screen a layer shows it on, which Core
+/// Animation would otherwise convert it to on the main thread as it commits, keeping the copy.
+public struct PictureSpace: @unchecked Sendable, Hashable {
+    public let space: CGColorSpace
+    /// Its profile's hash, so keys compare without reading the profile each time.
+    let id: Int
+
+    public init(_ space: CGColorSpace) {
+        self.space = space
+        id = (space.copyICCData() as Data?)?.hashValue ?? (space.name as String?)?.hashValue ?? 0
+    }
+
+    public static let sRGB = PictureSpace(CGColorSpace(name: CGColorSpace.sRGB)!)
+
+    public static func == (a: PictureSpace, b: PictureSpace) -> Bool {
+        a.id == b.id && a.space == b.space
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
 /// A picture decoded at the pixels it's drawn at: its file, its size, how it fills, whether it's a
-/// thumbnail blurred to stand in for its preview, and whether only a JPEG is read.
+/// thumbnail blurred to stand in for its preview, whether only a JPEG is read, and its colours.
 public struct PictureKey: Sendable, Hashable {
     public let path: String
     public let width: Int
@@ -92,14 +116,16 @@ public struct PictureKey: Sendable, Hashable {
     public let fit: PictureFit
     public let blurred: Bool
     public let jpeg: Bool
+    public let space: PictureSpace
 
-    public init(path: String, width: Int, height: Int, fit: PictureFit, blurred: Bool, jpeg: Bool = false) {
+    public init(path: String, width: Int, height: Int, fit: PictureFit, blurred: Bool, jpeg: Bool = false, space: PictureSpace = .sRGB) {
         self.path = path
         self.width = width
         self.height = height
         self.fit = fit
         self.blurred = blurred
         self.jpeg = jpeg
+        self.space = space
     }
 
     /// The same picture at any size: what a slot can be drawn from, scaled, while its own size is

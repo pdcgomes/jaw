@@ -218,10 +218,105 @@ let busyItem = LibraryRow(id: "T1", v: 1, sort: "1~0000000", kind: .photo, chat:
     }
     #expect(await eventually {
         w.displayIfNeeded()
-        return cell("LP12").flatMap { $0.drawn?.slot }.flatMap { pictures.drawable($0, scale: cell("LP12")!.scale) } != nil
+        return cell("LP12").flatMap { $0.drawn?.slot }.flatMap { pictures.drawable($0, scale: cell("LP12")!.scale, space: cell("LP12")!.space) } != nil
     }, "the coming photo's blurred thumbnail: \(String(describing: cell("LP12")?.bounds)), asked at \(String(describing: cell("LP12")?.askedSize)), \(pictures.queue.counts)")
     let here = try #require(cell("LP0"))
-    #expect(here.drawn?.slot.flatMap { pictures.drawable($0, scale: here.scale) }?.isPreview == true, "a photo here, its preview")
+    #expect(here.drawn?.slot.flatMap { pictures.drawable($0, scale: here.scale, space: here.space) }?.isPreview == true, "a photo here, its preview")
+}
+
+/// A cell 120 points square in a window of its own off screen, shown, kept until the test ends.
+@MainActor
+func shownCell(_ pictures: MessagePictures) -> (LibraryCell, NSWindow) {
+    let window = NSWindow(contentRect: CGRect(x: -30000, y: -30000, width: 120, height: 120), styleMask: .borderless, backing: .buffered,
+                          defer: false)
+    window.isReleasedWhenClosed = false
+    let cell = LibraryCell(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
+    cell.pictures = pictures
+    window.contentView?.addSubview(cell)
+    window.orderFront(nil)
+    return (cell, window)
+}
+
+/// The picture a cell's layer holds, when what it holds is a picture rather than a backing store.
+@MainActor
+func layerPicture(_ cell: LibraryCell) -> CGImage? {
+    guard let contents = cell.layer?.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { return nil }
+    return (contents as! CGImage)
+}
+
+/// Displays `cell` as Core Animation does as it commits: its layer, from what the cell gives it.
+@MainActor
+func display(_ cell: LibraryCell) {
+    cell.needsDisplay = true
+    cell.layer?.displayIfNeeded()
+}
+
+/// Shows `item` in `cell` once its preview's here, and displays it.
+@MainActor
+func showHere(_ cell: LibraryCell, _ item: LibraryRow, _ what: LibraryLaid.Element.What, selected: Bool = false) async throws {
+    cell.show(what, item: item, context: drawingContext(), selected: selected)
+    let slot = try #require(cell.drawn?.slot)
+    #expect(await eventually(seconds: 20) { cell.pictures?.drawable(slot, scale: cell.scale, space: cell.space)?.isPreview == true }, "\(item.id)'s preview")
+    display(cell)
+}
+
+@MainActor @Test func `a tile's picture is its layer's contents, never drawn, and only what's over it is drawn, on a layer over it`() async throws {
+    let pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)
+    let (cell, window) = shownCell(pictures)
+    defer { window.close() }
+    let photo = try #require(Samples.library.first { $0.id == "LP0" })
+    try await showHere(cell, photo, .tile(photo.id))
+    let image = try #require(cell.drawn?.slot.flatMap { pictures.drawable($0, scale: cell.scale, space: cell.space) }?.image)
+    #expect(cell.space == LibraryCell.space(of: window) && image.colorSpace == window.colorSpace?.cgColorSpace,
+            "decoded in its window's colours, so Core Animation shows it as it is")
+    #expect(cell.wantsUpdateLayer && layerPicture(cell) === image, "its preview is its layer's")
+    #expect(cell.layer?.masksToBounds == true && cell.layer?.cornerRadius == drawingContext().metrics.radius)
+    #expect(cell.overlay.contents == nil && cell.drawnFrom == 2, "nothing over a photo that's here")
+
+    cell.selected = true
+    display(cell)
+    #expect(cell.overlay.contents != nil && layerPicture(cell) === image, "the selection over it, the picture as it was")
+    cell.letGo()
+    #expect(layerPicture(cell) == nil, "let go as it's reused or scrolled past, so the pictures held are the cache's")
+    display(cell)
+    #expect(layerPicture(cell) === image, "and shown again from the cache")
+
+    let file = try #require(Samples.library.first { $0.kind == .file })
+    cell.show(.row(file.id), item: file, context: drawingContext(), selected: false)
+    display(cell)
+    #expect(!cell.wantsUpdateLayer && cell.overlay.contents == nil && cell.layer?.backgroundColor == nil && cell.layer?.masksToBounds == false,
+            "reused for a row, it draws")
+    #expect(layerPicture(cell) == nil, "into a backing store, not the picture")
+}
+
+@MainActor @Test func `a tile shown by its layers looks as its parts draw it: a photo selected, a video with its length, a photo coming`() async throws {
+    let pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)
+    let (cell, window) = shownCell(pictures)
+    defer { window.close() }
+    for (id, selected) in [("LP0", true), ("LV0", false), ("LP12", false)] {
+        let item = try #require(Samples.library.first { $0.id == id })
+        cell.show(.tile(id), item: item, context: drawingContext(), selected: selected)
+        let slot = try #require(cell.drawn?.slot)
+        #expect(await eventually(seconds: 20) { pictures.drawable(slot, scale: cell.scale, space: cell.space) != nil }, "\(id)'s picture")
+        display(cell)
+        let scale = cell.scale, size = cell.bounds.size
+        /// Drawn from the top left, as AppKit draws a flipped view.
+        func bitmap(_ draw: (CGContext) -> Void) -> [UInt8] {
+            let (w, h) = (Int(size.width * scale), Int(size.height * scale))
+            let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.scaleBy(x: scale, y: scale)
+            ctx.translateBy(x: 0, y: size.height)
+            ctx.scaleBy(x: 1, y: -1)
+            draw(ctx)
+            return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: w * h * 4))
+        }
+        let layers = bitmap { ctx in cell.layer?.render(in: ctx) }
+        let parts = bitmap { ctx in cell.drawn?.draw(in: ctx, picture: pictures.drawable(slot, scale: scale, space: cell.space)?.image) }
+        let apart = zip(layers, parts).map { abs(Int($0) - Int($1)) }
+        let off = stride(from: 0, to: apart.count, by: 4).count { apart[$0 ..< $0 + 4].max()! > 6 }
+        #expect(Double(off) < Double(apart.count / 4) * 0.015 && apart.reduce(0, +) < apart.count, "\(id): \(off) pixels apart")
+    }
 }
 
 /// `n` photos a day apart from `from`, each with the made-up previews.

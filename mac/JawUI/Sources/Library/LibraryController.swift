@@ -150,6 +150,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         collection.isSelectable = false
         collection.backgroundColors = [.clear]
         collection.register(LibraryGridItem.self, forItemWithIdentifier: LibraryGridItem.id)
+        collection.register(LibraryGridItem.self, forItemWithIdentifier: LibraryGridItem.tile)
         scroll.documentView = collection
         scroll.hasVerticalScroller = true
         Scrolling.style(scroll)
@@ -576,9 +577,10 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     }
 
     public func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
-        let item = collectionView.makeItem(withIdentifier: LibraryGridItem.id, for: indexPath) as! LibraryGridItem
-        let cell = item.cell
         let element = laid.elements[indexPath.item]
+        let reuse = if case .tile = element.what { LibraryGridItem.tile } else { LibraryGridItem.id }
+        let item = collectionView.makeItem(withIdentifier: reuse, for: indexPath) as! LibraryGridItem
+        let cell = item.cell
         let row = element.item.flatMap { index[$0] }.map { items[$0] }
         cell.pictures = pictures
         cell.clicked = { [weak self] cell, clicks in self?.clicked(cell, clicks) }
@@ -590,14 +592,14 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     /// Tiles about to be shown ask for their pictures ahead, each under a claim of its own that's let
     /// go if they're not shown after all, and once they are, when their cell asks for its own.
     public func collectionView(_: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
-        let scale = view.window?.backingScaleFactor ?? 2
+        let scale = view.window?.backingScaleFactor ?? 2, space = LibraryCell.space(of: view.window)
         for path in indexPaths where laid.elements.indices.contains(path.item) {
             guard case let .tile(id) = laid.elements[path.item].what, prefetched[id] == nil, let i = index[id] else { continue }
             let frame = laid.elements[path.item].frame
             guard let slot = LibraryDrawing.drawn(.tile(id), item: items[i], size: frame.size, selected: false, context).slot else { continue }
             let token = pictures.token()
             prefetched[id] = token
-            pictures.ask(slot, scale: scale, for: token) {}
+            pictures.ask(slot, scale: scale, space: space, for: token) {}
         }
     }
 

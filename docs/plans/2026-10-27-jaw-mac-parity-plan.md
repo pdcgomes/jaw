@@ -93,6 +93,7 @@ The terminal's Ctrl-L has every photo, video, voice message, file and link, acro
 - **Built** (`mac-library`, [the library plan](2026-11-01-jaw-mac-library-plan.md)): all of it, on jawd's `library.watch`. Enter looks at a photo, a video or a file with Quick Look, as 2.3's Enter does, the photos and videos near it paged through, the viewer coming after parity (Phase 4); a voice message plays once jawd plays voice (2.6). What jawd's library rows don't carry, a voice message's waveform, a file's download state and a link's thumbnail, is the Mac design's P14; until it's served they're drawn as even bars, "not downloaded" and the link's mark. `from:` offers you, the senders of the items held and the members of the chats open in panes until the Mac watches the roster (2.1).
 - **Needs from jawd:** the library, on main since 77d44257, links with it.
 - **The check:** `library.watch`, `library.shown` and the `library` push, out of `mac/parity.toml` as the Mac sends and reads them.
+- **Left, for `mac-perf`:** scrolling the grid misses the design's frame budget, as the conversation's does: 15.5 to 18.1 ms at p99 and 77 to 108 ms of hitches a second over 3,000 photos, against 8.3 ms and 1 ms, by `--bench library`, as the README's What it costs has it.
 
 ### 2.5 Attaching photos, videos and files
 

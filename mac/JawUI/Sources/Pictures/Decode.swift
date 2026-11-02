@@ -27,8 +27,9 @@ public enum PictureFiles: Sendable, Hashable {
 }
 
 /// Decoding, off the main thread: a preview read with ImageIO at no more than the pixels it's drawn
-/// at, then drawn into a bitmap of exactly those pixels, so the cell that draws it copies it rather
-/// than scaling it; and a thumbnail blurred to stand in for its preview.
+/// at, then drawn into a bitmap of exactly those pixels in the colours its key asks for, so the cell
+/// that draws it copies it rather than scaling or converting it; and a thumbnail blurred to stand in
+/// for its preview.
 enum Decode {
     static let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
@@ -52,7 +53,7 @@ enum Decode {
             kCGImageSourceThumbnailMaxPixelSize: most,
         ] as CFDictionary
         guard let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
-        guard let ctx = CGContext(data: nil, width: key.width, height: key.height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+        guard let ctx = CGContext(data: nil, width: key.width, height: key.height, bitsPerComponent: 8, bytesPerRow: 0, space: key.space.space,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         ctx.interpolationQuality = .high

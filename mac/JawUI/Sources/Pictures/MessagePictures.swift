@@ -37,8 +37,8 @@ public final class MessagePictures {
         public let exact: Bool
     }
 
-    public func drawable(_ slot: PictureSlot, scale: CGFloat) -> Drawable? {
-        let (previews, thumbnail) = slot.keys(scale)
+    public func drawable(_ slot: PictureSlot, scale: CGFloat, space: PictureSpace = .sRGB) -> Drawable? {
+        let (previews, thumbnail) = slot.keys(scale, space)
         for key in previews {
             guard let image = cache.image(key) else { continue }
             // Its thumbnail isn't needed once its preview is drawn; it's made again if that goes.
@@ -53,14 +53,16 @@ public final class MessagePictures {
         return cache.another(thumbnail).map { Drawable(image: $0, isPreview: false, exact: false) }
     }
 
-    /// Asks for what the slot lacks at `scale`, for `token`: its best preview that can be read, and,
-    /// while no preview of it can be drawn, its blurred thumbnail. `came` runs on the main thread as
-    /// each comes; nothing is asked twice, nor anything while the cache is closed.
-    public func ask(_ slot: PictureSlot, scale: CGFloat, for token: PictureToken, came: @escaping @MainActor @Sendable () -> Void) {
+    /// Asks for what the slot lacks at `scale` in `space`'s colours, for `token`: its best preview that
+    /// can be read, and, while no preview of it can be drawn, its blurred thumbnail. `came` runs on
+    /// the main thread as each comes; nothing is asked twice, nor anything while the cache is closed.
+    public func ask(_ slot: PictureSlot, scale: CGFloat, space: PictureSpace = .sRGB, for token: PictureToken,
+                    came: @escaping @MainActor @Sendable () -> Void)
+    {
         guard !cache.isClosed else { return }
-        let (previews, thumbnail) = slot.keys(scale)
+        let (previews, thumbnail) = slot.keys(scale, space)
         let best = previews.first { !queue.failed($0) }
-        let previewDrawn = drawable(slot, scale: scale)?.isPreview == true
+        let previewDrawn = drawable(slot, scale: scale, space: space)?.isPreview == true
         if let thumbnail, !previewDrawn, !cache.has(thumbnail), !queue.failed(thumbnail) {
             queue.ask(thumbnail, for: token) { _ in came() }
         }
