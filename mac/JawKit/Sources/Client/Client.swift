@@ -89,7 +89,8 @@ public final class Client: Sendable {
     }
 
     /// Watches the library: a kind's items, or the newest of every kind, as `filter` narrows them.
-    /// jawd watches a library whole, so watched again it comes whole, with what left as `remove`.
+    /// jawd watches a library whole, with no `have`, so watched again after a drop or a resync its
+    /// answer is the whole window, and the update removes what the window held that the answer lacks.
     public func watchLibrary(_ filter: LibraryFilter, _ place: Place) -> WindowID {
         open(.library, filter.chat ?? "", place, filter: filter)
     }
@@ -727,7 +728,13 @@ public final class Client: Sendable {
                     s.mergeMessages(window, update)
                     s.answered(window, watched.typing)
                 case let .library(watched):
-                    var update = Update<LibraryRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows,
+                    // Watched again with no have, jawd answers the whole window, so what it held that
+                    // the answer lacks has gone.
+                    var remove = watched.remove
+                    if landing.again == true {
+                        remove += w.ids.subtracting(watched.rows.map(\.id)).subtracting(remove).sorted()
+                    }
+                    var update = Update<LibraryRow>(seq: watched.seq, remove: remove, upsert: watched.rows,
                                                     total: watched.total, older: watched.older, counts: watched.counts,
                                                     note: .some(watched.note))
                     if moved { update.moved = Moved(place: place, newer: 0) }

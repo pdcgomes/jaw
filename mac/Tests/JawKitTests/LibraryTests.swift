@@ -122,17 +122,24 @@ import Testing
     #expect(merged.counts == (0, 1), "the item that came and went leaves nothing behind")
 }
 
+/// Photo `P<n>` as jawd sends it in a library window, older as `n` grows.
+func photo(_ n: Int) -> String {
+    #"{"id":"P\#(n)","v":\#(n),"sort":"\#(String(format: "%04d", 1000 - n))~0000000","kind":"photo","message":"P\#(n)","chat":"ana","chat_name":"Ana","mine":false,"at":\#(1000 - n),"caption":[],"media":{"w":10,"h":10}}"#
+}
+
+/// jawd's answer to request `id` watching or moving a library window, holding `photos`.
+func photos(_ id: UInt64, _ photos: [Int], seq: Int = 10, older: Bool = true) -> String {
+    #"{"id":\#(id),"result":{"watch":"w5","seq":\#(seq),"total":4,"older":\#(older),"counts":{"photo":4,"video":0,"voice":0,"file":0,"link":0},"rows":[\#(photos.map(photo).joined(separator: ","))]}}"#
+}
+
 /// A script that answers library windows as jawd would for a small account: two photos, and
 /// `watch.move` on the window as a page of older ones.
 func library(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
-    func item(_ n: Int) -> String {
-        #"{"id":"P\#(n)","v":\#(n),"sort":"\#(String(format: "%04d", 1000 - n))~0000000","kind":"photo","message":"P\#(n)","chat":"ana","chat_name":"Ana","mine":false,"at":\#(1000 - n),"caption":[],"media":{"w":10,"h":10}}"#
-    }
     switch method {
     case "library.watch":
-        return [#"{"id":\#(id),"result":{"watch":"w5","seq":10,"total":4,"older":true,"counts":{"photo":4,"video":0,"voice":0,"file":0,"link":0},"rows":[\#(item(1)),\#(item(2))]}}"#]
+        return [photos(id, [1, 2])]
     case "watch.move":
-        return [#"{"id":\#(id),"result":{"watch":"w5","seq":11,"total":4,"older":false,"counts":{"photo":4,"video":0,"voice":0,"file":0,"link":0},"rows":[\#(item(3)),\#(item(4))]}}"#]
+        return [photos(id, [3, 4], seq: 11, older: false)]
     default:
         return ordinary(method, params, id)
     }
@@ -175,23 +182,43 @@ func library(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
         #expect(window.list.map(\.id) == ["P0", "P1", "P3", "P4"])
     }
 
-    @Test func `after a drop or a resync a library window is watched again whole, with its filters and place`() async throws {
-        let fake = try FakeJawd(script: library)
+    @Test func `after a drop or a resync a library window is watched again whole, with its filters and place, and what jawd no longer has goes`() async throws {
+        // P1 goes while the connection's down, and P2 before the resync, as P3 comes.
+        let watched = Count()
+        let fake = try FakeJawd { method, params, id in
+            guard method == "library.watch" else { return library(method, params, id) }
+            return switch watched.next() {
+            case 1: [photos(id, [1, 2])]
+            case 2: [photos(id, [2, 3])]
+            default: [photos(id, [3])]
+            }
+        }
         defer { fake.stop() }
         let jawd = connected(fake)
         defer { jawd.close() }
-        _ = jawd.watchLibrary(LibraryFilter(kind: .link, since: 5, until: 9), .top(240))
-        _ = await drain(jawd) { all in all.contains { if case .library = $0 { true } else { false } } }
+        let w = jawd.watchLibrary(LibraryFilter(kind: .link, since: 5, until: 9), .top(240))
+        var window = Library<LibraryRow>(place: .top(240))
+        func take(_ all: [JawUpdate]) {
+            for case let .library(id, update) in all where id == w {
+                window.apply(update)
+            }
+        }
+        take(await drain(jawd) { all in all.contains { if case .library = $0 { true } else { false } } })
+        #expect(window.list.map(\.id) == ["P1", "P2"])
+
         fake.drop()
-        _ = await drain(jawd) { all in helloed(all) == 1 && all.contains { if case .library = $0 { true } else { false } } }
+        take(await drain(jawd) { all in helloed(all) == 1 && all.contains { if case .library = $0 { true } else { false } } })
         let watches = requests(fake, "library.watch")
         #expect(watches.count == 2)
         #expect(watches.last?["kind"]?.string == "link" && watches.last?["since"]?.int == 5 && watches.last?["until"]?.int == 9)
         #expect(watches.last?["have"] == nil && watches.last?["around"]?.string == "top", "whole, as jawd watches a library")
+        #expect(window.list.map(\.id) == ["P2", "P3"], "P1, gone while the connection was down, goes")
 
         fake.send(#"{"method":"resync","params":{"watch":"w5"}}"#)
-        #expect(await eventually { requests(fake, "library.watch").count == 3 })
+        take(await drain(jawd) { all in all.contains { if case .library = $0 { true } else { false } } })
+        #expect(requests(fake, "library.watch").count == 3)
         #expect(jawd.client.stats.resyncs == 1)
+        #expect(window.list.map(\.id) == ["P3"], "P2, gone by the resync, goes")
     }
 
     @Test func `the items on screen are named to jawd, 200 at most`() async throws {
