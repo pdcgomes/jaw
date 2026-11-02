@@ -2065,6 +2065,54 @@ async fn below_the_disks_floor_no_history_blob_is_asked_for_until_there_is_room(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn below_the_disks_floor_a_row_left_in_the_inbox_and_the_live_rows_after_it_are_converted_while_history_waits() {
+    let home = tempfile::tempdir().unwrap();
+    let config = crate::disk::Config { ballast: 0, ..Default::default() };
+    let (disk, fake) = crate::disk::Disk::faked(home.path(), config, 10_000_000_000, 500_000_000_000);
+    let store = Store::open_watched(home.path(), disk.clone()).unwrap();
+    // Left in the inbox from before jawd started, as an unclean stop or a quarantined row leaves one.
+    let left =
+        live_message(ANA, ANA, "left", AT, previewed("vê www.8a.nu/sintra", "www.8a.nu/sintra", Some(jpeg(40, 30))));
+    store.inbox("message", 0, left.encode_to_vec(), None);
+    until("the row left from before", || store.count("inbox").unwrap() == 1).await;
+    fake.free.store(1_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    let history = {
+        let store = store.clone();
+        let old = crate::store::Message {
+            chat: GROUP.into(),
+            id: "h1".into(),
+            at: AT - 1_000,
+            sender: Some("100000000001@lid".into()),
+            kind: "text",
+            text: Some("de antes".into()),
+            summary: "de antes".into(),
+            ..Default::default()
+        };
+        tokio::spawn(async move { store.apply(Lane::Background, vec![Change::Message(old)]).await })
+    };
+    tokio::time::sleep(crate::disk::POLL * 2).await;
+    assert!(!history.is_finished(), "history waits for room");
+    let converter = converting(&store);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    store.inbox("message", 0, live_message(ANA, ANA, "live", AT + 1_000, text("agora")).encode_to_vec(), None);
+    let arrived = Instant::now();
+    until("both messages, the disk short of room", || store.count("messages").unwrap() == 2).await;
+    let took = arrived.elapsed();
+    assert!(took < Duration::from_secs(2), "the live message was converted {took:?} after it arrived");
+    assert_eq!(store.count("inbox").unwrap(), 0);
+    until("the left row's thumbnail", || store.thumbnails_kept().unwrap().0 == 1).await;
+    assert!(!disk.room() && !history.is_finished(), "history still waits for room");
+    fake.free.store(10_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::timeout(Duration::from_secs(5), history)
+        .await
+        .expect("history goes once there's room")
+        .unwrap()
+        .unwrap();
+    converter.abort();
+    assert_eq!(store.count("messages").unwrap(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without_storing_anything_twice() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();

@@ -326,12 +326,20 @@ enum Background {
     },
 }
 
+/// The conversion of rows left in the inbox when jawd started: background work that never waits
+/// for the disk, as the inbox doesn't, nor behind background work that does.
+struct Leftovers {
+    changes: Vec<Change>,
+    done: Done,
+}
+
 #[derive(Clone)]
 pub struct Store {
     path: PathBuf,
     realtime: Sender<Inbox>,
     live: Sender<Live>,
     background: Sender<Background>,
+    leftovers: Sender<Leftovers>,
     reads: Reads,
     committed: watch::Receiver<i64>,
     copies_taken: watch::Receiver<u64>,
@@ -747,6 +755,8 @@ impl Store {
         let (realtime, realtime_rx) = unbounded();
         let (live, live_rx) = unbounded();
         let (background, background_rx) = bounded(16);
+        // The converter's batch and its thumbnails', one each.
+        let (leftovers, leftovers_rx) = bounded(2);
         let (kick, kicks) = bounded(1);
         let (seq, committed) = watch::channel(stamps.last());
         let (copies, copies_taken) = watch::channel(0);
@@ -783,6 +793,7 @@ impl Store {
             stamps,
             realtime: realtime_rx,
             live: live_rx,
+            leftovers: leftovers_rx,
             inbox: Vec::new(),
             synced: Some(false),
             wal: wal.clone(),
@@ -824,6 +835,7 @@ impl Store {
             realtime,
             live,
             background,
+            leftovers,
             reads,
             committed,
             copies_taken,
@@ -918,6 +930,19 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?,
             Lane::Background => self.queue_background(Background::Changes { changes, done }).await?,
         }
+        applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Makes the changes of rows left in the inbox when jawd started as background work does, in
+    /// short transactions behind inbox rows and live writes, but never waiting for the disk, as the
+    /// inbox doesn't: the converter reads the live rows behind them in the same loop. They go ahead
+    /// of other background work, and while it waits for the disk.
+    pub async fn apply_leftovers(&self, changes: Vec<Change>) -> Result<Applied> {
+        let (done, applied) = oneshot::channel();
+        let leftovers = self.leftovers.clone();
+        tokio::task::spawn_blocking(move || leftovers.send(Leftovers { changes, done }))
+            .await?
+            .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
@@ -1090,7 +1115,7 @@ impl Report for Store {
             workers: 1,
             running: 0,
             queued_interactive: (self.realtime.len() + self.live.len()) as u32,
-            queued_background: self.background.len() as u32,
+            queued_background: (self.background.len() + self.leftovers.len()) as u32,
             done: stats.transactions,
             wait_interactive: stats.waits.percentiles(),
             wait_background: stats.held.percentiles(),
@@ -1137,6 +1162,7 @@ struct Writer {
     stamps: Stamps,
     realtime: Receiver<Inbox>,
     live: Receiver<Live>,
+    leftovers: Receiver<Leftovers>,
     /// Inbox rows taken from the queue and not committed yet. They stay until they are.
     inbox: Vec<Inbox>,
     /// Whether commits reach the disk before they return, as they are now; None while unsure.
@@ -1316,11 +1342,12 @@ impl Pace {
 }
 
 impl Writer {
-    /// Inbox first, then live changes, then background work in short transactions.
+    /// Inbox first, then live changes, then the inbox's leftovers and other background work in
+    /// short transactions.
     fn run(mut self, background: Receiver<Background>) {
         self.db.wal_hook(Some(note_frames));
         self.prune();
-        let (realtime, live) = (self.realtime.clone(), self.live.clone());
+        let (realtime, live, leftovers) = (self.realtime.clone(), self.live.clone(), self.leftovers.clone());
         loop {
             let idle = self.idle_for();
             select_biased! {
@@ -1332,9 +1359,13 @@ impl Writer {
                     Ok(write) => self.live_write(write),
                     Err(_) => return,
                 },
+                recv(leftovers) -> left => match left {
+                    Ok(left) => self.take_leftovers(left),
+                    Err(_) => return,
+                },
                 recv(background) -> write => match write {
                     Ok(Background::Changes { changes, done }) => {
-                        let applied = self.background_changes(&changes);
+                        let applied = self.background_changes(&changes, false);
                         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
                         if self.pruned.elapsed() >= PRUNE_EVERY {
                             self.prune();
@@ -1840,14 +1871,14 @@ impl Writer {
         self.unhold();
     }
 
-    /// Waits until the disk has room for a background transaction, taking inbox and live writes
-    /// meanwhile, so the watchdog never holds one up.
+    /// Waits until the disk has room for a background transaction, taking inbox and live writes and
+    /// the inbox's leftovers meanwhile, so the watchdog never holds one up.
     fn wait_for_disk(&mut self) {
         if self.disk.room() {
             return;
         }
         let began = Instant::now();
-        let (realtime, live) = (self.realtime.clone(), self.live.clone());
+        let (realtime, live, leftovers) = (self.realtime.clone(), self.live.clone(), self.leftovers.clone());
         while !self.disk.room() {
             select_biased! {
                 recv(realtime) -> row => match row {
@@ -1858,10 +1889,21 @@ impl Writer {
                     Ok(write) => self.live_write(write),
                     Err(_) => break,
                 },
+                recv(leftovers) -> left => match left {
+                    Ok(left) => self.take_leftovers(left),
+                    Err(_) => break,
+                },
                 default(disk::POLL) => {}
             }
         }
         self.disk.waited(began.elapsed());
+    }
+
+    /// Converts rows left in the inbox when jawd started, as background work that doesn't wait for
+    /// the disk.
+    fn take_leftovers(&mut self, Leftovers { changes, done }: Leftovers) {
+        let applied = self.background_changes(&changes, true);
+        let _ = done.send(applied.map_err(|e| format!("{e:#}")));
     }
 
     /// Background work waits for the WAL to start again, so the checkpointer copies however few
@@ -2176,13 +2218,17 @@ impl Writer {
         }
     }
 
-    fn background_changes(&mut self, changes: &[Change]) -> Result<Applied> {
+    /// Makes background `changes` in short transactions, each waiting for the WAL's room, and for
+    /// the disk's unless they're the inbox's `leftovers`.
+    fn background_changes(&mut self, changes: &[Change], leftovers: bool) -> Result<Applied> {
         let started = Instant::now();
         let mut applied = Applied::default();
         let groups = write::groups(changes);
         let mut rest = groups.as_slice();
         while !rest.is_empty() {
-            self.wait_for_disk();
+            if !leftovers {
+                self.wait_for_disk();
+            }
             self.wait_for_room();
             let made = self.retrying(|w| {
                 w.synced(false)?;

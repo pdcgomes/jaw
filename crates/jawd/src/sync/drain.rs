@@ -1,11 +1,13 @@
 //! The converter: inbox rows become chats, messages and people as soon as they're committed, and
 //! each row is deleted in the transaction its conversion's rows go in, so a crash between the two
-//! converts it again and nothing twice. What was left from before jawd started goes in the
-//! background lane; what arrives live goes in the live lane, a few dozen at a time so the inbox's
-//! own commits are never held up for long. History kept raw by an earlier jawd is converted
-//! the same way, in the background lane, alongside. Neither converts anything until jaw.db keeps
-//! the account's own JIDs, which the engine says when it connects; until then the rows wait. A
-//! row whose conversion panics stays where it is, kept in quarantine, and the rows after it go on.
+//! converts it again and nothing twice. What was left from before jawd started goes as background
+//! work, which never holds up live writes, but never waits for the disk, as the inbox doesn't: the
+//! live rows behind it would wait too. What arrives live goes in the live lane, a few dozen at a
+//! time so the inbox's own commits are never held up for long. History kept raw by an earlier
+//! jawd is converted the same way, in the background lane, alongside. Neither converts anything
+//! until jaw.db keeps the account's own JIDs, which the engine says when it connects; until then
+//! the rows wait. A row whose conversion panics stays where it is, kept in quarantine, and the rows
+//! after it go on.
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -338,7 +340,8 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
 
 /// A converted batch's link previews' thumbnails, and their rows, to keep once the batch is in.
 struct Thumbnailing {
-    lane: Lane,
+    /// Whether its batch was left in the inbox from before jawd started.
+    from_before: bool,
     thumbnails: Vec<(String, Vec<u8>)>,
     rows: Vec<Change>,
 }
@@ -349,7 +352,7 @@ const THUMBNAILS_WAITING: usize = 1;
 
 /// Takes the `Change::Thumbnail`s out of `converted`, with the thumbnails they name, so its batch
 /// is applied without waiting for their files to be written and synced.
-fn thumbnailing(converted: &mut Converted, lane: Lane) -> Option<Thumbnailing> {
+fn thumbnailing(converted: &mut Converted, from_before: bool) -> Option<Thumbnailing> {
     if converted.thumbnails.is_empty() {
         return None;
     }
@@ -357,22 +360,24 @@ fn thumbnailing(converted: &mut Converted, lane: Lane) -> Option<Thumbnailing> {
         .into_iter()
         .partition(|change| matches!(change, Change::Thumbnail { .. }));
     converted.changes = rest;
-    Some(Thumbnailing { lane, thumbnails: std::mem::take(&mut converted.thumbnails), rows })
+    Some(Thumbnailing { from_before, thumbnails: std::mem::take(&mut converted.thumbnails), rows })
 }
 
 /// Keeps the thumbnails of each batch that's in, then puts in the rows of those that were kept, so
 /// a preview shows its thumbnail only once its file is whole; one that couldn't be shows without.
 async fn keep_thumbnails(store: Store, mut batches: mpsc::Receiver<Thumbnailing>) {
-    while let Some(Thumbnailing { lane, thumbnails, rows }) = batches.recv().await {
+    while let Some(Thumbnailing { from_before, thumbnails, rows }) = batches.recv().await {
         let kept = store.thumbnails().clone();
         let kept = tokio::task::spawn_blocking(move || kept.keep(&thumbnails)).await.unwrap_or_default();
         let rows: Vec<Change> = rows
             .into_iter()
             .filter(|row| matches!(row, Change::Thumbnail { sha256, .. } if kept.contains(sha256)))
             .collect();
-        if !rows.is_empty()
-            && let Err(e) = store.apply(lane, rows).await
-        {
+        if rows.is_empty() {
+            continue;
+        }
+        let shown = if from_before { store.apply_leftovers(rows).await } else { store.apply(Lane::Live, rows).await };
+        if let Err(e) = shown {
             eprintln!("jawd: link previews' thumbnails are kept, but can't be shown: {e:#}");
         }
     }
@@ -460,10 +465,9 @@ pub async fn inbox(
                 continue;
             }
         };
-        let lane = if from_before { Lane::Background } else { Lane::Live };
-        let thumbnailing = thumbnailing(&mut converted, lane);
+        let thumbnailing = thumbnailing(&mut converted, from_before);
         let applied = if from_before {
-            store.apply(Lane::Background, converted.changes).await.map(|applied| applied.quarantined)
+            store.apply_leftovers(converted.changes).await.map(|applied| applied.quarantined)
         } else {
             apply_live(&store, converted.changes).await
         };
