@@ -30,6 +30,7 @@ use super::{
     Amendment, CHAT, Change, Chat, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid,
     delete_row, located, now_ms, upsert_message,
 };
+use crate::convert;
 
 /// The most messages one read receipt names; more go in more receipts, oldest first.
 pub const RECEIPTS_AT_ONCE: usize = 1_000;
@@ -233,9 +234,9 @@ const DROP_ROW: &str = "DELETE FROM outbox WHERE n = ?1";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
 const DEQUEUE: &str = "DELETE FROM outbox WHERE message = ?1";
 const SENT: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2";
-const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c
-    WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL
-    RETURNING messages.expires_at";
+/// What message ?1 of yours goes as, while it waits for the server.
+const WENT: &str = "SELECT raw FROM outbox WHERE message = ?1";
+const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
     WHERE n = ?1 AND state = 'queued'";
@@ -1232,12 +1233,16 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
 }
 
 /// The server has message `n` of yours, as its answer or any receipt says, whichever comes first:
-/// nothing of it is left to send, and in a chat with disappearing messages its timer starts, since
-/// it can wait to go for longer than the timer.
+/// nothing of it is left to send, and if it went with a disappearing timer, as its chat had one
+/// when it was written, its time starts, since it can wait to go for longer than the timer. One
+/// that went without gets none, whatever its chat's timer is by then, as WhatsApp keeps it.
 pub(super) fn received(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
-    if db.prepare_cached(DEQUEUE)?.execute([n])? > 0 {
-        let expires: Option<i64> =
-            db.prepare_cached(EXPIRES)?.query_row(params![n, now_ms()], |r| r.get(0)).optional()?;
+    let went: Option<Vec<u8>> = db.prepare_cached(WENT)?.query_row([n], |r| r.get(0)).optional()?;
+    let Some(went) = went else { return Ok(()) };
+    db.prepare_cached(DEQUEUE)?.execute([n])?;
+    if let Some(seconds) = convert::timer(&went) {
+        let at = now_ms() + i64::from(seconds) * 1000;
+        let expires: Option<i64> = db.prepare_cached(EXPIRES)?.query_row(params![n, at], |r| r.get(0)).optional()?;
         stamps.expires(expires);
     }
     Ok(())
@@ -1829,11 +1834,8 @@ mod tests {
                 "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("sent", SENT, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
-            (
-                "expires",
-                EXPIRES,
-                "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
-            ),
+            ("what went", WENT, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            ("expires", EXPIRES, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("attempted", ATTEMPTED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             ("failed", FAILED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("queued again", REQUEUE, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
@@ -2344,11 +2346,23 @@ mod tests {
         let store = Store::open(home.path()).unwrap();
         let chat = Chat { id: "a@s.whatsapp.net".into(), ephemeral: Some(86_400), ..Chat::default() };
         store.apply(Lane::Live, vec![Change::Chat(chat)]).await.unwrap();
+        // What a text sends in that chat, carrying its timer.
+        let timed = wa_proto::wa_web_protobufs_e2e::Message {
+            extended_text_message: Some(Box::new(wa_proto::wa_web_protobufs_e2e::ExtendedTextMessage {
+                text: Some("gone tomorrow".into()),
+                context_info: Some(Box::new(wa_proto::wa_web_protobufs_e2e::ContextInfo {
+                    expiration: Some(86_400),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
         for id in ["m1", "m2"] {
             let step = Step::Enqueue {
                 message: Box::new(mine(id, 1_000)),
                 kind: "text",
-                raw: vec![1],
+                raw: prost::Message::encode_to_vec(&timed),
                 key: None,
                 written: Written::default(),
             };

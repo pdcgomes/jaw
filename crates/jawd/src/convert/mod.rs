@@ -729,6 +729,13 @@ fn context_mut(m: &mut e2e::Message) -> Option<&mut Option<Box<e2e::ContextInfo>
     None
 }
 
+/// The disappearing timer, in seconds, that `raw`, a WAWebProtobufsE2E.Message, goes with: its
+/// ContextInfo's expiration, out of its wrappers; none for one that goes without, or doesn't read.
+pub fn timer(raw: &[u8]) -> Option<u32> {
+    let message = e2e::Message::decode(raw).ok()?;
+    context_of(unwrap(&message).0).and_then(|c| c.expiration).filter(|&seconds| seconds > 0)
+}
+
 /// The ContextInfo of whichever kind the message is.
 fn context_of(m: &e2e::Message) -> Option<&e2e::ContextInfo> {
     m.extended_text_message

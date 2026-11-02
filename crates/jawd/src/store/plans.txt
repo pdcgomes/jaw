@@ -3460,9 +3460,12 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
-UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL RETURNING messages.expires_at
+SELECT raw FROM outbox WHERE message = ?1
+    SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+
+-- src/store/write/outbox.rs
+UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
-    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at), state = iif(?3 IS NULL, 'failed', 'queued') WHERE n = ?1 AND state = 'queued'

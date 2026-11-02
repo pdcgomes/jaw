@@ -1307,6 +1307,46 @@ async fn a_disappearing_chats_messages_carry_its_timer() {
     assert!(row.expires_at.is_some_and(|at| at > row.at));
 }
 
+/// A message of yours goes by the timer it went with, counted from when the server has it, not by
+/// the one its chat has by then (round three's D1): one written while the chat had no timer, the
+/// timer set to a day before WhatsApp answers, gets no time to go, as WhatsApp and your phone keep
+/// it; one written with a day's timer, the timer turned off before the answer, goes a day after it,
+/// as WhatsApp erases it everywhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_of_yours_goes_by_the_timer_it_went_with_not_the_one_its_chat_has_once_the_server_has_it() {
+    for (went_with, set_before_answer) in [(0u32, 86_400u32), (86_400, 0)] {
+        let home = tempfile::tempdir().unwrap();
+        let running = Running::new(home.path()).await;
+        let chat = Chat { id: ANA.into(), ephemeral: Some(went_with), ephemeral_at: Some(1_000), ..Chat::default() };
+        running.store.apply(Lane::Live, vec![Change::Chat(chat)]).await.unwrap();
+        running.world.gate(true);
+        let id = running.send(ANA, "said before the timer changed").await;
+        running.call("chat.disappearing", json!({ "chat": ANA, "seconds": set_before_answer })).await.unwrap();
+        assert_eq!(timer_of(&running, ANA).await.0, i64::from(set_before_answer), "the chat's timer changed at once");
+        let answered_from = now_ms();
+        running.world.gate(false);
+        running.until_status(ANA, &id, "sent").await;
+        let answered_by = now_ms();
+        let went = running.world.sends().into_iter().find(|s| s.id == id).expect("the message went");
+        let went = wa_proto::wa_web_protobufs_e2e::Message::decode(went.raw.as_slice()).unwrap();
+        let carried = went.extended_text_message.and_then(|text| text.context_info).and_then(|info| info.expiration);
+        assert_eq!(carried.unwrap_or(0), went_with, "it went with the timer its chat had when it was written");
+        let row = running.query(move |db| Ok(read::message(db, ANA, &id)?.unwrap().0)).await;
+        if went_with == 0 {
+            assert_eq!(row.expires_at, None, "it went without a timer, so it stays, whatever its chat's is now");
+        } else {
+            let day = i64::from(went_with) * 1000;
+            assert!(
+                row.expires_at.is_some_and(|at| (answered_from + day..=answered_by + day).contains(&at)),
+                "it goes a day after WhatsApp had it, though its chat's timer is off now: {:?} not in {}..={}",
+                row.expires_at,
+                answered_from + day,
+                answered_by + day,
+            );
+        }
+    }
+}
+
 /// Chat `chat`'s timer and when it was set.
 async fn timer_of(running: &Running, chat: &'static str) -> (i64, Option<i64>) {
     running
