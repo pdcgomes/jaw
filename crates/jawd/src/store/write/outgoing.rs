@@ -84,6 +84,7 @@ pub struct Copy {
     /// Its message's n, an HD copy's being its SD message's; None once it's deleted for you.
     pub message: Option<i64>,
     pub variant: &'static str,
+    /// What it goes as, or `voice` for a voice note, which goes as audio.
     pub kind: String,
     /// jaw's own copy of your file, while the copy is still to be made.
     pub source: Option<String>,
@@ -106,13 +107,15 @@ impl Copy {
         match self.kind.as_str() {
             "image" => Keys::Image,
             "video" | "gif" => Keys::Video,
-            "audio" => Keys::Audio,
+            "audio" | "voice" => Keys::Audio,
             _ => Keys::Document,
         }
     }
 }
 
-const TO_DO: &str = "SELECT g.outbox, g.message, g.variant, g.kind, g.source, g.state, g.sha256, o.id, o.raw,
+/// A voice message's copy goes as audio, and is planned as the voice note its outbox row sends.
+const TO_DO: &str = "SELECT g.outbox, g.message, g.variant, iif(o.kind = 'voice', 'voice', g.kind), g.source, g.state,
+        g.sha256, o.id, o.raw,
         m.id, iif(g.variant = 'sd', m.raw, NULL), f.path
     FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m ON m.n = g.message
         LEFT JOIN media_files f ON f.sha256 = g.sha256

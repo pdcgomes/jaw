@@ -325,6 +325,11 @@ SELECT n FROM chats WHERE person = ?1 AND kind = 'direct' ORDER BY n LIMIT 1
 SELECT jid FROM person_jids WHERE person = ?1 ORDER BY n
     SEARCH person_jids USING INDEX person_jids_by_person (person=?)
 
+-- src/send/voice.rs
+SELECT c.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+
 -- src/store/library.rs
 SELECT n, t FROM messages INDEXED BY messages_shelved WHERE shelf = ?1 AND t < ?2 AND t >= ?3 ORDER BY t DESC LIMIT ?4
     SEARCH messages USING INDEX messages_shelved (shelf=? AND t>? AND t<?)
@@ -3638,7 +3643,7 @@ SELECT chat FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outgoing.rs
-SELECT g.outbox, g.message, g.variant, g.kind, g.source, g.state, g.sha256, o.id, o.raw, m.id, iif(g.variant = 'sd', m.raw, NULL), f.path FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m ON m.n = g.message LEFT JOIN media_files f ON f.sha256 = g.sha256 WHERE g.state IN ('preparing', 'uploading') ORDER BY g.outbox LIMIT ?1
+SELECT g.outbox, g.message, g.variant, iif(o.kind = 'voice', 'voice', g.kind), g.source, g.state, g.sha256, o.id, o.raw, m.id, iif(g.variant = 'sd', m.raw, NULL), f.path FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m ON m.n = g.message LEFT JOIN media_files f ON f.sha256 = g.sha256 WHERE g.state IN ('preparing', 'uploading') ORDER BY g.outbox LIMIT ?1
     SCAN g
     SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN

@@ -365,7 +365,13 @@ fn hd_expires(hd: &mut e2e::Message, expiration: u32) {
 }
 
 /// The row a message of yours that says `raw` is, pending, as every window shows it.
-fn row(chat: &str, id: &str, raw: &e2e::Message, at: i64, me: &convert::Me) -> Result<crate::store::Message, Error> {
+pub(super) fn row(
+    chat: &str,
+    id: &str,
+    raw: &e2e::Message,
+    at: i64,
+    me: &convert::Me,
+) -> Result<crate::store::Message, Error> {
     let web = WebMessageInfo {
         key: MessageKey { remote_jid: Some(chat.into()), from_me: Some(true), id: Some(id.into()), participant: None },
         message: Some(raw.clone()),

@@ -980,7 +980,14 @@ fn attach(
             Some(file),
         ) = (&enqueued, &attached.file)
         {
-            db.prepare_cached(COPY)?.execute(params![outbox, n, "sd", attached.kind, file.path, file.bytes as i64])?;
+            db.prepare_cached(COPY)?.execute(params![
+                outbox,
+                n,
+                "sd",
+                goes_as(attached.kind),
+                file.path,
+                file.bytes as i64
+            ])?;
             if let Some((id, raw)) = &attached.hd {
                 hd.push((*n, *chat_n, chat.clone(), id, raw, attached.kind, file));
             }
@@ -997,6 +1004,12 @@ fn attach(
     }
     written.put(Enqueued::Many(all));
     Ok(changed)
+}
+
+/// What a message of `kind`'s copy goes as: a voice message's as audio, which it is, a voice note
+/// being an audio message that says it's one; the rest as their kind.
+fn goes_as(kind: &str) -> &str {
+    if kind == "voice" { "audio" } else { kind }
 }
 
 /// Outbox row `outbox`'s copy couldn't be made or uploaded, or was cancelled: the row has failed,

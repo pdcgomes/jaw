@@ -37,6 +37,7 @@ struct Rig {
     media: Media,
     voice: Voice,
     pushes: broadcast::Sender<Push>,
+    sending: Sending,
     /// The free space media takes the disk to have.
     free: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -48,7 +49,22 @@ impl Rig {
     }
 
     async fn with(home: &Path, speaker: FakeSpeaker, microphone: FakeMicrophone, config: super::Config) -> Rig {
+        let pipeline = jaw_media::Media::new(jaw_media::Config {
+            previews: jaw_media::Durability::Derived,
+            ..jaw_media::Config::default()
+        });
+        Rig::piped(home, speaker, microphone, config, pipeline).await
+    }
+
+    async fn piped(
+        home: &Path,
+        speaker: FakeSpeaker,
+        microphone: FakeMicrophone,
+        config: super::Config,
+        pipeline: jaw_media::Media,
+    ) -> Rig {
         let world: Arc<World> = Arc::default();
+        world.replying(demo::Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
         let store = Store::open(home).unwrap();
         crate::sync::running(&store).await.unwrap();
         let engine = DemoEngine::sharing(vec![demo::connected()], world.clone());
@@ -65,7 +81,9 @@ impl Rig {
             ..crate::media::Config::default()
         };
         let media =
-            Media::start(store.clone(), Some(supervisor.clone()), home, &live, &pushes, media_config).await.unwrap();
+            Media::start_with(store.clone(), Some(supervisor.clone()), home, &live, &pushes, media_config, pipeline)
+                .await
+                .unwrap();
         let sync = crate::sync::run(
             incoming,
             store.clone(),
@@ -106,10 +124,18 @@ impl Rig {
         for chat in [ANA, RUI] {
             store.apply(Lane::Live, vec![Change::Chat(Chat { id: chat.into(), ..Chat::default() })]).await.unwrap();
         }
-        let voice =
-            Voice::start(home, store.clone(), media.clone(), sending, pushes.clone(), speaker, microphone, config)
-                .unwrap();
-        Rig { home: home.to_path_buf(), store, world, media, voice, pushes, free }
+        let voice = Voice::start(
+            home,
+            store.clone(),
+            media.clone(),
+            sending.clone(),
+            pushes.clone(),
+            speaker,
+            microphone,
+            config,
+        )
+        .unwrap();
+        Rig { home: home.to_path_buf(), store, world, media, voice, pushes, sending, free }
     }
 
     /// A rig whose microphone delivers `samples` at 48 kHz, `pace` times as fast as a real one,
@@ -699,4 +725,196 @@ async fn a_connection_ending_throws_its_recording_away() {
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty());
     assert_eq!(rig.voice.status().recording, None);
+}
+
+impl Rig {
+    /// What the demo's WhatsApp was sent as message `id`, each time it was sent.
+    fn sent(&self, id: &str) -> Vec<wa_proto::wa_web_protobufs_e2e::Message> {
+        use prost::Message as _;
+        self.world
+            .sends()
+            .into_iter()
+            .filter(|s| s.id == id)
+            .map(|s| wa_proto::wa_web_protobufs_e2e::Message::decode(s.raw.as_slice()).unwrap())
+            .collect()
+    }
+
+    /// Records `seconds` of the fake microphone's tone in Ana's chat, and stops: the recording's
+    /// file, as it was put in place.
+    async fn recorded(&self, heard: &MicrophoneProbe) -> Vec<u8> {
+        self.call("voice.record", json!({ "chat": ANA })).await.unwrap();
+        heard_all(heard).await;
+        self.call("voice.stop", json!({})).await.unwrap();
+        let names = self.recordings();
+        let [name] = names.as_slice() else { panic!("one recording: {names:?}") };
+        std::fs::read(self.home.join(folder::RECORDINGS).join(name)).unwrap()
+    }
+
+    /// The files in one of jaw's folders, by name.
+    fn files(&self, folder: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.home.join(folder))
+            .map(|entries| entries.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+}
+
+fn sent(row: &Value) -> bool {
+    matches!(row["status"].as_str(), Some("sent" | "delivered" | "read"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_goes_to_whatsapp_as_a_voice_note_with_its_waveform_length_and_file() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(2.0), 2.0, jaw_voice::RECORDING_LIMIT).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.sending.call("draft.set", json!({ "chat": ANA, "text": "words typed meanwhile" })).await.unwrap();
+    let file = rig.recorded(&heard).await;
+    let stopped = recordings(&mut pushes, "stopped", |p| p["state"] == "stopped").await;
+    let waveform = stopped.last().unwrap()["waveform"].clone();
+    let answer = rig.call("voice.send", json!({ "key": "jaw-voice-1" })).await.unwrap();
+    let id = answer["message"].as_str().unwrap().to_string();
+    let row = &answer["row"];
+    assert_eq!((&row["kind"], &row["status"], &row["mine"]), (&json!("voice"), &json!("pending"), &json!(true)));
+    assert_eq!((&row["voice"]["seconds"], &row["voice"]["waveform"]), (&json!(2), &waveform), "{row}");
+    assert!(rig.recordings().is_empty(), "the recording's own file goes once it's written: {:?}", rig.recordings());
+    assert_eq!(rig.voice.status().recording, None);
+
+    let row = rig.until(ANA, &id, "sent", sent).await;
+    assert_eq!(row["media"]["state"], "local", "its copy is in the cache: {row}");
+    let [upload] = rig.world.uploads().try_into().unwrap();
+    assert_eq!(upload.kind, pb::media_download::Kind::Audio as i32, "with WhatsApp's audio keys");
+    let [message] = rig.sent(&id).try_into().unwrap();
+    let audio = message.audio_message.as_deref().unwrap();
+    assert_eq!(
+        (audio.ptt, audio.mimetype.as_deref(), audio.seconds),
+        (Some(true), Some("audio/ogg; codecs=opus"), Some(2))
+    );
+    let points: Vec<u8> = serde_json::from_value(waveform).unwrap();
+    assert_eq!(audio.waveform.as_deref(), Some(points.as_slice()), "the recording's waveform");
+    assert_eq!(audio.file_length, Some(file.len() as u64));
+    assert!(audio.url.is_some() && audio.media_key.as_ref().is_some_and(|k| k.len() == 32));
+    assert_eq!(*rig.world.file_at(audio.direct_path.as_deref().unwrap()).unwrap(), file, "it goes as it was recorded");
+    assert!(audio.context_info.is_none(), "a chat without a timer gives it none");
+    let draft: Option<String> = rig
+        .store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT draft FROM chats WHERE id = ?1", [ANA], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(draft.as_deref(), Some("words typed meanwhile"), "a voice message leaves the draft as it is");
+    for _ in 0..200 {
+        if rig.files("media/outgoing").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        rig.files("media/outgoing").is_empty(),
+        "jaw's copy goes once its copy is made: {:?}",
+        rig.files("media/outgoing")
+    );
+
+    // Asked again with its key, it's the same message, and nothing more goes.
+    let again = rig.call("voice.send", json!({ "key": "jaw-voice-1" })).await.unwrap();
+    assert_eq!(again["message"], id.as_str());
+    assert_eq!(again["row"]["id"], id.as_str());
+    assert_eq!(rig.sent(&id).len(), 1);
+    let e = rig.call("voice.send", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_FOUND, "without one, there's nothing to send: {e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_while_it_records_stops_it_first() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, _) = Rig::recording(home.path(), tone(30.0), 1.0, jaw_voice::RECORDING_LIMIT).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.call("voice.record", json!({ "chat": ANA })).await.unwrap();
+    recordings(&mut pushes, "a second of it", |p| p["seconds"].as_f64().unwrap_or(0.0) >= 1.0).await;
+    let answer = rig.call("voice.send", json!({})).await.unwrap();
+    let id = answer["message"].as_str().unwrap().to_string();
+    let stopped = recordings(&mut pushes, "stopped", |p| p["state"] == "stopped").await;
+    assert_eq!(stopped.last().unwrap()["end"], "stopped");
+    let row = rig.until(ANA, &id, "sent", sent).await;
+    assert!(row["voice"]["seconds"].as_u64().is_some_and(|s| (1..30).contains(&s)), "{row}");
+    assert!(rig.recordings().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_later_is_refused_until_jawd_schedules_and_the_recording_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    rig.recorded(&heard).await;
+    for (params, param) in [
+        (json!({ "at": 1_893_456_000_000_i64 }), "at"),
+        (json!({ "repeat": { "every": "day", "time": "09:00" } }), "repeat"),
+    ] {
+        let e = rig.call("voice.send", params).await.unwrap_err();
+        assert_eq!((e.code, e.data.map(|d| d["param"].clone())), (code::INVALID_PARAMS, Some(json!(param))));
+    }
+    assert_eq!(rig.recordings().len(), 1, "kept, to send now or throw away");
+    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    assert!(rig.world.sends().is_empty());
+    rig.call("voice.send", json!({})).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_outbox_refuses_it_and_keeps_the_recording() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    rig.recorded(&heard).await;
+    {
+        let mut db = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        let tx = db.transaction().unwrap();
+        for n in 0..1_000i64 {
+            tx.execute(
+                "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
+                VALUES ((SELECT n FROM chats WHERE id = ?3), ?1, ?2, ?2, 'text', 1, 'pending', 1)",
+                rusqlite::params![format!("w{n}"), n, RUI],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
+                VALUES (last_insert_rowid(), ?1, ?2, 'text', x'', 'failed', 0, 0)",
+                rusqlite::params![RUI, format!("w{n}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let e = rig.call("voice.send", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::LIMIT);
+    assert_eq!(e.data.map(|d| d["limit"].clone()), Some(json!("outbox")));
+    assert_eq!(rig.recordings().len(), 1, "the recording is kept as it was");
+    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    assert!(
+        rig.files("media/outgoing").is_empty(),
+        "and nothing of it kept to send: {:?}",
+        rig.files("media/outgoing")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disappearing_chats_timer_goes_with_it_and_it_goes_without_ffmpeg() {
+    let home = tempfile::tempdir().unwrap();
+    let (microphone, heard) = FakeMicrophone::new(48_000, tone(1.0), 4.0);
+    let (speaker, _) = FakeSpeaker::new(48_000, 4.0);
+    let pipeline = jaw_media::Media::with_tools(
+        jaw_media::Tools::none(),
+        jaw_media::Config { previews: jaw_media::Durability::Derived, ..jaw_media::Config::default() },
+    );
+    let rig = Rig::piped(home.path(), speaker, microphone, super::Config::default(), pipeline).await;
+    let timer = Chat { id: ANA.into(), ephemeral: Some(86_400), ..Chat::default() };
+    rig.store.apply(Lane::Live, vec![Change::Chat(timer)]).await.unwrap();
+    let file = rig.recorded(&heard).await;
+    let id = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+    rig.until(ANA, &id, "sent", sent).await;
+    let [message] = rig.sent(&id).try_into().unwrap();
+    let audio = message.audio_message.as_deref().unwrap();
+    assert_eq!(audio.context_info.as_ref().and_then(|c| c.expiration), Some(86_400), "the chat's timer");
+    assert_eq!(*rig.world.file_at(audio.direct_path.as_deref().unwrap()).unwrap(), file, "as it was, with no ffmpeg");
 }

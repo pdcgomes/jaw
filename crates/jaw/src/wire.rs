@@ -982,8 +982,9 @@ impl Jawd for Wire {
         self.ask("voice.stop", json!({}), Asked::Voice);
     }
 
+    /// Sends the recording with a key of its own, so asking again after a lost answer sends it once.
     fn voice_send(&mut self) {
-        self.ask("voice.send", json!({}), Asked::Voice);
+        self.ask("voice.send", json!({ "key": crate::data::key() }), Asked::Voice);
     }
 
     fn voice_cancel(&mut self) {

@@ -35,6 +35,9 @@ mod reads;
 mod regroup;
 mod start;
 mod typing;
+mod voice;
+
+pub(crate) use voice::Note as VoiceNote;
 
 #[cfg(test)]
 mod tests;
@@ -263,6 +266,17 @@ impl Sending {
     #[cfg(test)]
     pub(crate) fn waiting_for_copies(&self) -> usize {
         self.inner.waiting_for_copies.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Sends a stopped recording as a voice message of yours, through the outbox, answered once
+    /// it's on disk, synced.
+    pub(crate) async fn send_voice(&self, note: voice::Note) -> Result<jaw_proto::voice::VoiceSent, Error> {
+        voice::send_voice(&self.inner, note).await
+    }
+
+    /// The voice message `key` named within a day, as it is now, if it named one.
+    pub(crate) async fn voice_sent(&self, key: &str) -> Result<Option<jaw_proto::voice::VoiceSent>, Error> {
+        voice::by_key(&self.inner, key).await
     }
 
     /// Whether WhatsApp says who's typing now: it can be reached, and has been told you're online,

@@ -118,6 +118,26 @@ pub(crate) fn file_message(
     message
 }
 
+/// How a voice message's file goes: Ogg Opus, as WhatsApp's phones record one and jaw-voice does.
+pub(crate) const VOICE_MIME: &str = "audio/ogg; codecs=opus";
+
+/// A voice message, as WhatsApp's phones send one, before its copy is made: an audio message
+/// that's a voice note (PTT), Ogg Opus, `seconds` long rounded up as WhatsApp gives a length, with
+/// the recording's 64-point `waveform` and `context` (the chat's timer).
+pub(crate) fn voice_message(seconds: f64, waveform: &[u8], context: Option<e2e::ContextInfo>) -> e2e::Message {
+    e2e::Message {
+        audio_message: Some(Box::new(e2e::AudioMessage {
+            mimetype: Some(VOICE_MIME.into()),
+            seconds: Some(seconds.ceil().max(1.0) as u32),
+            ptt: Some(true),
+            waveform: Some(waveform.to_vec()),
+            context_info: context.map(Box::new),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
 /// Whether `caption` goes with a file of `kind`, as `file_message` sends it: trimmed, it's
 /// something, and the kind's message has a caption, which an audio file's hasn't.
 pub(crate) fn caption_goes(kind: AttachmentKind, caption: Option<&str>) -> bool {

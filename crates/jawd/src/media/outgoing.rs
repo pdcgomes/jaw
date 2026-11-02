@@ -529,9 +529,23 @@ fn media_kind(kind: &str, probed: Kind) -> Kind {
         "video" => Kind::Video,
         "gif" => Kind::Gif,
         "audio" => Kind::Audio,
+        "voice" => Kind::Voice,
         "document" => Kind::Document,
         _ => probed,
     }
+}
+
+/// What a recording jawd made is, read with jaw-voice, which checks it's Ogg Opus and gives its
+/// length: a voice note goes as it is, and needs neither ffprobe nor ffmpeg.
+fn voice_probe(path: &Path) -> jaw_media::Result<Probe> {
+    let unreadable = |why: String| Error::Unreadable { path: path.to_path_buf(), why };
+    let file = jaw_voice::VoiceFile::open(path).map_err(|e| unreadable(e.to_string()))?;
+    let size = std::fs::metadata(path).map_err(|e| unreadable(e.to_string()))?.len();
+    let mut probe = Probe::new(Kind::Voice, jaw_media::Format::Ogg, compose::VOICE_MIME, size);
+    probe.audio_codec = Some("opus".into());
+    probe.channels = Some(1);
+    probe.duration = Some(file.duration());
+    Ok(probe)
 }
 
 /// The plan for one of a file's copies.
@@ -607,7 +621,10 @@ async fn make_all(inner: &Arc<Inner>, copies: &[Copy], source: &str, cancel: &Ca
     let Some(first) = copies.first().map(|c| c.outbox) else { return Ok(()) };
     let path = inner.home.join(source);
     let pipeline = inner.pipeline.clone();
-    let probed = blocking(move || pipeline.probe(&path)).await.map_err(|e| (first, e.into()))?;
+    let voice = copies[0].kind == "voice";
+    let probed = blocking(move || if voice { voice_probe(&path) } else { pipeline.probe(&path) })
+        .await
+        .map_err(|e| (first, e.into()))?;
     let mut probe = probed;
     probe.kind = media_kind(&copies[0].kind, probe.kind);
     let plans = jaw_media::plan(&probe);
@@ -940,6 +957,7 @@ async fn unsent(inner: &Arc<Inner>, copies: &[Copy], failed: &[i64], why: &str) 
         Some("video") => "a video",
         Some("gif") => "a GIF",
         Some("audio") => "an audio file",
+        Some("voice") => "a voice message",
         _ => "a file",
     };
     let notice = jaw_proto::sync::Notice {
