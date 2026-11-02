@@ -227,6 +227,7 @@ pub fn describe(status: &Status) -> String {
         let waiting: Vec<String> = [
             (stored.inbox, "events to convert"),
             (stored.history, "messages of history to convert"),
+            (stored.spool_files, "history files in the spool"),
             (stored.unindexed, "messages to index for search"),
             (stored.quarantined, "changes that failed, kept in quarantine"),
             (stored.merging, "chats being merged into another"),

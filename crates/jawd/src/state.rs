@@ -249,9 +249,12 @@ impl State {
             history,
             stored: self.store.as_ref().and_then(|store| {
                 let (link_thumbnails, link_thumbnail_bytes) = store.thumbnails_kept().ok()?;
+                let (spool_files, spool_bytes) = crate::sync::spooled(&self.home.join("spool"));
                 Some(Stored {
                     inbox: store.count("inbox").ok()?,
                     history: store.count("history_raw").ok()?,
+                    spool_files,
+                    spool_bytes,
                     chats: store.count("chats").ok()?,
                     messages: store.count("messages").ok()?,
                     people: store.count("people").ok()?,

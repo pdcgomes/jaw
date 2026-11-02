@@ -24,6 +24,7 @@ use prost::Message as _;
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use self::avatars::Avatars;
+pub use self::fetch::spooled;
 pub use self::merge::Merges;
 use crate::convert;
 use crate::engine::supervisor::{EngineStatus, Supervisor};

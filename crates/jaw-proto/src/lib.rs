@@ -464,6 +464,12 @@ pub struct Stored {
     pub inbox: u64,
     /// Messages from history waiting to be converted.
     pub history: u64,
+    /// Files in the spool, and their bytes: history blobs waiting for their rows to go in, those
+    /// kept for a notification that stays in the inbox, and downloads cut short.
+    #[serde(default)]
+    pub spool_files: u64,
+    #[serde(default)]
+    pub spool_bytes: u64,
     #[serde(default)]
     pub chats: u64,
     #[serde(default)]

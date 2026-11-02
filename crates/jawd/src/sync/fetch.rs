@@ -19,12 +19,13 @@ use crate::convert::history::{Unwalked, Walked};
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
 use crate::store::{Change, Drained, Lane, Packed, Store};
+use crate::work::Priority;
 
 /// What the converter hands the fetcher.
 pub enum Work {
     Offer(Offer),
-    /// Every notification left in the inbox from before has been offered, so spool files no
-    /// offer names are left from blobs whose rows are already in.
+    /// Every row left in the inbox from before has been taken, its notifications offered or kept in
+    /// the inbox for a jawd that converts them, so the spool is swept of what's done with.
     Offered,
 }
 
@@ -95,7 +96,7 @@ pub async fn run(
             Some(Work::Offered) => {
                 if !swept {
                     swept = true;
-                    sweep(&spool, &named).await;
+                    sweep(&spool, &named, &store).await;
                 }
                 continue;
             }
@@ -139,20 +140,63 @@ fn spool_name(id: &str) -> String {
     format!("{}.pb", id.replace(['/', '\\'], "_"))
 }
 
-/// Removes spool files that no notification in the inbox names: blobs whose rows are in, and
-/// .part files a download left behind.
-async fn sweep(spool: &Path, named: &HashSet<String>) {
+/// Removes the spool files that are done with: blobs whose rows are in, as the synced commit that
+/// drained their notification says by keeping what else they carried in history_kept, and .part
+/// files, which the engine renames into place only once they're whole. Any other stays, such as a
+/// blob whose notification stays in the inbox because its conversion failed, for a jawd that
+/// converts it; and so does one an offer of this run names, which the fetcher takes.
+async fn sweep(spool: &Path, named: &HashSet<String>, store: &Store) {
     let Ok(mut entries) = tokio::fs::read_dir(spool).await else { return };
-    let mut removed = 0;
+    let mut done = Vec::new();
+    let mut blobs = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !named.contains(&name) && tokio::fs::remove_file(entry.path()).await.is_ok() {
+        if named.contains(&name) {
+            continue;
+        }
+        if name.ends_with(".part") {
+            done.push(entry.path());
+        } else if let Some(id) = name.strip_suffix(".pb") {
+            blobs.push((id.to_string(), entry.path()));
+        }
+    }
+    let ids: Vec<String> = blobs.iter().map(|(id, _)| id.clone()).collect();
+    let stored = store
+        .reads()
+        .query(Priority::Background, move |db| {
+            let mut kept = db.prepare_cached("SELECT EXISTS (SELECT 1 FROM history_kept WHERE id = ?1)")?;
+            let mut stored = Vec::with_capacity(ids.len());
+            for id in &ids {
+                stored.push(kept.query_row([id], |r| r.get::<_, bool>(0))?);
+            }
+            Ok(stored)
+        })
+        .await;
+    match stored {
+        Ok(stored) => {
+            done.extend(blobs.into_iter().zip(stored).filter(|(_, stored)| *stored).map(|((_, path), _)| path));
+        }
+        Err(e) => eprintln!("jawd: can't read which history blobs in the spool are in, so they stay: {e:#}"),
+    }
+    let mut removed = 0;
+    for path in done {
+        if tokio::fs::remove_file(&path).await.is_ok() {
             removed += 1;
         }
     }
     if removed > 0 {
-        eprintln!("jawd: removed {removed} files from the spool whose history is already in");
+        eprintln!("jawd: removed {removed} files from the spool: blobs whose history is in, and downloads cut short");
     }
+}
+
+/// The files in the spool, and their bytes: history blobs waiting for their rows to go in, those
+/// kept for a notification that stays in the inbox, and downloads cut short.
+pub fn spooled(spool: &Path) -> (u64, u64) {
+    let Ok(entries) = std::fs::read_dir(spool) else { return (0, 0) };
+    entries
+        .filter_map(|entry| entry.ok()?.metadata().ok())
+        .filter(std::fs::Metadata::is_file)
+        .fold((0, 0), |(files, bytes), file| (files + 1, bytes + file.len()))
 }
 
 async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, spool: &Path) -> Result<(), Failed> {

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::drain::{self, Row};
 use super::*;
 use crate::engine::EngineError;
-use crate::store::Drained;
 use crate::store::read::{self, Around};
+use crate::store::{Drained, Packed};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
 const GROUP: &str = "120363000000000001@g.us";
@@ -26,11 +26,13 @@ const PANICS_PLAINLY: &str = "3EB0PANICSPLAINLY";
 
 /// How many times each message of PANICS has panicked as it was converted, by its ID.
 static PANICKED: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+/// The messages of PANICS that convert after all, as they would for a jawd without the fault.
+static MENDED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// The hook each conversion runs once it has made its changes or its offer, which panics for a
 /// message of PANICS, counting each time.
 pub(super) fn panic_if_asked(id: &str) {
-    if !id.starts_with(PANICS) {
+    if !id.starts_with(PANICS) || MENDED.lock().unwrap().contains(id) {
         return;
     }
     *PANICKED.lock().unwrap().entry(id.to_string()).or_default() += 1;
@@ -44,6 +46,11 @@ pub(super) fn panic_if_asked(id: &str) {
 /// a batch.
 fn panicked(id: &str) -> usize {
     PANICKED.lock().unwrap().get(id).copied().unwrap_or_default()
+}
+
+/// Has the message `id` of PANICS convert from now on.
+fn mend(id: &str) {
+    MENDED.lock().unwrap().insert(id.to_string());
 }
 
 /// An inbox row of this kind makes its whole batch's conversion panic, outside every row's own
@@ -2058,6 +2065,86 @@ async fn a_blob_stays_in_the_spool_while_its_drain_cant_commit_and_goes_once_it_
     fetching.abort();
     assert_eq!(store.count("history_kept").unwrap(), 1, "what it carried, kept before it went");
     assert_eq!(engine.asked("history"), 1, "fetched once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_notification_whose_conversion_panics_keeps_its_blob_in_the_spool_for_a_jawd_that_converts_it() {
+    let home = tempfile::tempdir().unwrap();
+    let spool = home.path().join("spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let note = "3EB0PANICSNOTE";
+    let its_blob = spool.join(format!("{note}.pb"));
+    {
+        let store = Store::open(home.path()).unwrap();
+        store.inbox("message", 0, notification(note, "kept").encode_to_vec(), None);
+        store.inbox("message", 0, live_message(ANA, ANA, "after", AT, text("after it")).encode_to_vec(), None);
+        store.inbox("message", 0, notification("3EB0NOTEAFTER", "later").encode_to_vec(), None);
+        until("the inbox", || store.count("inbox").unwrap() == 3).await;
+        // An earlier run downloaded the notification's blob and stopped before its walk ended,
+        // another drained a blob's notification and stopped before removing the blob, and another
+        // stopped in the middle of a download.
+        std::fs::write(&its_blob, blob("h1")).unwrap();
+        let done = spool.join("3EB0DONE.pb");
+        std::fs::write(&done, blob("h0")).unwrap();
+        let rest = Packed::new(b"what the blob carried besides its messages");
+        store.apply_durable(vec![Change::HistoryKept { id: "3EB0DONE".into(), raw: rest }]).await.unwrap();
+        let part = spool.join("3EB0HALF.pb.part");
+        std::fs::write(&part, b"half a blob").unwrap();
+        let engine = Scripted::default();
+        engine.blobs.lock().unwrap().insert("later".into(), Blob::Here(blob("h2")));
+        let (supervisor, _incoming) = supervised(&engine);
+        until("the engine to run", || supervisor.status().state.name() == "running").await;
+        let (fetcher, offers) = mpsc::unbounded_channel();
+        let fetching =
+            tokio::spawn(fetch::run(offers, store.clone(), supervisor, knowing(), spool.clone(), Merges::default()));
+        let (offered, mut handed) = mpsc::unbounded_channel();
+        let converter =
+            tokio::spawn(drain::inbox(store.clone(), knowing(), offered, Avatars::new(), Merges::default()));
+        // What the converter hands the fetcher goes through the test: the offers, then that the
+        // inbox has been taken, which sweeps the spool. The fetcher is handed that first, so the
+        // sweep is done once the offer after it is stored.
+        let mut later = Vec::new();
+        loop {
+            match tokio::time::timeout(WAIT, handed.recv()).await.expect("the converter reaches the inbox's end") {
+                Some(fetch::Work::Offer(offer)) => later.push(offer),
+                Some(fetch::Work::Offered) => break,
+                None => panic!("the converter stopped"),
+            }
+        }
+        let ids: Vec<(i64, &str)> = later.iter().map(|offer| (offer.seq, offer.id.as_str())).collect();
+        assert_eq!(ids, [(3, "3EB0NOTEAFTER")], "the notification after it is offered, and not the one that panicked");
+        fetcher.send(fetch::Work::Offered).unwrap();
+        for offer in later {
+            fetcher.send(fetch::Work::Offer(offer)).unwrap();
+        }
+        until("the offer after the sweep", || store.count("inbox").unwrap() == 1).await;
+        converter.abort();
+        fetching.abort();
+        assert_eq!(column::<String>(&store, "SELECT id FROM messages ORDER BY id").await, ["after", "h2"]);
+        assert_eq!(column::<i64>(&store, "SELECT seq FROM inbox").await, [1], "the notification stays in the inbox");
+        let kept: Vec<(String, String)> =
+            quarantined(&store).await.into_iter().map(|(source, reference, ..)| (source, reference)).collect();
+        assert_eq!(kept, [("inbox".to_string(), "1".to_string())], "kept in quarantine");
+        assert!(its_blob.exists(), "the blob it names stays in the spool");
+        assert!(!done.exists() && !part.exists(), "what's done with goes");
+        let status = stored(home.path(), &store);
+        assert_eq!((status.spool_files, status.spool_bytes), (1, blob("h1").len() as u64), "jawd status counts it");
+    }
+    // A jawd whose conversion of the notification doesn't panic walks the blob from the spool.
+    mend(note);
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, _incoming) = supervised(&engine);
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(offers, store.clone(), supervisor, knowing(), spool, Merges::default()));
+    let converter = tokio::spawn(drain::inbox(store.clone(), knowing(), offered, Avatars::new(), Merges::default()));
+    until("the notification's drain", || store.count("inbox").unwrap() == 0).await;
+    converter.abort();
+    fetching.abort();
+    assert_eq!(engine.asked("history"), 0, "the blob came from the spool");
+    assert_eq!(column::<String>(&store, "SELECT id FROM messages ORDER BY id").await, ["after", "h1", "h2"]);
+    assert_eq!(store.count("quarantine").unwrap(), 0, "its drain took its quarantine row with it");
+    assert!(!its_blob.exists());
 }
 
 /// A connection event as the engine sends it, for the account 351910000001 (Pedro).

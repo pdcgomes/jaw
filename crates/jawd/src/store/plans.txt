@@ -4488,6 +4488,12 @@ SELECT coalesce(max(seq), 0) FROM inbox
 SELECT chat, id, raw FROM history_raw WHERE (chat, id) > (?1, ?2) ORDER BY chat, id LIMIT ?3
     SEARCH history_raw USING PRIMARY KEY ((chat,id)>(?,?))
 
+-- src/sync/fetch.rs
+SELECT EXISTS (SELECT 1 FROM history_kept WHERE id = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH history_kept USING COVERING INDEX sqlite_autoindex_history_kept_1 (id=?)
+
 -- src/sync/merge.rs
 SELECT m.gone, g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep ORDER BY m.gone
     SCAN m
