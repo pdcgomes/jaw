@@ -5,7 +5,8 @@ import Testing
 
 /// The client watches jawd's folder tree and a roster, and asks for what the folder items do: the
 /// tree whole with its slots, its pushes merged, watched again whole with the folders held, and never
-/// moved; a roster like a chat list; a jawd without folders refusing the tree; a deleted folder's list
+/// moved; a roster like a chat list, showing its people's own chats for who's typing, where the tree
+/// shows none; a jawd without folders refusing the tree; a deleted folder's list
 /// failing once it's watched again, after the top it falls back to if it was around a chat; Move to's
 /// two requests in their order, finished after a drop, and what's said when it ends in both folders
 /// or its old one went; a name's answer, with the folder made or without one gone at once, and its
@@ -243,6 +244,28 @@ func moves(_ jawd: Jawd) -> [Jawd.Moving] {
         let gone = await drain(jawd) { typing($0)?["ana"] == nil && typing($0)?["rui"] != nil }
         #expect(typing(gone)?["ana"] == nil && typing(gone)?["rui"] == [ruiRecording],
                 "Ana's chat left the list, and her typing with it, though the tree and the roster are still watched")
+    }
+
+    @Test func `a roster shows its people's own chats, so its answer says who's typing in them, pushes change it though no list shows them, and someone leaving takes theirs`() async throws {
+        let fake = try FakeJawd(script: foldering)
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let window = jawd.watchRoster("folder:9", .top(200))
+        let ana = "351912345678@s.whatsapp.net", sofia = "351913550005@s.whatsapp.net"
+        let anaRibeiro = Typist(id: "person:1", name: "Ana Ribeiro")
+        let first = await drain(jawd) { all in !rosters(all, window).isEmpty && typing(all) != nil }
+        #expect(typing(first) == [ana: [anaRibeiro]], "the roster's answer says Ana's typing in her own chat, which no list shows")
+
+        fake.send(typingPush("351910000009@s.whatsapp.net", typist("person:9", "Xavier")))
+        fake.send(typingPush(sofia, typist("person:5", "Sofia", "recording")))
+        let pushed = await drain(jawd) { typing($0)?[sofia] != nil }
+        #expect(typing(pushed) == [ana: [anaRibeiro], sofia: [Typist(id: "person:5", name: "Sofia", state: .recording)]],
+                "Sofia records in her own chat; a chat of nobody in the roster isn't kept: \(String(describing: typing(pushed)))")
+
+        fake.send(#"{"method":"roster","params":{"watch":"w6","seq":81242,"remove":["person:5"]}}"#)
+        let left = await drain(jawd) { all in typing(all) != nil && typing(all)?[sofia] == nil }
+        #expect(typing(left) == [ana: [anaRibeiro]], "Sofia left the roster, and her typing with it")
     }
 
     @Test func `Move to files the chat in the other folder, and takes it out of this one only once jawd has it there`() async throws {

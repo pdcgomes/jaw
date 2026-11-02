@@ -344,6 +344,8 @@ func pushed(_ line: String) -> Incoming {
     #expect(roster.rows.map(\.presence.around) == [true, false, false])
     #expect(roster.rows[1].presence.at == 1_792_145_000_000 && !roster.rows[2].presence.known)
     #expect(roster.rows[0].chat == "351912345678@s.whatsapp.net" && roster.rows[1].chat == nil)
+    #expect(roster.typing == ["351912345678@s.whatsapp.net": [Typist(id: "person:1", name: "Ana Ribeiro")]],
+            "her chat's typing comes with the roster, which shows its people's own chats")
     #expect(roster.rows[1].folders == ["folder:10"] && roster.rows[0].about == "Lisboa")
     let came = try JSONDecoder().decode(Pushed<RosterPush>.self, from: fixture("roster.push.json")).params
     #expect(came.upsert.map(\.presence.state) == [.online] && came.upsert.first?.sort.hasPrefix("0~") == true)

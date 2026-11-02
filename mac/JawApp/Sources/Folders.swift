@@ -234,8 +234,8 @@ extension AppModel: RosterHost {
     }
 
     /// Who in the roster is typing or recording in their one-to-one chat, and which, from who jawd
-    /// says is typing in the chats its windows show, as a pane reads its typing; nobody whose chat no
-    /// list or pane shows, as jawd sends typing only for those.
+    /// says is typing in the chats its windows show, the roster's people's own among them, as a pane
+    /// reads its typing.
     func rosterTyping() -> [String: Typist.State] {
         guard let roster = window?.sidebar.roster else { return [:] }
         return RosterLines.typing(roster.people.list, in: typing)

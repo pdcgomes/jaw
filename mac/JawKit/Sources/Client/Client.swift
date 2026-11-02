@@ -790,6 +790,7 @@ public final class Client: Sendable {
                     var update = Update<RosterRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows, total: watched.total)
                     if moved { update.moved = Moved(place: place, newer: 0) }
                     s.mergeRoster(window, update)
+                    s.answered(window, watched.typing)
                 default:
                     break
                 }
@@ -971,6 +972,8 @@ struct Win: Sendable {
     var asking: UInt64?
     /// The ids its model will hold once what's merged is applied.
     var ids: Set<String> = []
+    /// A roster's people's one-to-one chats, by person id, kept as its ids are.
+    var chats: [String: String] = [:]
     /// The newest seq its updates carried.
     var seq: UInt64?
     /// Unwatched while a request for it was in flight.
@@ -984,13 +987,15 @@ struct Win: Sendable {
     }
 
     /// Whether it shows `chat`, for who's typing there: a chat list among its rows, a conversation
-    /// as its chat; the folder tree and a roster show no chats, and a library nobody typing.
+    /// as its chat, a roster as one of its people's own; the folder tree shows no chats, and a
+    /// library nobody typing.
     func shows(_ chat: String) -> Bool {
         switch kind {
         case .chats: ids.contains(chat)
         case .messages: of == chat
         case .library: false
-        case .folders, .roster: false
+        case .roster: chats.values.contains(chat)
+        case .folders: false
         }
     }
 }
@@ -1120,6 +1125,12 @@ struct State: Sendable {
         guard var w = windows[window], !w.closing else { return }
         w.seq = max(w.seq ?? update.seq, update.seq)
         roster[window, default: Merged()].add(update, ids: &w.ids)
+        for id in update.remove {
+            w.chats[id] = nil
+        }
+        for row in update.upsert {
+            w.chats[row.id] = row.chat
+        }
         windows[window] = w
     }
 }

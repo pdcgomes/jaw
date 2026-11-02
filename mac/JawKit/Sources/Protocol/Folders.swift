@@ -253,6 +253,9 @@ public struct RosterWatched: Decodable, Sendable {
     public var total: UInt64
     public var rows: [RosterRow]
     public var remove: [String]
+    /// Who's typing in the window's people's one-to-one chats now, where someone is, as a chat list's
+    /// answer says it for its chats.
+    public var typing: Typists
     public var unread = 0
     public var why: String?
 
@@ -263,10 +266,11 @@ public struct RosterWatched: Decodable, Sendable {
         total = try c.decodeIfPresent(UInt64.self, forKey: .total) ?? 0
         rows = try c.rows(.rows, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
+        typing = c.typists(.typing)
     }
 
     enum Keys: String, CodingKey {
-        case watch, seq, total, rows, remove
+        case watch, seq, total, rows, remove, typing
     }
 }
 
