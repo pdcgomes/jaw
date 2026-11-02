@@ -495,8 +495,9 @@ pub struct Stored {
     /// receipt that comes later still does them.
     #[serde(default)]
     pub actions_kept: u64,
-    /// Settings and stars changed from jaw whose change WhatsApp hasn't sent back yet, one each at
-    /// most: what it sends for one meanwhile came before jaw's change, and is kept but not shown.
+    /// jaw's changes to settings and stars that WhatsApp hasn't sent back yet, the latest for each
+    /// setting under each index they named at most: what it sends under that index meanwhile came
+    /// before jaw's change, and is kept but not shown.
     #[serde(default)]
     pub awaiting: u64,
     /// Messages deleted for you and the IDs of your actions, about 40 bytes each, kept for as long

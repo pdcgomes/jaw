@@ -1497,26 +1497,29 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // and which nothing refers to.
     "
     -- Class: jaw's own. For each setting jaw has queued a patch for (a chat's pin, archive, mute or
-    -- mark, or a message's star), its latest patch: WhatsApp sends app state back in the order it
-    -- took it, so what it sends under the index that patch named before the patch's echo came
-    -- before the patch, and is kept raw in app_state but not applied. A row goes when its patch's
-    -- echo is converted, when the converter passes echo_by without it, when its outbox row has gone
-    -- without going, or with its patch's refusal. Never dropped or rebuilt; any rebuild copies it as
-    -- it is. One row a setting at most.
+    -- mark, or a message's star), and each index its patches for it named, the latest naming it:
+    -- WhatsApp sends app state back in the order it took it, so what it sends under that index
+    -- before the patch's echo came before the patch, and is kept raw in app_state but not applied.
+    -- A row goes when its patch's echo is converted, when the converter passes echo_by without it,
+    -- when its outbox row has gone without going, or with its patch's refusal. Never dropped or
+    -- rebuilt; any rebuild copies it as it is. One row a setting and index named at most: a patch
+    -- naming another index than an earlier one for its setting waits beside it.
     CREATE TABLE app_state_awaiting (
         -- The setting, as app_state keys an index (serde_json of its strings) but with its chat
         -- named by the JID jaw keeps the chat by, and a star's sender as '0': WhatsApp may name a
         -- chat by any JID of its person, and a group message's sender by any of theirs, and a chat
         -- merging into another takes its waits with it.
-        key TEXT PRIMARY KEY CHECK (json_valid(key)),
+        key TEXT NOT NULL CHECK (json_valid(key)),
         -- The index the patch named, as app_state keys it: under it, WhatsApp ends with the patch.
         named TEXT NOT NULL CHECK (json_valid(named)),
-        -- The time jaw's latest patch for it carries, its SyncActionValue.timestamp.
+        -- The time the latest patch naming that index carries, its SyncActionValue.timestamp.
         at INTEGER NOT NULL,
-        -- That patch's outbox row (outbox.n, never reused).
-        outbox INTEGER NOT NULL UNIQUE,
+        -- That patch's outbox row (outbox.n, never reused), one wait's alone.
+        outbox INTEGER NOT NULL,
         -- Once WhatsApp has taken it, the inbox's last seq then: its echo is at or before it.
-        echo_by INTEGER
+        echo_by INTEGER,
+        PRIMARY KEY (key, named),
+        UNIQUE (outbox)
     ) STRICT, WITHOUT ROWID;
     -- Class: an index, derived from app_state_awaiting's own column; it holds nothing the table
     -- doesn't, so it can always be built again from it. The rows whose patch WhatsApp has taken,
@@ -2824,7 +2827,8 @@ mod tests {
         };
         let (ana, her_lid) = (r#"["pin_v1","351910000002@s.whatsapp.net"]"#, r#"["pin_v1","100000000002@lid"]"#);
         wait(ana, her_lid, 1).unwrap();
-        assert!(wait(ana, ana, 2).is_err(), "one wait an index");
+        wait(ana, ana, 2).expect("a setting waits under each index its patches named");
+        assert!(wait(ana, her_lid, 3).is_err(), "one wait an index named");
         assert!(wait(r#"["mute","351910000002@s.whatsapp.net"]"#, ana, 1).is_err(), "one index an outbox row");
         assert!(wait("pin_v1 351910000002@s.whatsapp.net", ana, 3).is_err(), "keyed by an index as JSON");
         assert!(wait(r#"["archive","351910000002@s.whatsapp.net"]"#, "archive", 3).is_err(), "naming one as JSON");
@@ -2835,8 +2839,10 @@ mod tests {
             [],
         );
         assert!(late.is_err(), "a time is a number");
-        let echo_by: Option<i64> = db.query_row("SELECT echo_by FROM app_state_awaiting", [], |r| r.get(0)).unwrap();
-        assert_eq!(echo_by, None, "until WhatsApp has taken it");
+        let taken: i64 = db
+            .query_row("SELECT count(*) FROM app_state_awaiting WHERE echo_by IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(taken, 0, "no echo_by until WhatsApp has taken it");
         assert_eq!(rows(&db), (1, 1), "the inbox and history as they were");
     }
 

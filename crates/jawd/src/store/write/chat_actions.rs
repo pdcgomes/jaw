@@ -3,20 +3,19 @@
 //! and the app-state patches that tell your other devices go into the outbox in the same
 //! transaction, to go after the chat's earlier sends, as a deletion for you does. What's already so
 //! changes nothing and queues nothing, so asking again after a lost answer, or two interfaces asking
-//! at once, end the same. Each patch queued is its setting's latest until its echo comes back
-//! (`app_state_awaiting`), and WhatsApp sends app state back in the order it took it, so what it
-//! sends under the index the patch named meanwhile came before the patch: it's kept raw but not
-//! applied (`held_back`), since the patch sets every device as the row already is. WhatsApp may
-//! name a one-to-one chat by any of its person's JIDs, and a chat merged away by the JID it had, so
-//! a setting waits as jaw keeps its chat (`wait_key`), keeping the index its patch named, and a
-//! chat's waits go with it into the chat it merges into (`merging`). WhatsApp keeps such a chat's
-//! setting under each index it was named by, and hands them over in no order of their own, so
-//! across them the newest stands (`newest_held`), as the owner chose, while under one index
-//! WhatsApp's order does. A patch WhatsApp
-//! refuses for good, or that runs out of tries, while it's
-//! its index's latest, is undone here (`undo`): what it set goes back to how a chat is when nothing
-//! has set it, since fetching its collection again brings only what WhatsApp holds, and the fetch
-//! then sets it as the phone has it.
+//! at once, end the same. Each patch queued is the latest naming its index until its echo comes
+//! back (`app_state_awaiting`), and WhatsApp sends app state back in the order it took it, so what
+//! it sends under that index meanwhile came before the patch: it's kept raw but not applied
+//! (`held_back`), since the patch sets every device as the row already is. WhatsApp may name a
+//! one-to-one chat by any of its person's JIDs, and a chat merged away by the JID it had, so a
+//! setting waits as jaw keeps its chat (`wait_key`), with a wait for each index its patches named,
+//! and a chat's waits go with it into the chat it merges into (`merging`). WhatsApp keeps such a
+//! chat's setting under each index it was named by, and hands them over in no order of their own,
+//! so across them the newest stands (`newest_held`), as the owner chose, while under one index
+//! WhatsApp's order does. A patch WhatsApp refuses for good, or that runs out of tries, while it's
+//! the latest of its setting's waits, is undone here (`undo`): what it set goes back to how a chat
+//! is when nothing has set it, since fetching its collection again brings only what WhatsApp holds,
+//! and the fetch then sets it as the phone has it.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,24 +40,32 @@ const CHAT_STATE: &str =
 const PINNED_ELSEWHERE: &str = "SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1
     AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = chats.n)";
 const STARRED: &str = "SELECT starred FROM messages WHERE n = ?1";
-const AWAITED_AT: &str = "SELECT at FROM app_state_awaiting WHERE key = ?1";
+const AWAITED_AT: &str = "SELECT at FROM app_state_awaiting WHERE key = ?1 AND named = ?2";
+/// Whether a setting waits for a patch of jaw's, naming any index.
+const AWAITING: &str = "SELECT EXISTS (SELECT 1 FROM app_state_awaiting WHERE key = ?1)";
+/// A setting's wait for jaw's patch, in place of one for an earlier patch naming the same index.
 const AWAIT: &str = "INSERT INTO app_state_awaiting (key, named, at, outbox) VALUES (?1, ?2, ?3, ?4)
-    ON CONFLICT (key) DO UPDATE SET named = excluded.named, at = excluded.at, outbox = excluded.outbox, echo_by = NULL";
-/// What an index waits for: the index jaw's latest patch for it named, the time it carries, where
-/// its echo has to be once WhatsApp has taken it, and whether its outbox row is still there.
+    ON CONFLICT (key, named) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = NULL";
+/// What a setting waits for: each index jaw's patches for it named, the time the latest naming it
+/// carries, where its echo has to be once WhatsApp has taken it, and whether its outbox row is still
+/// there.
 const AWAITED: &str = "SELECT a.named, a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox)
     FROM app_state_awaiting a WHERE a.key = ?1";
-const WAITED: &str = "DELETE FROM app_state_awaiting WHERE key = ?1";
+const WAITED: &str = "DELETE FROM app_state_awaiting WHERE key = ?1 AND named = ?2";
 /// The waits whose echo had to be at or before an inbox row the converter has drained.
 const PASSED: &str = "DELETE FROM app_state_awaiting WHERE echo_by IS NOT NULL AND echo_by <= ?1";
 /// The waits whose keys lie in a range, each with all it waits for.
 const WAITING_UNDER: &str =
     "SELECT key, named, at, outbox, echo_by FROM app_state_awaiting WHERE key >= ?1 AND key < ?2";
-/// A wait under another key, unless one there already waits for a patch as late.
+/// A wait under another key, unless one there naming the same index already waits for a patch as
+/// late.
 const MOVED: &str = "INSERT INTO app_state_awaiting (key, named, at, outbox, echo_by) VALUES (?1, ?2, ?3, ?4, ?5)
-    ON CONFLICT (key) DO UPDATE SET named = excluded.named, at = excluded.at, outbox = excluded.outbox,
-        echo_by = excluded.echo_by
+    ON CONFLICT (key, named) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = excluded.echo_by
     WHERE excluded.at > app_state_awaiting.at";
+/// The wait for the patch at an outbox row, over, with its setting, its index and its time.
+const WAITED_FOR: &str = "DELETE FROM app_state_awaiting WHERE outbox = ?1 RETURNING key, named, at";
+/// Whether a setting waits for a later patch of jaw's than one, by its time and then its index.
+const LATER_WAIT: &str = "SELECT EXISTS (SELECT 1 FROM app_state_awaiting WHERE key = ?1 AND (at, named) > (?2, ?3))";
 /// What WhatsApp last sent for each index whose key lies in a range.
 const HELD_UNDER: &str = "SELECT key, value FROM app_state WHERE key >= ?1 AND key < ?2";
 
@@ -285,20 +292,21 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
     Ok((Acted::Queued { chat: jid.to_string(), chat_n: chat.n, outbox }, changed))
 }
 
-/// Queues `patch` for chat `jid` as an outbox row, and keeps it as its setting's latest, which what
-/// WhatsApp sends for the setting waits behind until the patch's echo, known by the index it names
-/// and its time, comes.
+/// Queues `patch` for chat `jid` as an outbox row, and keeps it as the latest for its setting naming
+/// its index, which what WhatsApp sends under that index waits behind until the patch's echo, known
+/// by that index and its time, comes. A wait for an earlier patch naming another index stays beside
+/// it, until its own echo.
 fn queue(db: &Connection, jid: &str, patch: &Patch) -> Result<i64> {
     let outbox = app_state_row(db, jid, &patch.id, &patch.raw)?;
     let index: Vec<String> = serde_json::from_str(&patch.key)?;
-    let key = wait_key(db, &index)?;
-    if awaited_at(db, &key)? == Some(patch.at) {
+    let (key, named) = (wait_key(db, &index)?, serde_json::to_string(&index)?);
+    if awaited_at(db, &key, &named)? == Some(patch.at) {
         bail!(
-            "{key} awaits jaw's patch at {} already, and no two of its patches for an index carry one time",
+            "{named} awaits jaw's patch at {} already, and no two of its patches for an index carry one time",
             patch.at
         );
     }
-    db.prepare_cached(AWAIT)?.execute(params![key, serde_json::to_string(&index)?, patch.at, outbox])?;
+    db.prepare_cached(AWAIT)?.execute(params![key, named, patch.at, outbox])?;
     Ok(outbox)
 }
 
@@ -318,15 +326,17 @@ pub(super) fn wait_key(db: &Connection, index: &[String]) -> Result<String> {
     Ok(serde_json::to_string(&index)?)
 }
 
-/// The time jaw's latest patch for index `key` carries, while it waits for its echo.
-fn awaited_at(db: &Connection, key: &str) -> Result<Option<i64>> {
-    Ok(db.prepare_cached(AWAITED_AT)?.query_row([key], |r| r.get(0)).optional()?)
+/// The time jaw's latest patch for setting `key` naming index `named` carries, while it waits for
+/// its echo.
+fn awaited_at(db: &Connection, key: &str, named: &str) -> Result<Option<i64>> {
+    Ok(db.prepare_cached(AWAITED_AT)?.query_row([key, named], |r| r.get(0)).optional()?)
 }
 
-/// Whether jaw's latest change to the mark, read or unread, of the chat jaw keeps by `jid` waits for
-/// its echo.
+/// Whether a change of jaw's to the mark, read or unread, of the chat jaw keeps by `jid` waits for
+/// its echo, whichever index it named.
 pub(super) fn marking(db: &Connection, jid: &str) -> Result<bool> {
-    Ok(awaited_at(db, &serde_json::to_string(&["markChatAsRead", jid])?)?.is_some())
+    let key = serde_json::to_string(&["markChatAsRead", jid])?;
+    Ok(db.prepare_cached(AWAITING)?.query_row([key], |r| r.get(0))?)
 }
 
 /// What becomes of what WhatsApp sends for an index, kept raw whatever becomes of it.
@@ -343,44 +353,49 @@ pub(super) enum Held {
 }
 
 /// What becomes of what WhatsApp sent for `index`, at inbox row `seq` with its time `at`. While
-/// jaw's latest patch for its setting waits for its echo, what WhatsApp sends under the index that
-/// patch named came before the patch, since WhatsApp keeps one value an index and sends them back
-/// in the order it took them, and the patch sets every device there as the row already is: it's
-/// held back. The patch's echo, known by that index and its time, ends the wait; so does a mutation
-/// past `echo_by`, where the echo had to be, or one after the patch's outbox row went without
-/// going. What comes for a chat's setting under any other index meanwhile, naming the chat or a
-/// group message's sender by another JID, and what ends a wait or comes with none, is applied only
-/// when it's newer than all that's held for the setting (`newest_held`).
+/// jaw's latest patch naming that index waits for its echo, what WhatsApp sends under it came
+/// before the patch, since WhatsApp keeps one value an index and sends them back in the order it
+/// took them, and the patch sets every device there as the row already is: it's held back. The
+/// patch's echo, known by that index and its time, ends its wait; so does a mutation past
+/// `echo_by`, where the echo had to be, or one after the patch's outbox row went without going.
+/// What comes for a chat's setting under any other index meanwhile, naming the chat or a group
+/// message's sender by another JID, and what ends a wait or comes with none, is applied only when
+/// it's newer than all that's held for the setting (`newest_held`), the setting's other waits
+/// among it.
 pub(super) fn held_back(db: &Connection, index: &[String], seq: i64, at: i64) -> Result<Held> {
     let key = wait_key(db, index)?;
     let own = serde_json::to_string(index)?;
-    let awaited: Option<(String, i64, Option<i64>, bool)> = db
+    let awaited: Vec<(String, i64, Option<i64>, bool)> = db
         .prepare_cached(AWAITED)?
-        .query_row([&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .optional()?;
-    let mut waiting = None;
-    if let Some((named, awaited, echo_by, outboxed)) = awaited {
+        .query_map([&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let (mut back, mut waiting) = (false, Vec::new());
+    for (named, awaited, echo_by, outboxed) in awaited {
         let after = match echo_by {
             Some(echo_by) => seq > echo_by,
             None => !outboxed,
         };
         if (own == named && at == awaited) || after {
-            db.prepare_cached(WAITED)?.execute([&key])?;
+            db.prepare_cached(WAITED)?.execute([&key, &named])?;
         } else if own == named {
-            return Ok(Held::Back);
+            back = true;
         } else {
-            waiting = Some(Waiting { named, at: awaited });
+            waiting.push(Waiting { named, at: awaited });
         }
+    }
+    if back {
+        return Ok(Held::Back);
     }
     if !(index.len() > 1 && SETTINGS.contains(&index[0].as_str())) {
         return Ok(Held::No);
     }
     let kept = serde_json::from_str::<Vec<String>>(&key)?.swap_remove(1);
-    Ok(newest_held(db, index, at, &kept, waiting.as_ref())?.unwrap_or(Held::No))
+    Ok(newest_held(db, index, at, &kept, &waiting)?.unwrap_or(Held::No))
 }
 
-/// jaw's patch a setting waits for, while what WhatsApp sends for the setting comes under another
-/// index: the index the patch named and the time it carries.
+/// One of jaw's patches a setting waits for, while what WhatsApp sends for the setting comes under
+/// another index: the index the patch named and the time it carries.
+#[derive(Clone)]
 struct Waiting {
     named: String,
     at: i64,
@@ -395,15 +410,9 @@ struct Waiting {
 /// its sender's, and hands them over in no order of their own, a full fetch each as it comes; so
 /// across them the newest stands, as the owner chose on 1 November, while under one index
 /// WhatsApp's own order does, since it keeps one value there. What's held under each index is what
-/// WhatsApp last sent for it, but under the one jaw's waiting patch named (`waiting`), that patch at
-/// its time, which WhatsApp ends with there and the chat already shows.
-fn newest_held(
-    db: &Connection,
-    index: &[String],
-    at: i64,
-    kept: &str,
-    waiting: Option<&Waiting>,
-) -> Result<Option<Held>> {
+/// WhatsApp last sent for it, but under each one jaw's waiting patches named (`waiting`), that patch
+/// at its time, which WhatsApp ends with there.
+fn newest_held(db: &Connection, index: &[String], at: i64, kept: &str, waiting: &[Waiting]) -> Result<Option<Held>> {
     // A star's setting is its message's: its chat, its ID and whether it's yours, whichever JID
     // names its sender.
     let setting = &index[..if index[0] == "star" { index.len().min(4) } else { 2 }];
@@ -428,16 +437,24 @@ fn jids_of(db: &Connection, chats: &[&str]) -> Result<Vec<String>> {
 /// The newest held for `setting`, a chat setting's index up to its chat, or a star's up to whether
 /// its message is yours, under each of `jids` naming its chat, by its time and then its index, with
 /// that index as app_state keys it: what WhatsApp last sent under each index but those of `skip`,
-/// and under the one jaw's waiting patch named (`waiting`), that patch at its time, which WhatsApp
-/// ends with there and the chat already shows (`Held::Back`).
+/// and under each one jaw's waiting patches named (`waiting`), that patch at its time, which
+/// WhatsApp ends with there and the chat shows when it's the newest (`Held::Back`).
 fn newest(
     db: &Connection,
     setting: &[String],
     jids: &[String],
     skip: &[&str],
-    waiting: Option<&Waiting>,
+    waiting: &[Waiting],
 ) -> Result<Option<(i64, String, Held)>> {
-    let mut newest = waiting.map(|waiting| (waiting.at, waiting.named.clone(), Held::Back));
+    let newer = |time: i64, under: &str, newest: &Option<(i64, String, Held)>| {
+        newest.as_ref().is_none_or(|(at, key, _)| (time, under) > (*at, key.as_str()))
+    };
+    let mut newest = None;
+    for wait in waiting {
+        if newer(wait.at, &wait.named, &newest) {
+            newest = Some((wait.at, wait.named.clone(), Held::Back));
+        }
+    }
     let mut setting = setting.to_vec();
     let mut held = db.prepare_cached(HELD_UNDER)?;
     for jid in jids {
@@ -449,11 +466,11 @@ fn newest(
         let mut rows = held.query(params![from, format!("{from}~")])?;
         while let Some(row) = rows.next()? {
             let (key, value): (String, Vec<u8>) = (row.get(0)?, row.get(1)?);
-            if skip.contains(&key.as_str()) || waiting.is_some_and(|waiting| key == waiting.named) {
+            if skip.contains(&key.as_str()) || waiting.iter().any(|wait| key == wait.named) {
                 continue;
             }
             let time = SyncActionValue::decode(value.as_slice()).map_or(0, |v| v.timestamp.unwrap_or_default());
-            if newest.as_ref().is_none_or(|(newest, under, _)| (time, key.as_str()) > (*newest, under.as_str())) {
+            if newer(time, &key, &newest) {
                 let index = serde_json::from_str(&key)?;
                 newest = Some((time, key, Held::Instead { index, value }));
             }
@@ -465,30 +482,30 @@ fn newest(
 /// What chat `keep`'s settings are to be once chat `gone`, each named by its JID, merges into it,
 /// the two chats' own having been combined: each the newest held for it under the JIDs of either
 /// and of their person, weighed as what WhatsApp sends is (`newest`), so the merged chat shows what
-/// will last, a request is judged against it, and the next full fetch leaves it. Of jaw's waits
-/// for a setting under `keep`'s JID, as jaw keeps it, and under `gone`'s, which become one as
-/// `merging` moves `gone`'s, the one for the later patch counts, at its time, with the value the
-/// chat it was queued for shows; neither index they named counts what WhatsApp sent under it,
-/// since WhatsApp ends there with jaw's patch. A setting nothing is held for is left out, so the
-/// two chats' combination stands; None when that's every setting. Taken before `merging` moves the
-/// waits and the chats are combined.
+/// will last, a request is judged against it, and the next full fetch leaves it. Each of jaw's
+/// waits for a setting under `keep`'s JID, as jaw keeps it, and under `gone`'s, which `merging`
+/// puts beside them, counts at its time in place of what WhatsApp sent under the index it named,
+/// since WhatsApp ends there with jaw's patch; the newest, when it's one of them, with the value the
+/// chat it was queued for shows. A setting nothing is held for is left out, so the two chats'
+/// combination stands; None when that's every setting. Taken before `merging` moves the waits and
+/// the chats are combined.
 pub(super) fn settled(db: &Connection, keep: &str, gone: &str) -> Result<Option<Chat>> {
     let kept = chat_jid(db, keep)?;
     let jids = jids_of(db, &[&kept, keep, gone])?;
     let mut settled = Chat { id: keep.to_string(), ..Chat::default() };
     for setting in CHAT_SETTINGS {
-        let mut waits = Vec::new();
+        let mut waits: Vec<(Waiting, &str)> = Vec::new();
         for chat in [kept.as_str(), gone] {
             let key = serde_json::to_string(&[setting, chat])?;
-            let wait: Option<(String, i64)> =
-                db.prepare_cached(AWAITED)?.query_row([&key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-            waits.extend(wait.map(|(named, at)| (Waiting { named, at }, chat)));
+            let awaited: Vec<(String, i64)> = db
+                .prepare_cached(AWAITED)?
+                .query_map([&key], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            waits.extend(awaited.into_iter().map(|(named, at)| (Waiting { named, at }, chat)));
         }
-        // As `merging` moves them, the later patch's wait stays, and the kept chat's of two at one time.
-        let staying = waits.iter().reduce(|staying, wait| if wait.0.at > staying.0.at { wait } else { staying });
-        let skip: Vec<&str> = waits.iter().map(|(wait, _)| wait.named.as_str()).collect();
+        let waiting: Vec<Waiting> = waits.iter().map(|(wait, _)| wait.clone()).collect();
         let prefix = [setting.to_string(), kept.clone()];
-        let shown = match newest(db, &prefix, &jids, &skip, staying.map(|(wait, _)| wait))? {
+        let shown = match newest(db, &prefix, &jids, &[], &waiting)? {
             None => continue,
             Some((.., Held::Instead { index, value })) => {
                 let changes = crate::convert::app_state::mutation(&index, &value).changes;
@@ -497,8 +514,10 @@ pub(super) fn settled(db: &Connection, keep: &str, gone: &str) -> Result<Option<
                     _ => None,
                 })
             }
-            Some(_) => {
-                let was = match staying {
+            Some((at, named, _)) => {
+                // Of two naming one index at one time, the kept chat's, as `merging` keeps it.
+                let newest = waits.iter().find(|(wait, _)| wait.named == named && wait.at == at);
+                let was = match newest {
                     Some((_, chat)) => state(db, chat)?,
                     None => None,
                 };
@@ -529,8 +548,9 @@ pub(super) fn settled(db: &Connection, keep: &str, gone: &str) -> Result<Option<
 
 /// Chat `gone` is merging into `keep`, each named by its JID: what waited under `gone`'s JID waits
 /// under `keep`'s, as what's said of `gone` goes to `keep` from here on, each wait still with the
-/// index its patch named, under which WhatsApp ends with that patch. Of two waits for one setting,
-/// the one for jaw's later patch stays, as a later patch's wait takes an earlier one's place.
+/// index its patch named, under which WhatsApp ends with that patch, beside `keep`'s waits for the
+/// setting. Of two naming one index, the one for jaw's later patch stays, as a later patch's wait
+/// takes the place of an earlier one's naming its index.
 pub(super) fn merging(db: &Connection, gone: &str, keep: &str) -> Result<()> {
     for setting in SETTINGS {
         // The keys of the setting naming `gone`: its JSON up to the JID's closing quote, then the
@@ -544,7 +564,7 @@ pub(super) fn merging(db: &Connection, gone: &str, keep: &str) -> Result<()> {
             })?
             .collect::<rusqlite::Result<_>>()?;
         for (key, named, at, outbox, echo_by) in waits {
-            db.prepare_cached(WAITED)?.execute([&key])?;
+            db.prepare_cached(WAITED)?.execute([&key, &named])?;
             let mut index: Vec<String> = serde_json::from_str(&key)?;
             index[1] = keep.to_string();
             db.prepare_cached(MOVED)?.execute(params![serde_json::to_string(&index)?, named, at, outbox, echo_by])?;
@@ -559,6 +579,17 @@ pub(super) fn merging(db: &Connection, gone: &str, keep: &str) -> Result<()> {
 pub(super) fn passed(db: &Connection, seq: i64) -> Result<()> {
     db.prepare_cached(PASSED)?.execute([seq])?;
     Ok(())
+}
+
+/// The patch at outbox row `outbox` won't go: its wait ends. Whether it was the latest of its
+/// setting's waits, by its time and then its index as `newest` weighs them, so what it set is what
+/// the chat shows; while a later patch of jaw's for the setting waits, that one's intent stands.
+pub(super) fn released(db: &Connection, outbox: i64) -> Result<bool> {
+    let wait: Option<(String, String, i64)> =
+        db.prepare_cached(WAITED_FOR)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((key, named, at)) = wait else { return Ok(false) };
+    let later: bool = db.prepare_cached(LATER_WAIT)?.query_row(params![key, at, named], |r| r.get(0))?;
+    Ok(!later)
 }
 
 /// Stars message `id` in chat `jid`, or takes its star off, unless it's so already, and queues its
@@ -644,6 +675,8 @@ mod tests {
 
     const ANA: &str = "351910000002@s.whatsapp.net";
     const ANA_LID: &str = "100000000002@lid";
+    /// A third JID of Ana's, an old number, whose indexes sort after her number's and her LID's.
+    const ANA_OLD: &str = "351910000099@s.whatsapp.net";
     const RUI: &str = "351910000003@s.whatsapp.net";
     const COMMUNITY: &str = "120363000000000009@g.us";
     const AT: i64 = 1_792_000_000_000;
@@ -1745,7 +1778,8 @@ mod tests {
         db.query_row("SELECT starred FROM messages WHERE id = ?1", [id], |r| r.get(0)).unwrap()
     }
 
-    /// How many indexes wait for a patch of jaw's.
+    /// How many waits for jaw's patches there are, one a setting and index named, as jawd status
+    /// counts them (`stored.awaiting`).
     fn waits(db: &Connection) -> i64 {
         db.query_row("SELECT count(*) FROM app_state_awaiting", [], |r| r.get(0)).unwrap()
     }
@@ -1866,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn of_two_waits_for_one_setting_as_her_chats_merge_the_one_for_jaws_later_patch_stays_whichever_chat_it_was() {
+    fn of_two_waits_for_one_setting_as_her_chats_merge_each_stays_until_its_own_echo_whichever_chat_it_was() {
         let (t1, t2) = (AT + 3_600_000, AT + 7_200_000);
         let mute = |chat: &str, until: i64, at: i64, id: &str| {
             Does::Set(Setting::Mute { until, patch: patch_of(&["mute", chat], &mute_value(until, at), id) })
@@ -1877,11 +1911,19 @@ mod tests {
             assert!(matches!(acted(&db, first, mute(first, t1, AT, "m1")), Acted::Queued { .. }));
             assert!(matches!(acted(&db, later, mute(later, t2, AT + 1, "m2")), Acted::Queued { .. }));
             her_lid_joined(&db);
-            assert_eq!((chat(&db, ANA).2, waits(&db)), (t2, 1), "one chat, muted until the later end, one wait");
+            assert_eq!(
+                (chat(&db, ANA).2, waits(&db)),
+                (t2, 2),
+                "one chat, muted until the later end, with a wait for each index jaw named"
+            );
             arrives(&db, &["mute", first], &mute_value(t1, AT), 1);
-            assert_eq!(chat(&db, ANA).2, t2, "the echo of jaw's earlier patch, under {first}, is held back");
+            assert_eq!(
+                (chat(&db, ANA).2, waits(&db)),
+                (t2, 1),
+                "the echo of jaw's earlier patch, under {first}, ends its own wait and is older than the later"
+            );
             arrives(&db, &["mute", later], &mute_value(t2, AT + 1), 2);
-            assert_eq!((chat(&db, ANA).2, waits(&db)), (t2, 0), "and the later's, under {later}, ends the wait");
+            assert_eq!((chat(&db, ANA).2, waits(&db)), (t2, 0), "and the later's, under {later}, ends the other");
         }
     }
 
@@ -2159,9 +2201,9 @@ mod tests {
         chats(&db, &[ANA, ANA_LID]);
         assert!(matches!(acted(&db, ANA_LID, mute_at(ANA_LID, two, AT, "m1")), Acted::Queued { .. }));
         assert!(matches!(acted(&db, ANA, mute_at(ANA, hour, AT + 1, "m2")), Acted::Queued { .. }));
-        // The wait for jaw's later mute stays, and so does its value (round three's A4).
+        // Both waits stay, and the chat shows jaw's later mute (round three's A4).
         her_lid_joined(&db);
-        assert_eq!((chat(&db, ANA).2, waits(&db)), (hour, 1), "muted for the hour, with one wait");
+        assert_eq!((chat(&db, ANA).2, waits(&db)), (hour, 2), "muted for the hour, with a wait for each mute");
         let longer = acted(&db, ANA, mute_at(ANA, two, AT + 2, "m3"));
         assert!(matches!(longer, Acted::Queued { .. }), "so two hours isn't so already: {longer:?}");
         arrives(&db, &["mute", ANA_LID], &mute_value(two, AT), 1);
@@ -2181,7 +2223,11 @@ mod tests {
         assert_eq!(chat(&db, ANA_LID).2, two, "held back");
         assert!(matches!(acted(&db, ANA, mute_at(ANA, hour, AT + 1, "m2")), Acted::Queued { .. }));
         her_lid_joined(&db);
-        assert_eq!(chat(&db, ANA).2, hour, "jaw's later mute is the newest held once its earlier wait goes");
+        assert_eq!(
+            chat(&db, ANA).2,
+            hour,
+            "jaw's later mute is the newest held: under her LID, jaw's earlier mute counts, not the unmute held there"
+        );
         arrives(&db, &["mute", ANA_LID], &mute_value(two, AT), 2);
         assert_eq!(chat(&db, ANA).2, hour, "the earlier mute's echo is older than the later");
         arrives(&db, &["mute", ANA], &mute_value(hour, AT + 1), 3);
@@ -2209,10 +2255,9 @@ mod tests {
         chats(&db, &[ANA, ANA_LID]);
         // A third JID of hers, by which a chain of merges could have put a setting on her LID's chat,
         // so the merge's last step combines the two chats' settings again.
-        let old = "351910000099@s.whatsapp.net";
         written(
             &db,
-            &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into(), old.into()], ..Person::default() })],
+            &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into(), ANA_OLD.into()], ..Person::default() })],
         );
         // As if an earlier jawd began the merge: it leaves no mark that this one did.
         db.execute("DELETE FROM sync_state WHERE key LIKE 'merge.started.%'", []).unwrap();
@@ -2325,6 +2370,127 @@ mod tests {
     }
 
     #[test]
+    fn of_jaws_pins_in_both_her_chats_as_they_merge_each_holds_back_what_comes_under_its_index_till_its_echo() {
+        for (first, later) in [(ANA, ANA_LID), (ANA_LID, ANA)] {
+            let db = db();
+            chats(&db, &[ANA, ANA_LID]);
+            assert!(matches!(acted(&db, first, pin_at(first, true, AT, "p1")), Acted::Queued { .. }));
+            assert!(matches!(acted(&db, later, pin_at(later, true, AT + 1, "p2")), Acted::Queued { .. }));
+            // Her chats merge before either pin's echo (round four's N1).
+            her_lid_joined(&db);
+            assert_eq!(
+                (chat(&db, ANA).0, waits(&db)),
+                (AT + 1, 2),
+                "pinned as jaw's later pin has it, a wait for each, {first} first"
+            );
+            // The phone's unpin, later than both pins by its time, but taken by WhatsApp before jaw's
+            // first, under the JID that one named, where WhatsApp ends with it.
+            arrives(&db, &["pin_v1", first], &pin_value(false, AT + 5_000), 1);
+            assert_eq!(chat(&db, ANA).0, AT + 1, "held back, {first} first");
+            let unpin = acted(&db, ANA, pin_at(ANA, false, AT + 6_000, "u1"));
+            assert!(matches!(unpin, Acted::Queued { .. }), "so unpinning it isn't so already: {unpin:?}");
+            arrives(&db, &["pin_v1", first], &pin_value(true, AT), 2);
+            arrives(&db, &["pin_v1", later], &pin_value(true, AT + 1), 3);
+            assert_eq!(chat(&db, ANA).0, 0, "the pins' echoes leave jaw's unpin, {first} first");
+            arrives(&db, &["pin_v1", ANA], &pin_value(false, AT + 6_000), 4);
+            assert_eq!((chat(&db, ANA).0, waits(&db)), (0, 0), "and the unpin's ends the last wait, {first} first");
+        }
+    }
+
+    #[test]
+    fn jaws_unpin_after_her_chats_merge_waits_beside_its_pin_from_her_lids_chat_so_the_phones_pin_there_is_held_back() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA_LID, pin_at(ANA_LID, true, AT, "p1")), Acted::Queued { .. }));
+        her_lid_joined(&db);
+        // jaw's unpin of the merged chat names her number, where the pin named her LID (round four's
+        // N2).
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, false, AT + 1_000, "u1")), Acted::Queued { .. }));
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (0, 2), "unpinned, with a wait for each");
+        // The phone's pin under her LID, later than jaw's unpin by its time, but taken by WhatsApp
+        // before jaw's pin there, where WhatsApp ends with jaw's pin.
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT + 5_000), 1);
+        assert_eq!(chat(&db, ANA).0, 0, "held back");
+        let pin = acted(&db, ANA, pin_at(ANA, true, AT + 6_000, "p2"));
+        assert!(matches!(pin, Acted::Queued { .. }), "so pinning it isn't so already: {pin:?}");
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT), 2);
+        arrives(&db, &["pin_v1", ANA], &pin_value(false, AT + 1_000), 3);
+        assert_eq!(chat(&db, ANA).0, AT + 6_000, "the earlier patches' echoes leave jaw's pin");
+        arrives(&db, &["pin_v1", ANA], &pin_value(true, AT + 6_000), 4);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (AT + 6_000, 0), "and its own ends the last wait");
+    }
+
+    #[test]
+    fn what_the_phone_sent_under_her_lid_while_jaws_pin_there_waits_stays_held_back_after_its_later_pins_echo() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA_LID, pin_at(ANA_LID, true, AT, "p1")), Acted::Queued { .. }));
+        // The phone's unpin, later by its time, taken by WhatsApp before jaw's pin (round four's N3).
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(false, AT + 5_000), 1);
+        assert_eq!(chat(&db, ANA_LID).0, AT, "held back");
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, true, AT + 1, "p2")), Acted::Queued { .. }));
+        her_lid_joined(&db);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (AT + 1, 2), "pinned as jaw's later pin has it, a wait for each");
+        arrives(&db, &["pin_v1", ANA], &pin_value(true, AT + 1), 2);
+        assert_eq!(
+            (chat(&db, ANA).0, waits(&db)),
+            (AT + 1, 1),
+            "the later pin's echo ends its wait: under her LID, jaw's earlier pin counts, not the unpin held there"
+        );
+        let unpin = acted(&db, ANA, pin_at(ANA, false, AT + 6_000, "u1"));
+        assert!(matches!(unpin, Acted::Queued { .. }), "so unpinning it isn't so already: {unpin:?}");
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT), 3);
+        assert_eq!(chat(&db, ANA).0, 0, "and the earlier pin's echo leaves jaw's unpin");
+    }
+
+    #[test]
+    fn a_refused_patch_puts_nothing_back_while_a_later_one_for_its_setting_waits_naming_another_index() {
+        let (hour, two) = (AT + 3_600_000, AT + 7_200_000);
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        let Acted::Queued { outbox: earlier, .. } = acted(&db, ANA_LID, mute_at(ANA_LID, hour, AT, "m1")) else {
+            panic!("not queued")
+        };
+        her_lid_joined(&db);
+        let Acted::Queued { outbox: later, .. } = acted(&db, ANA, mute_at(ANA, two, AT + 1_000, "m2")) else {
+            panic!("not queued")
+        };
+        let refused = |outbox: i64, chat: &str| {
+            let undo = Some(Undo::Mute { chat: chat.into() });
+            Change::Outbox(Step::Refused { outbox, error: "server returned error 400".into(), undo })
+        };
+        written(&db, &[refused(earlier[0], ANA_LID)]);
+        assert_eq!(
+            (chat(&db, ANA).2, waits(&db)),
+            (two, 1),
+            "the earlier mute's refusal puts nothing back: the later's intent stands, and its wait goes on"
+        );
+        written(&db, &[refused(later[0], ANA)]);
+        assert_eq!((chat(&db, ANA).2, waits(&db)), (0, 0), "the later's, the latest, puts it back");
+    }
+
+    #[test]
+    fn as_her_three_chats_merge_under_each_index_one_of_jaws_waits_named_its_pin_counts_not_what_was_held_back_there() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID, ANA_OLD]);
+        assert!(matches!(acted(&db, ANA_LID, pin_at(ANA_LID, true, AT, "p1")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, true, AT + 1, "p2")), Acted::Queued { .. }));
+        // The phone's unpin under her number, later by its time, taken by WhatsApp before jaw's pin
+        // there.
+        arrives(&db, &["pin_v1", ANA], &pin_value(false, AT + 5_000), 1);
+        assert_eq!(chat(&db, ANA).0, AT + 1, "held back");
+        // Her LID's chat merges into her number's, and then her old number's, which finds both waits
+        // under her number.
+        let hers = Person { jids: vec![ANA.into(), ANA_LID.into(), ANA_OLD.into()], ..Person::default() };
+        written(&db, &[Change::Person(hers)]);
+        let merging: i64 = db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0)).unwrap();
+        assert_eq!((merging, chat(&db, ANA).0, waits(&db)), (2, AT + 1, 2), "pinned as jaw's later pin has it");
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT), 2);
+        arrives(&db, &["pin_v1", ANA], &pin_value(true, AT + 1), 3);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (AT + 1, 0), "and the pins' echoes leave it so");
+    }
+
+    #[test]
     fn a_patch_carrying_the_time_its_index_already_awaits_is_refused() {
         let db = db();
         chats(&db, &[ANA]);
@@ -2334,10 +2500,11 @@ mod tests {
         assert_eq!((chat(&db, ANA).0, queued(&db).len()), (AT, 1), "nothing written or queued");
     }
 
-    /// Each statement a chat action runs, and what the converter, a read on another device and jawd
-    /// status read of what each index waits for, as SQLite plans them on a fresh database with no
-    /// statistics: each reads an index and sorts nothing. The count is store.count's, of a table
-    /// with a row an index at most.
+    /// Each statement a chat action runs, and what the converter, a read on another device, a
+    /// refusal and jawd status read of what each setting waits for, as SQLite plans them on a fresh
+    /// database with no statistics: each reads an index and sorts nothing. The count is
+    /// store.count's, of a table no larger than the outbox, each wait having an outbox row of its
+    /// own.
     #[test]
     fn every_statement_a_chat_action_runs_reads_an_index_and_sorts_nothing() {
         let db = db();
@@ -2354,14 +2521,33 @@ mod tests {
                 SHOWN_DELETED,
                 "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH rc USING INDEX outbox_by_target (target=?)",
             ),
-            ("the time an index awaits", AWAITED_AT, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
+            (
+                "the time an index a setting's patch named awaits",
+                AWAITED_AT,
+                "SEARCH app_state_awaiting USING PRIMARY KEY (key=? AND named=?)",
+            ),
+            (
+                "whether a setting awaits a patch",
+                AWAITING,
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 1\nSEARCH app_state_awaiting USING PRIMARY KEY (key=?)",
+            ),
             ("an index awaiting a patch", AWAIT, ""),
             (
-                "what an index awaits",
+                "what a setting awaits",
                 AWAITED,
                 "SEARCH a USING PRIMARY KEY (key=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH o USING INTEGER PRIMARY KEY (rowid=?)",
             ),
-            ("an index's wait over", WAITED, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
+            ("an index's wait over", WAITED, "SEARCH app_state_awaiting USING PRIMARY KEY (key=? AND named=?)"),
+            (
+                "the wait for a patch that won't go, over",
+                WAITED_FOR,
+                "SEARCH app_state_awaiting USING COVERING INDEX sqlite_autoindex_app_state_awaiting_2 (outbox=?)",
+            ),
+            (
+                "whether a setting awaits a later patch",
+                LATER_WAIT,
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 1\nSEARCH app_state_awaiting USING PRIMARY KEY (key=?)",
+            ),
             (
                 "the waits the converter has gone past",
                 PASSED,
@@ -2379,7 +2565,7 @@ mod tests {
                 "SEARCH app_state USING PRIMARY KEY (key>? AND key<?)",
             ),
             (
-                "the indexes awaiting, for jawd status",
+                "the waits, a setting's under each index its patches named, for jawd status",
                 "SELECT count(*) FROM app_state_awaiting",
                 "SCAN app_state_awaiting USING COVERING INDEX sqlite_autoindex_app_state_awaiting_2",
             ),

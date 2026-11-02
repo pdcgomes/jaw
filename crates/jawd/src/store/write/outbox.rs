@@ -121,7 +121,7 @@ pub enum Step {
     Unsent { outbox: i64, error: String },
     /// App state at outbox row `outbox` that WhatsApp refused for good, or that ran out of tries:
     /// the row goes into quarantine with `error` and its patch, never dropped, and `undo` puts back
-    /// what it set, while it's its index's latest patch.
+    /// what it set, while it's the latest of its setting's waits.
     Refused { outbox: i64, error: String, undo: Option<Undo> },
 }
 
@@ -574,15 +574,15 @@ fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> 
 }
 
 /// App state WhatsApp won't take goes into quarantine with why and its patch, in place of its row,
-/// and what it set is put back while it's its index's latest patch, since a later one's intent
-/// stands. A row that's gone, or isn't app state still to send, is left alone.
+/// and what it set is put back while it's the latest of its setting's waits, since a later patch's
+/// intent stands. A row that's gone, or isn't app state still to send, is left alone.
 fn refused(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, undo: Option<&Undo>) -> Result<bool> {
     let row: Option<(String, String, Vec<u8>)> =
         db.prepare_cached(REFUSED_ROW)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     let Some((jid, id, raw)) = row else { return Ok(false) };
     super::record_quarantine(db, REFUSED, &format!("{jid} {id}"), error, Some(&raw))?;
     db.prepare_cached(DROP_ROW)?.execute([outbox])?;
-    let latest = db.prepare_cached(RELEASED)?.execute([outbox])? > 0;
+    let latest = chat_actions::released(db, outbox)?;
     match undo {
         Some(undo) if latest => chat_actions::undo(db, stamps, undo),
         _ => Ok(false),
