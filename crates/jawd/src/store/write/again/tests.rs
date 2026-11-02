@@ -514,3 +514,159 @@ async fn a_voice_message_whose_reading_again_panics_is_kept_in_quarantine_and_th
     .await;
     assert_eq!(kept, [(format!("{ANA} m5"), Some(raw_kept))], "kept in quarantine with its raw protobuf");
 }
+
+/// A voice message as WhatsApp keeps one: its file's fields and a waveform.
+fn voice_info(chat: &str, id: &str, at: i64, n: i64) -> WebMessageInfo {
+    WebMessageInfo {
+        key: MessageKey { remote_jid: Some(chat.into()), from_me: Some(false), id: Some(id.into()), participant: None },
+        message: Some(e2e::Message {
+            audio_message: Some(Box::new(e2e::AudioMessage {
+                url: Some(format!(
+                    "https://mmg.whatsapp.net/v/t62.7117-24/{n}_{n}_n.enc?ccb=11-4&oh=01_Q5AaI{n}&oe=6700A1B2&_nc_sid=5e03e0&mms3=true"
+                )),
+                mimetype: Some("audio/ogg; codecs=opus".into()),
+                file_sha256: Some(vec![1; 32]),
+                file_length: Some(20_000 + (n % 50_000) as u64),
+                seconds: Some(5 + (n % 120) as u32),
+                ptt: Some(true),
+                media_key: Some(vec![2; 32]),
+                file_enc_sha256: Some(vec![3; 32]),
+                direct_path: Some(format!(
+                    "/v/t62.7117-24/{n}_{n}_n.enc?ccb=11-4&oh=01_Q5AaI{n}&oe=6700A1B2&_nc_sid=5e03e0"
+                )),
+                media_key_timestamp: Some(1_700_000_000),
+                waveform: Some((0..64).map(|i| ((i * 7 + n) % 101) as u8).collect()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }),
+        message_timestamp: Some((at / 1000) as u64),
+        ..Default::default()
+    }
+}
+
+/// A jaw.db at the version before voices: `messages` messages in `chats` one-to-one chats, one in
+/// `every` a voice message as an earlier jawd wrote it (its detail its file's alone), the rest text,
+/// each with a raw protobuf.
+fn before_voices_in(home: &std::path::Path, messages: i64, chats: i64, every: i64) {
+    let mut db = Connection::open(home.join("jaw.db")).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let voices = schema::MIGRATIONS.iter().position(|m| m.contains("SELECT 'voices'")).expect("the voices migration");
+    for migration in &schema::MIGRATIONS[..voices] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", voices as i64).unwrap();
+    db.execute_batch(&format!(
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {chats})
+        INSERT INTO people (n, name, v) SELECT x, 'Person ' || x, 1 FROM c;
+        INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+        INSERT INTO chats (n, id, kind, person, v) SELECT n, printf('3519%08d@s.whatsapp.net', n), 'direct', n, 1
+        FROM people;"
+    ))
+    .unwrap();
+    let filler = Packed::new(&[7u8; 300]).0;
+    let writing = db.transaction().unwrap();
+    {
+        let mut insert = writing
+            .prepare(
+                "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, summary, detail, raw, v)
+                VALUES (?1, ?2, ?3, ?4, ?4 << 20, ?2, ?5, ?6, ?7, ?8, ?9, ?1)",
+            )
+            .unwrap();
+        for n in 1..=messages {
+            let chat = 1 + n % chats;
+            let id = format!("3EB0{n:016}");
+            let at = AT + n * 1000;
+            if n % every == 0 {
+                let info = voice_info(&format!("3519{chat:08}@s.whatsapp.net"), &id, at, n);
+                let seconds = 5 + n % 120;
+                let detail = json!({ "media": { "mime": "audio/ogg; codecs=opus", "bytes": 20_000 + n % 50_000,
+                    "seconds": seconds } })
+                .to_string();
+                let summary = format!("Voice message, {}:{:02}", seconds / 60, seconds % 60);
+                let raw = Packed::new(&info.encode_to_vec()).0;
+                insert
+                    .execute(rusqlite::params![n, chat, id, at, "voice", None::<String>, summary, detail, raw])
+                    .unwrap();
+            } else {
+                insert.execute(rusqlite::params![n, chat, id, at, "text", "x", "x", None::<String>, filler]).unwrap();
+            }
+        }
+    }
+    writing.commit().unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+}
+
+/// Each message's n, text, spans, summary and detail, and how many events each row has.
+type Left = (Vec<(i64, Option<String>, Option<String>, Option<String>, Option<String>)>, Vec<(String, i64, i64)>);
+
+/// What a finished voices backfill left: each message's text, spans, summary and detail, and each
+/// row's events since the seed.
+async fn voices_left_by(store: &Store) -> Left {
+    query(store, |db| {
+        let rows = db
+            .prepare("SELECT n, text, spans, summary, detail FROM messages ORDER BY n")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let events = db
+            .prepare("SELECT type, key, count(*) FROM events GROUP BY type, key ORDER BY type, key")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((rows, events))
+    })
+    .await
+}
+
+/// Takes the voices backfill's steps, one to a transaction, until it's done, and says how many.
+async fn voices_finished(store: &Store) -> usize {
+    let mut steps = 0;
+    while store.backfill_left(links::VOICES).unwrap() > 0 {
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed");
+        steps += 1;
+        assert!(steps < 10_000, "the backfill never ended");
+    }
+    steps
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voices_backfill_stopped_after_every_committed_step_ends_as_one_run_does() {
+    let seed = tempfile::tempdir().unwrap();
+    before_voices_in(seed.path(), 1_500, 7, 5);
+    {
+        let db = Connection::open(seed.path().join("jaw.db")).unwrap();
+        db.execute_batch(
+            "UPDATE messages SET deleted = 1, raw = NULL, detail = NULL WHERE n = 500;
+            UPDATE messages SET edited_at = 1 WHERE n = 700;
+            UPDATE messages SET raw = x'00ff' WHERE n = 900;
+            PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    }
+    let copied = || {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::copy(seed.path().join("jaw.db"), home.path().join("jaw.db")).unwrap();
+        home
+    };
+    let whole = copied();
+    let store = Store::open(whole.path()).unwrap();
+    let steps = voices_finished(&store).await;
+    let expected = voices_left_by(&store).await;
+    drop(store);
+    let read_again = expected.0.iter().filter(|r| r.4.as_deref().is_some_and(|d| d.contains("\"voice\""))).count();
+    assert_eq!(read_again, 300 - 3, "all but the deleted, the edited and the unreadable");
+    for k in 1..steps {
+        let home = copied();
+        let store = Store::open(home.path()).unwrap();
+        for _ in 0..k {
+            let applied = store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+            assert_eq!(applied.quarantined, 0);
+        }
+        drop(store);
+        let store = Store::open(home.path()).unwrap();
+        voices_finished(&store).await;
+        let got = voices_left_by(&store).await;
+        assert_eq!(got.0, expected.0, "rows after a stop after step {k}");
+        assert_eq!(got.1, expected.1, "each row's events after a stop after step {k}");
+    }
+}

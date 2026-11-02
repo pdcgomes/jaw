@@ -626,6 +626,48 @@ async fn no_microphone_is_refused_and_leaves_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_recording_with_nothing_in_it_is_refused_and_leaves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, _) = Rig::recording(home.path(), Vec::new(), 1.0, jaw_voice::RECORDING_LIMIT).await;
+    let mut pushes = rig.pushes.subscribe();
+    rig.call("voice.record", json!({ "chat": ANA })).await.unwrap();
+    let e = rig.call("voice.send", json!({ "key": "jaw-voice-empty" })).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED, "sending it stops it, with nothing in it: {e:?}");
+    assert!(e.message.contains("nothing was recorded"), "{e:?}");
+    let seen = recordings(&mut pushes, "failed", |p| p["state"] == "failed").await;
+    assert!(seen.last().unwrap()["error"].as_str().unwrap().contains("nothing was recorded"), "{seen:?}");
+    let kept: (i64, i64, i64) = rig
+        .store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            let count = |table: &str| -> rusqlite::Result<i64> {
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            };
+            Ok((count("messages")?, count("outbox")?, count("outgoing")?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(kept, (0, 0, 0), "no message, outbox row or copy to make");
+    assert!(rig.files("media/outgoing").is_empty() && rig.recordings().is_empty(), "and no file");
+    assert_eq!(rig.voice.status().recording, None);
+    assert!(rig.world.sends().is_empty());
+    let e = rig.call("voice.send", json!({ "key": "jaw-voice-empty" })).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_FOUND, "its key names nothing, so there's nothing to send: {e:?}");
+
+    // Stopped, it's refused the same.
+    rig.call("voice.record", json!({ "chat": ANA })).await.unwrap();
+    let e = rig.call("voice.stop", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED, "{e:?}");
+    assert!(rig.recordings().is_empty() && rig.voice.status().recording.is_none());
+    let waited = tokio::time::timeout(PATIENCE, async {
+        while rig.said().last() != Some(&(ANA.to_string(), PAUSED_SAID)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(waited.await.is_ok(), "WhatsApp is told you've stopped: {:?}", rig.said());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn digital_silence_is_pushed_silent_and_status_keeps_it() {
     let home = tempfile::tempdir().unwrap();
     let (rig, heard) = Rig::recording(home.path(), vec![0.0; 48_000 * 2], 1.0, jaw_voice::RECORDING_LIMIT).await;
