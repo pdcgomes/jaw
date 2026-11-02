@@ -1,7 +1,12 @@
 import Foundation
+import Synchronization
 
 /// Times, days and lengths as the terminal's `fmt.rs` says them, in the Mac's time zone.
 public enum Format {
+    /// While set, counts the dates formatted with a pattern, which cost far more than the arithmetic,
+    /// so a test can bound how many a layout makes.
+    @TaskLocal static var formats: Formats?
+
     static let minute: Int64 = 60000
     static let day: Int64 = 24 * 60 * minute
 
@@ -38,6 +43,7 @@ public enum Format {
     }
 
     static func formatted(_ at: Int64, _ format: String, _ tz: TimeZone) -> String {
+        formats?.made.withLock { $0 += 1 }
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_GB")
         f.timeZone = tz
@@ -116,4 +122,9 @@ public enum Format {
     @MainActor public static func now() -> Int64 {
         currentTime()
     }
+}
+
+/// How many dates were formatted with a pattern while `Format.formats` was this.
+final class Formats: Sendable {
+    let made = Mutex(0)
 }

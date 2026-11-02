@@ -122,6 +122,27 @@ func renderLibrary(_ sections: [LibraryLaid], items: [LibraryRow] = Samples.libr
     #expect(shown.allSatisfy { l.elements[$0].frame.maxY >= 200 && l.elements[$0].frame.minY <= 300 } && !shown.isEmpty)
 }
 
+@Test func `a layout formats only its months' headings, once each, however many items they head`() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = lisbon
+    let september = Int64(calendar.date(from: DateComponents(year: 2026, month: 9, day: 1))!.timeIntervalSince1970 * 1000)
+    let edges = [september, september - 1].map { at in
+        LibraryRow(id: "E\(at)", v: 1, sort: "\(at)~0000000", kind: .photo, chat: "c", chatName: "C", at: at, media: Media(w: 1000, h: 800))
+    }
+    let items = (photos(2000) + edges).sorted { $0.at > $1.at }
+    let monthOf = Dictionary(uniqueKeysWithValues: items.map { ($0.id, Format.formatted($0.at, "MMMM yyyy", lisbon)) })
+    let months = items.map { monthOf[$0.id]! }.reduce(into: [String]()) { if $0.last != $1 { $0.append($1) } }
+    let formats = Formats()
+    let l = Format.$formats.withValue(formats) { libraryLaid(.photo, items: items) }
+    #expect(headings(l) == months && months == ["October 2026", "September 2026", "August 2026", "July 2026"], "\(headings(l))")
+    #expect(formats.made.withLock { $0 } == months.count, "one a heading, none an item")
+    var month = ""
+    for e in l.elements {
+        if case let .heading(title, _, _) = e.what { month = title; continue }
+        #expect(monthOf[e.item ?? ""] == month, "\(e.item ?? "") under its month")
+    }
+}
+
 @Test func `a picture landing moves nothing: every place is known from the window's items`() {
     let bare = Samples.library.map { item in
         var item = item

@@ -161,12 +161,14 @@ public enum LibraryLayout {
         let shown = items.filter { $0.kind != .other }
         if let kind {
             let these = shown.filter { $0.kind == kind }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = tz
             var start = 0
             while start < these.count {
-                let month = Self.month(these[start].at, tz)
-                let end = these[start...].firstIndex { Self.month($0.at, tz) != month } ?? these.count
+                let month = Self.month(of: these[start].at, calendar)
+                let end = these[(start + 1)...].firstIndex { !month.contains($0.at) } ?? these.count
                 if start > 0 { y += m.section }
-                heading(month)
+                heading(Self.month(these[start].at, tz))
                 let group = Array(these[start ..< end])
                 if kind == .photo || kind == .video { tiles(group) } else { rows(group) }
                 start = end
@@ -191,6 +193,14 @@ public enum LibraryLayout {
     /// A month's heading: October 2026.
     static func month(_ at: Int64, _ tz: TimeZone) -> String {
         Format.formatted(at, "MMMM yyyy", tz)
+    }
+
+    /// The month `at` falls in, from its first millisecond to the next month's, in `calendar`'s zone.
+    static func month(of at: Int64, _ calendar: Calendar) -> Range<Int64> {
+        guard let month = calendar.dateInterval(of: .month, for: Date(timeIntervalSince1970: Double(at) / 1000)) else {
+            return at ..< at + 1
+        }
+        return Int64(month.start.timeIntervalSince1970 * 1000) ..< Int64(month.end.timeIntervalSince1970 * 1000)
     }
 
     /// How many there are, as the strip and the headings say it: `1,000+` where jawd stopped counting.
