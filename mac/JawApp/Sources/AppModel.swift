@@ -210,7 +210,6 @@ final class AppModel {
                     DispatchQueue.main.async { first() }
                 }
             }
-            window?.sidebar.roster.typing = rosterTyping()
         case let .messages(w, u):
             if let chat = paneWindows[w] { panes[chat]?.apply(u) } else { glance.apply(w, u) }
             if pending != nil { cameFor(u.upsert) }
