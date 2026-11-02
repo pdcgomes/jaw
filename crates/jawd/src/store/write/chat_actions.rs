@@ -1595,6 +1595,28 @@ mod tests {
     }
 
     #[test]
+    fn a_later_patch_for_an_index_waits_for_its_own_echo_past_where_the_earlier_ones_had_to_be() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
+        inboxed(&db, &[6, 7]);
+        sent(&db, outbox[0]);
+        // The unpin comes after WhatsApp took jaw's pin, whose echo is at 7 or before, and before
+        // the converter gets there: its wait starts afresh (round five's T7).
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, false, AT + 1_000, "u1")), Acted::Queued { .. }));
+        let wait = awaited(&db, &index).map(|(at, _, echo_by)| (at, echo_by));
+        assert_eq!(wait, Some((AT + 1_000, None)), "the unpin's wait, not yet taken");
+        arrives(&db, &index, &pin_value(true, AT), 6);
+        written(&db, &[Change::Drained(Drained::Inbox(7))]);
+        // The phone's pin, later by its time, taken by WhatsApp before jaw's unpin, yet to go.
+        arrives(&db, &index, &pin_value(true, AT + 5_000), 8);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (0, 1), "held back: the unpin still waits");
+        arrives(&db, &index, &pin_value(false, AT + 1_000), 9);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (0, 0), "and its echo ends the wait");
+    }
+
+    #[test]
     fn a_patch_failed_for_good_rather_than_refused_still_ends_its_indexs_wait_with_it() {
         let db = db();
         chats(&db, &[ANA]);
@@ -2467,6 +2489,47 @@ mod tests {
         );
         written(&db, &[refused(later[0], ANA)]);
         assert_eq!((chat(&db, ANA).2, waits(&db)), (0, 0), "the later's, the latest, puts it back");
+    }
+
+    #[test]
+    fn a_refused_pin_beside_another_chats_later_wait_is_put_back() {
+        let db = db();
+        chats(&db, &[ANA, RUI]);
+        let Acted::Queued { outbox: pinned, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else {
+            panic!("not queued")
+        };
+        // The later mute of Rui's chat waits for a setting of its own, so Ana's refused pin is
+        // put back, WhatsApp holding none (round five's T7).
+        assert!(matches!(acted(&db, RUI, mute_at(RUI, FOREVER, AT + 1_000, "m1")), Acted::Queued { .. }));
+        let undo = Some(Undo::Pin { chat: ANA.into() });
+        written(
+            &db,
+            &[Change::Outbox(Step::Refused { outbox: pinned[0], error: "server returned error 400".into(), undo })],
+        );
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (0, 1), "Ana's chat unpinned again, Rui's mute still waiting");
+    }
+
+    #[test]
+    fn a_refused_archive_is_put_back_while_its_unpin_waits() {
+        let db = db();
+        chats(&db, &[ANA]);
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, true, AT, "p1")), Acted::Queued { .. }));
+        // Archiving the pinned chat is two patches at one time, as the handler builds them: the
+        // archive and its unpin, each for a setting of its own (round five's T7).
+        let archiving = Does::Set(Setting::Archive {
+            archived: true,
+            patch: patch_of(&["archive", ANA], &archive_value(true, AT + 1_000), "a1"),
+            unpin: Some(patch_of(&["pin_v1", ANA], &pin_value(false, AT + 1_000), "a1 unpin")),
+        });
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, archiving) else { panic!("not queued") };
+        assert_eq!(outbox.len(), 2, "the archive and its unpin");
+        let undo = Some(Undo::Archive { chat: ANA.into() });
+        written(
+            &db,
+            &[Change::Outbox(Step::Refused { outbox: outbox[0], error: "server returned error 400".into(), undo })],
+        );
+        let (pinned, archived, ..) = chat(&db, ANA);
+        assert_eq!((pinned, archived), (0, false), "the archive put back, the unpin standing");
     }
 
     #[test]
