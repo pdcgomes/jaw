@@ -284,7 +284,7 @@ final class AppModel {
         case let .windowFailed(w, failure) where w == listWindow && folder != "all":
             say(tree.refused(folder, gone: failure.code == ErrorCode.notFound, why: "\(failure)"), warn: true)
             pick(folder: "all")
-        case let .windowFailed(w, failure) where w == listWindow || paneWindows[w] != nil:
+        case let .windowFailed(w, failure) where w == listWindow || paneWindows[w] != nil || glance.windows[w] != nil:
             say("a window couldn't be watched: \(failure)", warn: true)
         case let .windowFailed(w, why) where libraryWindows[w] != nil:
             if let id = libraryWindows[w] { libraries[id]?.refuse("\(why)") }
