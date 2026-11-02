@@ -78,7 +78,7 @@ enum Ask {
     },
     /// The recording being sent is on disk, synced, as a message of yours, or couldn't be.
     Sent {
-        sent: Result<VoiceSent, Error>,
+        sent: Box<Result<VoiceSent, Error>>,
         answer: Answer,
     },
     /// jawd is stopping: nothing plays or records after the answer.
@@ -352,7 +352,7 @@ impl Task {
                 }
             }
             Ask::Downloaded { play, file } => self.downloaded(play, file),
-            Ask::Sent { sent, answer } => self.sent(sent, answer),
+            Ask::Sent { sent, answer } => self.sent(*sent, answer),
             Ask::Stop(stopped) => {
                 let _ = stopped.send(());
             }
@@ -665,7 +665,7 @@ impl Task {
         recording.now = Rec::Sending(made);
         let (sending, asks) = (self.sending.clone(), self.asks.clone());
         tokio::spawn(async move {
-            let sent = sending.send_voice(note).await;
+            let sent = Box::new(sending.send_voice(note).await);
             let _ = asks.send(Ask::Sent { sent, answer }).await;
         });
     }
