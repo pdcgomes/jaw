@@ -317,3 +317,164 @@ async fn a_step_reading_64_locations_in_a_row_again_ends_once_it_has_for_a_while
     .await;
     assert_eq!(read, 63, "and the next goes on from the first it didn't read, all but the one deleted read again");
 }
+
+/// One of Ana's voice messages, 14 seconds long, and its waveform as the phones send one.
+fn voice(n: i64) -> e2e::Message {
+    e2e::Message {
+        audio_message: Some(Box::new(e2e::AudioMessage {
+            ptt: Some(true),
+            seconds: Some(14),
+            mimetype: Some("audio/ogg; codecs=opus".into()),
+            waveform: Some((0..64).map(|i| ((i * 7 + n) % 101) as u8).collect()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// A jaw.db at the version before a voice message's row carried its length and waveform, its feed at
+/// seq 1,000, with `count` of Ana's messages as the converter wrote them then: every fifth a voice
+/// message, its detail its file's alone, one deleted for everyone, and text otherwise.
+fn before_voices(home: &std::path::Path, count: i64) {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let voices = schema::MIGRATIONS.iter().position(|m| m.contains("SELECT 'voices'")).expect("the voices migration");
+    for migration in &schema::MIGRATIONS[..voices] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", voices as i64).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
+        INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+        INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 1);
+        INSERT INTO events (seq, at, type, key, chat) VALUES (1000, {AT}, 'chat', 1, 1);"
+    ))
+    .unwrap();
+    let mut insert = db
+        .prepare(
+            "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, summary, detail, raw, deleted, v)
+            VALUES (?1, 1, 'm' || ?1, ?2, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+        )
+        .unwrap();
+    for n in 1..=count {
+        let at = AT + n;
+        let row: Row = if n == 10 {
+            ("voice", None, Some("This message was deleted".into()), None, None, true)
+        } else if n % 5 == 0 {
+            let detail = json!({ "media": { "mime": "audio/ogg; codecs=opus", "seconds": 14 } });
+            ("voice", None, Some("Voice message, 0:14".into()), Some(detail.to_string()), Some(raw(n, voice(n))), false)
+        } else {
+            let text = e2e::Message { conversation: Some(format!("olá {n}")), ..Default::default() };
+            ("text", Some(format!("olá {n}")), None, None, Some(raw(n, text)), false)
+        };
+        let (kind, text, summary, detail, raw, deleted) = row;
+        insert.execute(rusqlite::params![n, at, kind, text, summary, detail, raw, deleted]).unwrap();
+    }
+}
+
+async fn voices_left(store: &Store) -> Option<(i64, i64)> {
+    query(store, |db| {
+        Ok(db
+            .query_row("SELECT after, upto FROM backfills WHERE name = 'voices'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    })
+    .await
+}
+
+/// Takes the voices backfill's steps until it's done, as `backfilled` takes the locations'.
+async fn voices_backfilled(store: &Store) {
+    let mut steps = store.backfill_steps(links::VOICES);
+    while voices_left(store).await.is_some() {
+        steps.take("the backfill never ended");
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at_a_time_and_none_twice() {
+    let home = tempfile::tempdir().unwrap();
+    before_voices(home.path(), 150);
+    // A voice message whose raw protobuf reads now as another kind keeps the row it has.
+    let text = e2e::Message { conversation: Some("olá 40".into()), ..Default::default() };
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute("UPDATE messages SET raw = ?1 WHERE n = 40", [raw(40, text)]).unwrap();
+    drop(db);
+    let store = Store::open(home.path()).unwrap();
+    assert_eq!(voices_left(&store).await, Some((0, 150)), "the migration leaves the backfill to do");
+    assert_eq!(store.backfill_left(links::VOICES).unwrap(), 150, "as jawd status says");
+    let before = rows(&store).await;
+    assert!(before[4].4.as_ref().unwrap().get("voice").is_none(), "a voice message from before has no voice");
+
+    store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+    let (after, _) = voices_left(&store).await.expect("more to look at");
+    assert!((5..=64).contains(&after), "a step looks at 64 messages at most: {after}");
+    let first = rows(&store).await;
+    let waveform: Vec<u8> = (0..64).map(|i| ((i * 7 + 5) % 101) as u8).collect();
+    assert_eq!(first[4].4.as_ref().unwrap()["voice"], json!({ "seconds": 14, "waveform": waveform }));
+    assert_eq!(first[4].4.as_ref().unwrap()["media"]["seconds"], 14, "its file's detail as it was");
+    assert!(first[4].1 > before[4].1, "at a new version, so windows show it again");
+    assert_eq!(first[0], before[0], "a text message isn't touched");
+    assert_eq!(first[144], before[144], "and a voice message the step hasn't reached is as it was");
+
+    voices_backfilled(&store).await;
+    let after = rows(&store).await;
+    for (n, (now, was)) in after.iter().zip(&before).enumerate() {
+        let n = n as i64 + 1;
+        let read_again = n != 10 && n != 40 && n % 5 == 0;
+        assert_eq!(now.1 > was.1, read_again, "m{n}: {now:?}");
+        if read_again {
+            assert_eq!(now.4.as_ref().unwrap()["voice"]["seconds"], 14, "m{n}");
+        }
+    }
+    assert_eq!(after[9], before[9], "the one deleted for everyone has nothing to read again");
+    assert_eq!(after[39], before[39], "and one whose raw reads as another kind is left as it is");
+    let window = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let shown = window.iter().find(|r| r.id == "m150").unwrap();
+    let detail: Value = serde_json::from_str(shown.detail.as_ref().unwrap().get()).unwrap();
+    assert_eq!(detail["voice"]["waveform"].as_array().map(Vec::len), Some(64), "a window shows its waveform");
+
+    // Taken again, from the start, it finds nothing more to do.
+    let (seen, events_before) = (rows(&store).await, events(&store).await);
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) VALUES ('voices', 0, 150)", []).unwrap();
+    voices_backfilled(&store).await;
+    assert_eq!(rows(&store).await, seen, "nothing read twice");
+    assert_eq!(events(&store).await, events_before, "and nothing told again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_message_whose_reading_again_panics_is_kept_in_quarantine_and_the_rest_are_read_again() {
+    let home = tempfile::tempdir().unwrap();
+    before_voices(home.path(), 30);
+    let panics = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(false),
+            id: Some(kinds::tests::PANICS.into()),
+            participant: None,
+        },
+        message: Some(voice(5)),
+        message_timestamp: Some(((AT + 5) / 1000) as u64),
+        ..Default::default()
+    };
+    let raw_kept = Packed::new(&panics.encode_to_vec()).0;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute("UPDATE messages SET raw = ?1 WHERE n = 5", [&raw_kept]).unwrap();
+    drop(db);
+    let store = Store::open(home.path()).unwrap();
+    let before = rows(&store).await;
+    voices_backfilled(&store).await;
+    let after = rows(&store).await;
+    assert_eq!(after[4], before[4], "the one whose reading panicked is as it was");
+    assert_eq!(after[29].4.as_ref().unwrap()["voice"]["seconds"], 14, "and the rest read again");
+    let kept: Vec<(String, Option<Vec<u8>>)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT ref, raw FROM quarantine WHERE source = 'voices'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(kept, [(format!("{ANA} m5"), Some(raw_kept))], "kept in quarantine with its raw protobuf");
+}

@@ -1526,6 +1526,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- by where their echo has to be, so the converter ends the waits it has gone past.
     CREATE INDEX app_state_awaiting_by_echo ON app_state_awaiting (echo_by) WHERE echo_by IS NOT NULL;
     ",
+    // 30, a schema step: the voice messages jaw.db holds are read again from their raw protobufs by
+    // a backfill, now that a voice message's row carries its length and the waveform its sender
+    // sent. It leaves one row in `backfills`, jaw's own, so it costs the same however many messages
+    // there are.
+    "
+    INSERT INTO backfills (name, after, upto) SELECT 'voices', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+    ",
 ];
 
 /// Migration 28's text, named so the tests that check and measure it find it whatever number it

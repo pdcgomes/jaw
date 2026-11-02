@@ -204,6 +204,33 @@ fn voice_messages_and_audio_say_how_long_they_are() {
 }
 
 #[test]
+fn a_voice_message_carries_its_length_and_the_waveform_its_sender_sent() {
+    let voice = |waveform: Option<Vec<u8>>, ptt: bool| {
+        let m = row(e2e::Message {
+            audio_message: Some(Box::new(e2e::AudioMessage {
+                ptt: Some(ptt),
+                seconds: Some(14),
+                waveform,
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        serde_json::from_str::<serde_json::Value>(m.detail.as_deref().unwrap()).unwrap()
+    };
+    let points: Vec<u8> = (0..64).map(|i| (i * 3) as u8).collect();
+    let detail = voice(Some(points.clone()), true);
+    let mut shown = points.clone();
+    for point in &mut shown {
+        *point = (*point).min(100);
+    }
+    assert_eq!(detail["voice"], json!({ "seconds": 14, "waveform": shown }), "each point at most 100");
+    assert_eq!(detail["media"]["seconds"], 14, "and its file says how long it is too");
+    assert_eq!(voice(None, true)["voice"], json!({ "seconds": 14 }), "one sent without a waveform has its length");
+    assert_eq!(voice(Some(vec![50; 30]), true)["voice"], json!({ "seconds": 14 }), "and one of the wrong length too");
+    assert!(voice(Some(points), false).get("voice").is_none(), "an audio file isn't a voice message");
+}
+
+#[test]
 fn a_document_is_found_by_its_name_and_its_caption() {
     let m = row(e2e::Message {
         document_message: Some(Box::new(e2e::DocumentMessage {

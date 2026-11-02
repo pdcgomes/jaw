@@ -556,6 +556,10 @@ pub struct Stored {
     /// Messages jaw.db held before contact cards were read again, still to be looked at for theirs.
     #[serde(default)]
     pub contacts_backfill: u64,
+    /// Messages jaw.db held before a voice message's row carried its length and waveform, still to
+    /// be looked at for voice messages to read again.
+    #[serde(default)]
+    pub voices_backfill: u64,
     /// Edits and answers to events encrypted with their message's secret, which jawd can't read
     /// yet, kept for a later jawd with what they change.
     #[serde(default)]

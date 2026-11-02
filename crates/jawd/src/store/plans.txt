@@ -2437,6 +2437,10 @@ INSERT INTO backfills (name, after, upto) SELECT 'contacts', 0, seq FROM sqlite_
     SCAN sqlite_sequence
 
 -- src/store/schema.rs
+INSERT INTO backfills (name, after, upto) SELECT 'voices', 0, seq FROM sqlite_sequence WHERE name = 'messages' AND seq > 0;
+    SCAN sqlite_sequence
+
+-- src/store/schema.rs
 SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
     SCAN sqlite_schema
     USE TEMP B-TREE FOR ORDER BY
@@ -2985,6 +2989,10 @@ SELECT n, kind = 'location' AND NOT deleted FROM messages WHERE n > ?1 AND n <= 
 
 -- src/store/write/links.rs
 SELECT n, kind = 'event' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/links.rs
+SELECT n, kind = 'voice' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/links.rs

@@ -337,9 +337,27 @@ fn video_note(x: &e2e::VideoMessage) -> Body {
 fn audio(x: &e2e::AudioMessage) -> Body {
     let voice = x.ptt.unwrap_or(false);
     let (kind, what) = if voice { ("voice", "Voice message") } else { ("audio", "Audio") };
-    Body::new(kind, with_length(what, x.seconds)).detail(json!({
-        "media": media(x.mimetype.as_deref(), x.file_length, None, None, x.seconds)
-    }))
+    let mut detail = json!({ "media": media(x.mimetype.as_deref(), x.file_length, None, None, x.seconds) });
+    if voice {
+        detail["voice"] = voiced(x);
+    }
+    Body::new(kind, with_length(what, x.seconds)).detail(detail)
+}
+
+/// How many points a voice message's waveform has, as WhatsApp's phones send it.
+const WAVEFORM_POINTS: usize = 64;
+
+/// A voice message as an interface draws it: its length, and its waveform when the sender sent one
+/// of 64 points, each from 0 to 100.
+fn voiced(x: &e2e::AudioMessage) -> Value {
+    let mut voice = serde_json::Map::new();
+    if let Some(seconds) = x.seconds.filter(|&s| s > 0) {
+        voice.insert("seconds".into(), seconds.into());
+    }
+    if let Some(points) = x.waveform.as_deref().filter(|w| w.len() == WAVEFORM_POINTS) {
+        voice.insert("waveform".into(), points.iter().map(|&p| p.min(100)).collect::<Vec<u8>>().into());
+    }
+    Value::Object(voice)
 }
 
 fn document(x: &e2e::DocumentMessage, mentioned: &[String]) -> Body {

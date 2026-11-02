@@ -284,6 +284,7 @@ impl State {
                     kinds_backfill: store.backfill_left(kinds::KINDS).ok()?,
                     copies_backfill: store.backfill_left(copies::COPIES).ok()?,
                     contacts_backfill: store.backfill_left(contacts::CONTACTS).ok()?,
+                    voices_backfill: store.backfill_left(links::VOICES).ok()?,
                     encrypted_kept: store.count("pending WHERE kind IN ('secret', 'rsvp')").ok()?,
                     places_backfill: store.backfill_left(links::PLACES).ok()?,
                     events_backfill: store.backfill_left(links::EVENTS).ok()?,

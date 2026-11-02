@@ -1,6 +1,7 @@
 //! Messages read again from their raw protobufs, by a backfill, once jaw reads their kind more
 //! fully: the locations jaw.db held before a location was found by its address as well as its name,
-//! and the events it held before their place and call link were read and their answers counted.
+//! the events it held before their place and call link were read and their answers counted, and the
+//! voice messages it held before their length and waveform were in their rows.
 //! Each is read as the converter reads one now, and its row takes a new version only if that
 //! changes what it shows or what finds it, so a step taken twice, or after the converter has
 //! written the row again itself, changes nothing. An event's answers and edits that an earlier
@@ -11,7 +12,7 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::links::{EVENTS, PLACES};
+use super::links::{EVENTS, PLACES, VOICES};
 use super::{CHAT, MESSAGE, Stamps, apply_pending, kinds, unpack};
 use crate::store::Change;
 
@@ -32,6 +33,12 @@ type Shown = (Option<String>, Option<String>, Option<String>, Option<String>);
 /// quarantine while the step goes on, as the kinds backfill keeps a conversion that fails.
 pub(super) fn places(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
     kinds::guarded(db, stamps, PLACES, n, read_again)
+}
+
+/// Reads voice message `n` again, as `read_again` does, for its length and waveform; guarded as
+/// `places` is.
+pub(super) fn voices(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    kinds::guarded(db, stamps, VOICES, n, read_again)
 }
 
 /// Reads event `n` again, as `read_again` does, and opens what an earlier jawd kept sealed for it,
