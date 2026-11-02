@@ -871,6 +871,7 @@ final class LibraryHeader: NSView {
         rule.wantsLayer = true
         mark.wantsLayer = true
         mark.imageScaling = .scaleNone
+        mark.setAccessibilityElement(false)
         let stack = NSStackView(views: [name, detail])
         stack.orientation = .vertical
         stack.alignment = .leading
