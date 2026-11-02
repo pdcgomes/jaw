@@ -150,6 +150,11 @@ impl Rig {
         self.store.reads().query(Priority::Interactive, query).await.unwrap()
     }
 
+    /// Ana's chat's draft, as jaw.db keeps it.
+    async fn draft(&self) -> Option<String> {
+        self.query(|db| Ok(db.query_row("SELECT draft FROM chats WHERE id = ?1", [ANA], |r| r.get(0))?)).await
+    }
+
     /// Waits until the cleaner has made two whole passes from now, so one of them began after now,
     /// and has done what it found to do.
     async fn until_the_cleaner_has_passed(&self) {
@@ -311,6 +316,107 @@ async fn the_file_you_picked_can_change_or_go_once_send_media_has_answered() {
 }
 
 use std::io::Write as _;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caption_that_goes_clears_its_chats_draft_as_text_does_where_a_card_or_a_poll_leaves_it() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.call("draft.set", json!({ "chat": ANA, "text": "the lake on Sunday" })).await.unwrap();
+    assert_eq!(rig.draft().await.as_deref(), Some("the lake on Sunday"));
+    let card = json!({ "name": "Marta Lopes", "vcard": jaw_proto::vcard::write("Marta Lopes", &["351213456789"]) });
+    rig.call("send.contact", json!({ "chat": ANA, "cards": [card] })).await.unwrap();
+    rig.call("send.poll", json!({ "chat": ANA, "question": "Jantar?", "options": ["Ramen", "Pizza"] })).await.unwrap();
+    assert_eq!(rig.draft().await.as_deref(), Some("the lake on Sunday"), "a card or a poll leaves what's typed");
+    // What was typed goes as the photo's caption, and is gone from the draft once send.media answers.
+    let path = yours(picked.path(), "lake.jpg", &Picture::lake(1000, 750));
+    let answer = rig
+        .call("send.media", json!({ "chat": ANA, "files": [{ "path": path, "caption": "the lake on Sunday" }] }))
+        .await
+        .unwrap();
+    assert_eq!(rig.draft().await, None, "the caption is what was typed");
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "sent", sent).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_sent_without_a_caption_leave_what_was_typed_as_it_is() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.call("draft.set", json!({ "chat": ANA, "text": "kept for later" })).await.unwrap();
+    let lake = yours(picked.path(), "lake.jpg", &Picture::lake(1000, 750));
+    let pond = yours(picked.path(), "pond.jpg", &Picture::lake(800, 600));
+    // A photo without one, one whose caption is only blanks, and an album of two without any.
+    let sends = [
+        json!([{ "path": lake }]),
+        json!([{ "path": lake, "caption": " \n " }]),
+        json!([{ "path": lake }, { "path": pond }]),
+    ];
+    for files in sends {
+        let answer = rig.call("send.media", json!({ "chat": ANA, "files": files.clone() })).await.unwrap();
+        assert_eq!(rig.draft().await.as_deref(), Some("kept for later"), "{files} sent none of it");
+        for id in answer["messages"].as_array().unwrap() {
+            rig.until(id.as_str().unwrap(), "sent", sent).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_audio_files_caption_which_its_message_cant_carry_leaves_the_draft() {
+    if !has_ffmpeg() {
+        eprintln!("ffmpeg isn't here, so audio isn't tried");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.call("draft.set", json!({ "chat": ANA, "text": "for the drive" })).await.unwrap();
+    let song = made_by_ffmpeg(picked.path(), "song.wav", &["-f", "lavfi", "-i", "sine=f=330:d=1"]);
+    let answer = rig
+        .call("send.media", json!({ "chat": ANA, "files": [{ "path": song, "caption": "for the drive" }] }))
+        .await
+        .unwrap();
+    assert_eq!(rig.draft().await.as_deref(), Some("for the drive"), "the words don't go, so they're kept");
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "sent", sent).await;
+    let [audio] = rig.sent(&id).try_into().unwrap();
+    assert!(audio.audio_message.is_some(), "{audio:?}");
+    let text: Option<String> = rig
+        .query({
+            let id = id.clone();
+            move |db| Ok(db.query_row("SELECT text FROM messages WHERE id = ?1", [&id], |r| r.get(0))?)
+        })
+        .await;
+    assert_eq!(text, None, "an audio file's message has no caption");
+    assert_eq!(rig.draft().await.as_deref(), Some("for the drive"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_albums_caption_clears_the_draft_once_and_neither_a_replay_nor_its_later_steps_clear_a_newer_one() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.call("draft.set", json!({ "chat": ANA, "text": "two lakes" })).await.unwrap();
+    let a = yours(picked.path(), "a.jpg", &Picture::lake(1000, 750));
+    let b = yours(picked.path(), "b.jpg", &Picture::lake(800, 600));
+    let ask =
+        json!({ "chat": ANA, "files": [{ "path": a, "caption": "two lakes" }, { "path": b }], "key": "two-lakes" });
+    let answer = rig.call("send.media", ask.clone()).await.unwrap();
+    assert!(answer["album"].is_string(), "an album: {answer}");
+    assert_eq!(rig.draft().await, None, "its first photo's caption is what was typed");
+    let messages = || rig.query(|db| Ok(db.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?));
+    let before = messages().await;
+    rig.call("draft.set", json!({ "chat": ANA, "text": "newer" })).await.unwrap();
+    let again = rig.call("send.media", ask).await.unwrap();
+    assert_eq!(again["messages"], answer["messages"], "the same messages");
+    assert_eq!(messages().await, before, "nothing new written");
+    assert_eq!(rig.draft().await.as_deref(), Some("newer"), "a replay leaves a draft typed after the send");
+    for id in answer["messages"].as_array().unwrap() {
+        rig.until(id.as_str().unwrap(), "sent", sent).await;
+    }
+    assert_eq!(rig.draft().await.as_deref(), Some("newer"), "and so do its copies' later steps");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hd_goes_as_whatsapps_dual_upload_the_sd_copy_first_then_the_hd_copy_naming_it() {

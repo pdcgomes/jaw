@@ -306,6 +306,7 @@ async fn compose_and_write(
             raw: raw.encode_to_vec(),
             file: None,
             hd: None,
+            typed: false,
         });
         Some(id)
     } else {
@@ -342,6 +343,7 @@ async fn compose_and_write(
             raw: raw.encode_to_vec(),
             file: Some(Kept { path: file.kept.path.clone(), bytes: file.kept.bytes }),
             hd,
+            typed: compose::caption_goes(file.kind, file.caption.as_deref()),
         });
     }
     let written = Written::default();

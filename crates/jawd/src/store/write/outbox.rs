@@ -129,6 +129,8 @@ pub struct Attached {
     pub raw: Vec<u8>,
     pub file: Option<Kept>,
     pub hd: Option<(String, Vec<u8>)>,
+    /// Whether a caption goes with it, which is what was typed in its chat, so it clears the draft.
+    pub typed: bool,
 }
 
 /// jaw's own copy of a file you picked, relative to jaw's folder, and its size.
@@ -777,7 +779,8 @@ fn enqueue(
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
     }
-    let (enqueued, changed) = enqueue_one(db, stamps, Outgoing { message, kind, raw }, key.as_deref(), Sent::Here)?;
+    let outgoing = Outgoing { message, kind, raw, typed: kind == "text" };
+    let (enqueued, changed) = enqueue_one(db, stamps, outgoing, key.as_deref(), Sent::Here)?;
     written.put(enqueued);
     Ok(changed)
 }
@@ -787,12 +790,15 @@ struct Outgoing<'a> {
     message: &'a Message,
     kind: &'a str,
     raw: &'a [u8],
+    /// Whether it's what was typed in its chat: text, or a file `send.media` sends whose caption
+    /// goes with it (`Attached::typed`).
+    typed: bool,
 }
 
 /// Writes a message of yours to send, pending, with its outbox row and the key that names it. One
-/// sent in its chat reads the chat, as replying does, and text sent there clears its draft, since
-/// it's what was typed there, where a poll or a contact card leaves what's typed as it is; a forward
-/// does neither (`Sent`).
+/// sent in its chat reads the chat, as replying does, and one that's what was typed there (`typed`)
+/// clears its draft, where a poll or a contact card leaves what's typed as it is; a forward does
+/// neither (`Sent`).
 fn enqueue_one(
     db: &Connection,
     stamps: &mut Stamps,
@@ -800,7 +806,7 @@ fn enqueue_one(
     key: Option<&str>,
     sent: Sent,
 ) -> Result<(Enqueued, bool)> {
-    let Outgoing { message, kind, raw } = outgoing;
+    let Outgoing { message, kind, raw, typed } = outgoing;
     let chat = chat_jid(db, &message.chat)?;
     let message = &Message { chat: chat.clone(), sent, ..message.clone() };
     let changed = upsert_message(db, stamps, message)?;
@@ -818,7 +824,7 @@ fn enqueue_one(
     let enqueued =
         Enqueued::Queued { message: Some(n), id: message.id.clone(), chat, chat_n: Some(chat_n), outbox: Some(outbox) };
     let seq = stamps.seq(CHAT, Some(chat_n));
-    if sent == Sent::Here && kind == "text" && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
+    if sent == Sent::Here && typed && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
         stamps.record(db, CHAT, chat_n, Some(chat_n), seq)?;
         return Ok((enqueued, true));
     }
@@ -881,7 +887,8 @@ fn forward(
     let (mut all, mut changed) = (Vec::with_capacity(sending.len()), false);
     for (nth, forwarding) in sending.iter().enumerate() {
         let key = key.as_deref().map(|key| forward_key(key, nth));
-        let outgoing = Outgoing { message: &forwarding.message, kind: forwarding.kind, raw: &forwarding.raw };
+        let outgoing =
+            Outgoing { message: &forwarding.message, kind: forwarding.kind, raw: &forwarding.raw, typed: false };
         let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), Sent::Forwarded)?;
         all.push(enqueued);
         changed |= one;
@@ -927,7 +934,8 @@ fn attach(
     let mut hd = Vec::new();
     for (nth, attached) in sending.iter().enumerate() {
         let key = key.as_deref().map(|key| forward_key(key, nth));
-        let outgoing = Outgoing { message: &attached.message, kind: attached.kind, raw: &attached.raw };
+        let outgoing =
+            Outgoing { message: &attached.message, kind: attached.kind, raw: &attached.raw, typed: attached.typed };
         let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), Sent::Here)?;
         changed |= one;
         if let (
@@ -3369,6 +3377,7 @@ mod tests {
                 raw: vec![1],
                 file: Some(Kept { path: format!("media/outgoing/{id}.jpg"), bytes: 10 }),
                 hd: hd.map(|hd| (hd.into(), vec![2])),
+                typed: false,
             }],
             key: None,
             written: written.clone(),

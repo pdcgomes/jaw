@@ -118,6 +118,16 @@ pub(crate) fn file_message(
     message
 }
 
+/// Whether `caption` goes with a file of `kind`, as `file_message` sends it: trimmed, it's
+/// something, and the kind's message has a caption, which an audio file's hasn't.
+pub(crate) fn caption_goes(kind: AttachmentKind, caption: Option<&str>) -> bool {
+    let carries = match kind {
+        AttachmentKind::Image | AttachmentKind::Video | AttachmentKind::Gif | AttachmentKind::Document => true,
+        AttachmentKind::Audio => false,
+    };
+    carries && caption.is_some_and(|c| !c.trim().is_empty())
+}
+
 /// The album several photos and videos go in: a message of its own, sent first, saying how many of
 /// each are coming, which each then names.
 pub(crate) fn album_message(photos: u32, videos: u32, context: Option<e2e::ContextInfo>) -> e2e::Message {
@@ -377,6 +387,28 @@ mod tests {
             None,
         );
         assert!(plain.document_message.is_some());
+    }
+
+    #[test]
+    fn a_caption_goes_once_trimmed_with_each_kind_whose_message_has_one_and_never_with_audio() {
+        let kinds = [
+            (AttachmentKind::Image, Kind::Photo, "image/jpeg"),
+            (AttachmentKind::Video, Kind::Video, "video/mp4"),
+            (AttachmentKind::Gif, Kind::Gif, "video/mp4"),
+            (AttachmentKind::Audio, Kind::Audio, "audio/mp4"),
+            (AttachmentKind::Document, Kind::Document, "application/pdf"),
+        ];
+        for (kind, of, mime) in kinds {
+            for caption in [None, Some(""), Some(" \n "), Some(" the lake ")] {
+                let message = file_message(kind, &plan(of, mime, None), &probe(of, None), "lake", caption, None, None);
+                let wrapped = message.document_with_caption_message.as_ref().and_then(|w| w.message.as_deref());
+                let carried = message.image_message.as_ref().is_some_and(|m| m.caption.is_some())
+                    || message.video_message.as_ref().is_some_and(|m| m.caption.is_some())
+                    || message.document_message.as_ref().is_some_and(|m| m.caption.is_some())
+                    || wrapped.and_then(|m| m.document_message.as_ref()).is_some_and(|m| m.caption.is_some());
+                assert_eq!(caption_goes(kind, caption), carried, "{kind:?} with {caption:?}");
+            }
+        }
     }
 
     #[test]
