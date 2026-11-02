@@ -154,3 +154,22 @@ func type(_ text: String, into c: LibraryController) {
         }
     }
 }
+
+@MainActor @Test func `an offer says only what it would become, as the terminal's do, and the header what's shared while a filter narrows the window`() {
+    let (c, _, w) = pane(.file)
+    defer { w.close() }
+    c.people = { people }
+    c.chats = { chats }
+    #expect(c.header.detail.stringValue == "every chat · 30 shared")
+    type("in:lis", into: c)
+    #expect(c.offersView.items.first?.title == "Lisbon Climbing" && c.offersView.items.allSatisfy { $0.detail == nil }, "not its filter again")
+
+    type("topo from:a", into: c)
+    #expect(c.control(c.bar.field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertTab(_:))))
+    let ana = Samples.library.filter { $0.from?.id == "person:4" && $0.kind == .file }
+    c.apply(Samples.libraryUpdate(of: ana, kind: .file, counts: Samples.counts(of: ana)))
+    #expect(c.header.detail.stringValue == "every chat · 30 shared" && c.strip.said == "1 file", "what matches is the strip's to say")
+    c.typed("", tokens: [])
+    c.apply(Samples.libraryUpdate(of: Samples.library, kind: .file, counts: LibraryCounts(photo: 18, video: 3, voice: 2, file: 5, link: 3)))
+    #expect(c.header.detail.stringValue == "every chat · 31 shared", "and jawd's count again once nothing narrows it")
+}

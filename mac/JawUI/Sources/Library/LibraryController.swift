@@ -86,6 +86,9 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     public var chats: () -> [(id: String, name: String)] = { [] }
     /// The filter last asked, so the words ask again only when they change.
     var asked: LibraryFilter?
+    /// How many items the pane's scope shares, as jawd counted them while nothing narrowed what it
+    /// was asked, so the header goes on saying it while a filter narrows the window.
+    var shared: Int?
     /// The window shown while a new one's first answer comes, as words change, so the grid doesn't
     /// empty at each key.
     var stale: Library<LibraryRow>?
@@ -266,6 +269,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     public func apply(_ update: Update<LibraryRow>) {
         let anchor = currentAnchor()
         window.apply(update)
+        if let counts = update.counts, !(asked.map(narrows) ?? false) { shared = counts.shared }
         stale = nil
         if let moved = update.moved, moved.place == askedPlace { askedPlace = nil }
         rebuild()
@@ -330,8 +334,8 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         let visible = scroll.contentView.bounds
         guard visible.minY > 0.5 else { return nil }
         for i in laid.indices(in: visible) {
-            guard let id = laid.elements[i].item, let item = items.first(where: { $0.id == id }) else { continue }
-            return Anchor(id: id, sort: item.sort, offset: laid.elements[i].frame.minY - visible.minY)
+            guard let id = laid.elements[i].item, let at = index[id] else { continue }
+            return Anchor(id: id, sort: items[at].sort, offset: laid.elements[i].frame.minY - visible.minY)
         }
         return nil
     }
@@ -610,8 +614,13 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
     }
 
     func showHeader() {
-        let shared = window.counts.map { LibraryLayout.counted($0.shared, capped: capped) }
-        header.show(title: "Library", detail: [scope.said, shared.map { "\($0) shared" }].compactMap(\.self).joined(separator: " · "))
+        header.show(title: "Library", detail: [scope.said, shared.map { "\(Format.num($0)) shared" }].compactMap(\.self).joined(separator: " · "))
+    }
+
+    /// Whether a window asked with `f` holds less than the pane's scope shares: from a person, in a
+    /// time, with words, or in another chat.
+    func narrows(_ f: LibraryFilter) -> Bool {
+        f.person != nil || f.since != nil || f.until != nil || !f.text.isEmpty || f.chat != scope.chat
     }
 
     // MARK: - The grid
@@ -718,7 +727,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         let senders = items.compactMap { $0.from.map { (id: $0.id, name: $0.name) } }
         offers = search.offers(before: before, people: people() + senders, chats: chats(), now: Format.now())
         offersView.show(offers.enumerated().map { i, offer in
-            CompletionView.Item(title: offer.said, detail: offer.token.filter, value: String(i))
+            CompletionView.Item(title: offer.said, detail: nil, value: String(i))
         })
     }
 

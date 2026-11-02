@@ -196,7 +196,9 @@ enum LibraryDrawing {
     static func state(_ media: Media, in r: CGRect, _ c: Context, into parts: inout [Laid.Part]) {
         let side: CGFloat = 22
         let circle = CGRect(x: r.maxX - 4 - side, y: r.maxY - 4 - side, width: side, height: side)
-        parts.append(.fill(circle, c.roles.ground.opacity(0.66).cgColor, side / 2))
+        // In the light look a disc as clear as the dark one's lets the picture through until its ring
+        // reads as grey on grey.
+        parts.append(.fill(circle, c.roles.ground.opacity(c.roles.isDark ? 0.66 : 0.9).cgColor, side / 2))
         switch media.state {
         case .downloading:
             let centre = CGPoint(x: circle.midX, y: circle.midY)
