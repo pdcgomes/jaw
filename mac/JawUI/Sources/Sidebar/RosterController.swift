@@ -13,8 +13,8 @@ public protocol RosterHost: AnyObject {
 }
 
 /// The picked folder's people, under the folder tree, as `RosterLines` lays them out: each with their
-/// avatar, their name and how they are, faint where jawd isn't following them now; 200 at a time from
-/// the top, more as it scrolls. Watching them is what tells jawd whose presence to follow.
+/// avatar, their name and how they are, the words faint where jawd isn't following them now; 200 at a
+/// time from the top, more as it scrolls. Watching them is what tells jawd whose presence to follow.
 @MainActor
 public final class RosterController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     public weak var host: RosterHost?
@@ -370,9 +370,9 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     }
 }
 
-/// Someone's row: a dot in the online colour while they're around, their avatar, their name and how
-/// they are, all faint where jawd isn't following them now, unless they're typing or recording, which
-/// shows only while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
+/// Someone's row: a dot in the online colour while they're around, their avatar in its colour, and
+/// their name and how they are, both faint where jawd isn't following them now, unless they're typing
+/// or recording, which shows only while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
 /// one element, saying "last known" after how they are where it's faint.
 final class PersonCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("person")

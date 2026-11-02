@@ -77,7 +77,7 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
 }
 
 @Test func `someone typing in their chat is around and listed, never folded, though jawd has no last seen for them`() {
-    let typing: [String: Typist.State] = ["person:7": .typing]
+    let typing: [String: Typist.State] = ["person:27": .typing]
     #expect(Array(lineWords(RosterLines.lines(Samples.people, folder: "all", tree: Samples.tree, open: [], typing: typing))[1 ... 4])
         == ["Family 2 of 5", "Ana Ribeiro", "Avó Lurdes", "▸ 3 offline"], "Avó Lurdes hides her presence, and her chat says she's typing")
     #expect(lineWords(RosterLines.lines(familyPeople, folder: "folder:1", tree: Samples.tree, open: [], typing: typing))
@@ -117,13 +117,16 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     let window = NSWindow(contentViewController: r)
     defer { withExtendedLifetime(window) {} }
     let cell = { (row: Int) in r.table.view(atColumn: 0, row: row, makeIfNecessary: true) as? PersonCell }
-    // As the app keeps it: Ana typing in her chat, and person:7 in Lisbon Climbing, as the harness has it.
+    // As the app keeps it: Ana typing in her chat, and in Lisbon Climbing the harness's Rui and Rui
+    // Costa, who's in the roster with a chat of his own.
     var typing = Samples.typing
+    typing[Samples.group.id, default: []].append(Typist(id: "person:3", name: "Rui Costa"))
     typing[Samples.direct.id] = [Typist(id: "person:1", name: "Ana Ribeiro")]
     r.typing = RosterLines.typing(r.people.list, in: typing)
     r.view.layoutSubtreeIfNeeded()
-    #expect(r.typing == ["person:1": .typing], "the roster's person:7, Avó Lurdes, isn't typing in her own chat")
+    #expect(r.typing == ["person:1": .typing], "Rui Costa is typing in a group, not in his own chat")
     #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro typing…", "▸ 4 offline"])
+    #expect(r.said.contains("Rui Costa online"), "so his row says he's online, not typing…")
     #expect(try #require(cell(2)).state.stringValue == "typing…")
     // She records a voice message instead: the roster says so, in the online colour, as the chat list does.
     typing[Samples.direct.id] = [Typist(id: "person:1", name: "Ana Ribeiro", state: .recording)]
@@ -133,8 +136,8 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro recording…", "▸ 4 offline"])
     #expect(try #require(cell(2)).state.stringValue == "recording…" && cell(2)?.typing == true, "in the online colour")
     // Only who's typing changes, with no roster push and no chat's row: Ana stops, and Avó Lurdes types in her chat.
-    let lurdes = try #require(r.people.get("person:7")?.chat)
-    r.typing = RosterLines.typing(r.people.list, in: [lurdes: [Typist(id: "person:7", name: "Avó Lurdes")]])
+    let lurdes = try #require(r.people.get("person:27")?.chat)
+    r.typing = RosterLines.typing(r.people.list, in: [lurdes: [Typist(id: "person:27", name: "Avó Lurdes")]])
     r.view.layoutSubtreeIfNeeded()
     #expect(Array(r.said.prefix(5)) == ["People:", "Family 2 of 5", "Ana Ribeiro online", "Avó Lurdes typing…", "▸ 3 offline"],
             "listed though she hides her presence")
@@ -252,7 +255,7 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     let r = roster(host)
     let window = NSWindow(contentViewController: r)
     defer { withExtendedLifetime(window) {} }
-    var lurdes = try #require(Samples.people.first { $0.id == "person:7" })
+    var lurdes = try #require(Samples.people.first { $0.id == "person:27" })
     lurdes.v = 2
     lurdes.presence.known = false
     r.apply(Update(seq: 2, upsert: [lurdes]))
@@ -330,7 +333,7 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(Array(r.said[1 ... 3]) == ["Family 2 of 5", "Mãe online", "Ana Ribeiro online"])
     #expect(r.table.selectedRow == 3, "Ana still, a line down")
     r.table.selectRowIndexes([4], byExtendingSelection: false)
-    r.typing = ["person:7": .typing]
+    r.typing = ["person:27": .typing]
     #expect(r.said[4] == "Avó Lurdes typing…" && r.said[5] == "▸ 2 offline" && r.table.selectedRow == 5, "Family's fold still")
     r.apply(Update(seq: 3, remove: ["person:1"]))
     r.table.selectRowIndexes([2], byExtendingSelection: false)
