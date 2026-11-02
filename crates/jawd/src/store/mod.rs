@@ -3694,6 +3694,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_checkpointers_pass_a_full_disk_refuses_gives_up_the_ballast_and_the_next_copies_the_wal_in_its_room() {
+        let home = tempfile::tempdir().unwrap();
+        let config = disk::Config { ballast: MB, ..Default::default() };
+        let (disk, fake) = Disk::faked(home.path(), config, 10 * GB, 500 * GB);
+        disk.tick().await;
+        let idle = Duration::from_secs(60);
+        let store = Store::open_on(home.path(), Limits { idle, ..LIMITS }, disk.clone()).unwrap();
+        // Only jaw.db itself is full, which a checkpoint writes and a commit, in the WAL, doesn't.
+        vfs::noted::fill(&home.path().join("jaw.db"), fake.free.clone());
+        fake.free.store(0, Ordering::Relaxed);
+        let chat = "351910000001@s.whatsapp.net";
+        let mut n = 0;
+        while disk.status().unwrap().ballast_given_up == 0 && store.storage().wal_frames < WAL_SOFT / 2 {
+            let batch = (0..50).map(|k| text(chat, &format!("m{n}.{k}"), n * 50 + k, "words to find later"));
+            store.apply(Lane::Live, messages(batch)).await.unwrap();
+            n += 1;
+        }
+        let given_up = tokio::time::timeout(Duration::from_secs(5), async {
+            while disk.status().unwrap().ballast_given_up == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        given_up.await.expect("the pass the full disk refused gave up the ballast");
+        assert!(!home.path().join("ballast").exists());
+        assert!(store.trouble().borrow().is_none(), "no commit was refused");
+        store.apply(Lane::Live, messages([text(chat, "after", 1_000_000, "words")])).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.wal.copied.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("and the next pass copies the WAL in its room");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_wal_stays_bounded_while_history_pours_in_and_live_writes_never_wait_for_it() {
         let home = tempfile::tempdir().unwrap();
         let (soft, hard) = (256, 512);
