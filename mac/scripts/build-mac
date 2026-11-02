@@ -10,7 +10,7 @@
 #   mac/scripts/build-mac sweep [harness options]                   # every harness scene in each variant, into mac/build/review
 #   mac/scripts/build-mac harness [scene] [harness options]         # the harness, built there and opened here
 #   mac/scripts/build-mac references                             # the snapshot tests' pictures, back here
-#   mac/scripts/build-mac release <folder>                       # Jaw.app in Release, unsigned, back here
+#   mac/scripts/build-mac release <folder>                       # Jaw.app in Release, signed ad hoc, back here
 #
 # The build Mac has no Rust or Go, so jawd is built here (cargo build -p jawd) and its binary goes
 # with the checkout, for the live tests and --demo. When the build Mac doesn't answer, the job runs here.
@@ -100,7 +100,8 @@ case "$what" in
     release)
         # A failed build stops here, so the app copied back is never an earlier build's.
         out="$1"
-        run "scripts/check build jaw -configuration Release CODE_SIGN_IDENTITY=-"
+        # Ad hoc, with the hardened runtime off: under it dyld refuses ad hoc frameworks ("different Team IDs").
+        run "scripts/check build jaw -configuration Release CODE_SIGN_IDENTITY=- ENABLE_HARDENED_RUNTIME=NO"
         mkdir -p "$out"
         rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData/Build/Products/Release/Jaw.app/" "$out/Jaw.app/"
         ;;

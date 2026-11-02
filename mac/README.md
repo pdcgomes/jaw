@@ -13,6 +13,7 @@ mac/scripts/build-mac test JawThemes
 mac/scripts/build-mac test JawUITests       # the layout, and its reference pictures in both looks
 mac/scripts/build-mac test JawHarnessTests  # the harness: its catalog, flags, pictures and scenes
 mac/scripts/build-mac build jaw
+mac/scripts/build-mac release <folder>      # Jaw.app in Release, as the measurements take it, back here
 make mac                                    # Jaw.app with jawd, jaw-engine and jaw inside, signed
 make mac-test                               # the four suites above
 ```
@@ -53,6 +54,8 @@ To add a component, write a scene in `JawHarness/Sources/Scenes/` and register i
 ## What it costs
 
 Measured on 26 October 2026 on the build Mac (Apple M4 Max, 16 cores, macOS 27.0.1) with a Release build, against `jawd demo`'s made-up account of a million messages in 3,000 chats served by a release jawd, while it indexed that history for search and other builds kept the load average at 19 to 30. These are Mac-M1's first measurements; `make perf-mac` is still to come.
+
+To measure, build in Release signed ad hoc with the hardened runtime off, as `build-mac release` does (`CODE_SIGN_IDENTITY=- ENABLE_HARDENED_RUNTIME=NO`): with the hardened runtime on, dyld now refuses the app's ad hoc frameworks as having different Team IDs. Built that way it has no jawd beside it, as `make mac`'s has, nor looks for cargo's as a debug build does, so `JAWD` names the jawd `--demo` starts.
 
 | | Budget | Measured |
 | --- | --- | --- |
