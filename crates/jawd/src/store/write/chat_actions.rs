@@ -2491,6 +2491,59 @@ mod tests {
     }
 
     #[test]
+    fn the_phones_change_under_her_number_at_the_time_of_jaws_pin_under_her_lid_isnt_its_echo() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        assert!(matches!(acted(&db, ANA_LID, pin_at(ANA_LID, true, AT, "p1")), Acted::Queued { .. }));
+        her_lid_joined(&db);
+        // The phone pins it under her number in the very millisecond of jaw's pin (round four's T6):
+        // jaw's echo is known by the index jaw's pin named as well as by its time.
+        arrives(&db, &["pin_v1", ANA], &pin_value(true, AT), 1);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (AT, 1), "jaw's pin still waits");
+        // So the phone's unpin under her LID, later by its time, taken by WhatsApp before jaw's pin,
+        // is held back.
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(false, AT + 1_000), 2);
+        assert_eq!(chat(&db, ANA).0, AT, "held back");
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT), 3);
+        assert_eq!((chat(&db, ANA).0, waits(&db)), (AT, 0), "and jaw's echo ends the wait");
+    }
+
+    #[test]
+    fn of_three_values_held_under_her_jids_at_one_millisecond_the_same_stands_in_any_order() {
+        // Each of her three JIDs says another mute at AT (round four's T6): her old number's index
+        // sorts last, so its hour stands, whichever comes last.
+        let hour = AT + 3_600_000;
+        let said = [(ANA_LID, FOREVER), (ANA, 0), (ANA_OLD, hour)];
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let db = db();
+            chats(&db, &[ANA]);
+            let hers = Person { jids: vec![ANA.into(), ANA_LID.into(), ANA_OLD.into()], ..Person::default() };
+            written(&db, &[Change::Person(hers)]);
+            for (seq, n) in order.into_iter().enumerate() {
+                let (jid, until) = said[n];
+                arrives(&db, &["mute", jid], &mute_value(until, AT), seq as i64 + 1);
+            }
+            assert_eq!(chat(&db, ANA).2, hour, "muted for the hour, as her old number has it, in the order {order:?}");
+        }
+    }
+
+    #[test]
+    fn as_her_chats_merge_the_newest_held_under_a_third_jid_of_hers_counts() {
+        let db = db();
+        chats(&db, &[ANA, ANA_LID]);
+        written(&db, &[Change::Person(Person { jids: vec![ANA.into(), ANA_OLD.into()], ..Person::default() })]);
+        // The phone pins her LID's chat, then unpins hers under her old number, later (round four's
+        // T6).
+        arrives(&db, &["pin_v1", ANA_LID], &pin_value(true, AT), 1);
+        arrives(&db, &["pin_v1", ANA_OLD], &pin_value(false, AT + 1_000), 2);
+        assert_eq!((chat(&db, ANA).0, chat(&db, ANA_LID).0), (0, AT), "her LID's chat pinned, hers not");
+        her_lid_joined(&db);
+        assert_eq!(chat(&db, ANA).0, 0, "unpinned, as the newest held under any of her JIDs has it");
+        let pin = acted(&db, ANA, pin_at(ANA, true, AT + 2_000, "p1"));
+        assert!(matches!(pin, Acted::Queued { .. }), "so pinning it isn't so already: {pin:?}");
+    }
+
+    #[test]
     fn a_patch_carrying_the_time_its_index_already_awaits_is_refused() {
         let db = db();
         chats(&db, &[ANA]);
