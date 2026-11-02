@@ -175,6 +175,22 @@ async fn events(store: &Store) -> usize {
     query(store, |db| Ok(read::events(db, 0, 100_000)?.len())).await
 }
 
+/// The newest event's seq, from which `told_since` reads.
+async fn last_event(store: &Store) -> i64 {
+    query(store, |db| Ok(db.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?)).await
+}
+
+/// The messages told since event `since`, by their n, once for each time each was told.
+async fn told_since(store: &Store, since: i64) -> Vec<i64> {
+    query(store, move |db| {
+        Ok(db
+            .prepare("SELECT key FROM events WHERE type = 'message' AND seq > ?1 ORDER BY key, seq")?
+            .query_map([since], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_locations_held_before_are_read_again_a_step_at_a_time_and_none_twice() {
     let home = tempfile::tempdir().unwrap();
@@ -405,6 +421,7 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
     assert_eq!(store.backfill_left(links::VOICES).unwrap(), 150, "as jawd status says");
     let before = rows(&store).await;
     assert!(before[4].4.as_ref().unwrap().get("voice").is_none(), "a voice message from before has no voice");
+    let since = last_event(&store).await;
 
     store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
     let (after, _) = voices_left(&store).await.expect("more to look at");
@@ -429,6 +446,8 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
     }
     assert_eq!(after[9], before[9], "the one deleted for everyone has nothing to read again");
     assert_eq!(after[39], before[39], "and one whose raw reads as another kind is left as it is");
+    let again: Vec<i64> = (1..=150).filter(|n| n % 5 == 0 && *n != 10 && *n != 40).collect();
+    assert_eq!(told_since(&store, since).await, again, "each voice message read again is told, once");
     let window = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
     let shown = window.iter().find(|r| r.id == "m150").unwrap();
     let detail: Value = serde_json::from_str(shown.detail.as_ref().unwrap().get()).unwrap();
