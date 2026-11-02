@@ -528,6 +528,31 @@ async fn the_once_backfill_counts_a_caption_at_what_the_costliest_took_so_no_tra
     assert_eq!(captioned, 0, "and each was taken out, one to a transaction");
 }
 
+/// A background transaction ends after its first secure delete, whatever its pace would allow, so
+/// an inbox row or a live write waits behind one erasure at most: 32 erasures given to the writer
+/// at once go in 32 transactions, though each may take a second.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_erasure_in_the_background_is_a_transaction_of_its_own_whatever_its_pace_allows() {
+    let home = tempfile::tempdir().unwrap();
+    let second = Duration::from_secs(1);
+    let limits = crate::store::Limits { batch_time: second, yield_after: second, ..crate::store::LIMITS };
+    let store = Store::open_with(home.path(), limits).unwrap();
+    let due =
+        (0..32i64).map(|k| Change::Message(message(ANA, &format!("d{k:02}"), AT + k, &format!("due{k}"), Some(LATER))));
+    apply(&store, due.collect()).await;
+    store.indexed().await.unwrap();
+    let ns: Vec<i64> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT n FROM messages ORDER BY n")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    let erasures = ns.into_iter().map(|n| Change::Expire { n, at: LATER }).collect();
+    let applied = store.apply(Lane::Background, erasures).await.unwrap();
+    assert_eq!((applied.changed, applied.transactions), (32, 32), "{applied:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_that_comes_after_its_time_is_never_shown_and_what_waited_for_it_goes() {
     let home = tempfile::tempdir().unwrap();

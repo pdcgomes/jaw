@@ -2049,12 +2049,12 @@ impl Writer {
     }
 
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
-    /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or, once an inbox row
-    /// or a live write is waiting, once its work has had YIELD_AFTER, the next group counted as
-    /// costing what the costliest secure delete in it has (an erasure, or a caption taken out of
-    /// search), so it stops before one that would take it past its time. Each group runs in a
-    /// savepoint: one that fails is rolled back and kept in quarantine with its error, and the rest
-    /// go on. A durable one is refused unless it commits synced. Says how many changes were taken.
+    /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, once an inbox row or
+    /// a live write is waiting and its work has had YIELD_AFTER, or after a group that made a secure
+    /// delete (an erasure, or a caption taken out of search): one can't be split, so what waits
+    /// waits behind one at most. Each group runs in a savepoint: one that fails is rolled back and
+    /// kept in quarantine with its error, and the rest go on. A durable one is refused unless it
+    /// commits synced. Says how many changes were taken.
     fn transaction(
         &mut self,
         changes: &[Change],
@@ -2069,7 +2069,7 @@ impl Writer {
             let (realtime, live, pace) = (&self.realtime, &self.live, self.changes_pace);
             let made = make_groups(&mut tx, &mut self.stamps, changes, groups, |taken, stamps| {
                 let waiting = !realtime.is_empty() || !live.is_empty();
-                background && pace.ends(began.elapsed() + stamps.costliest(), taken, waiting)
+                background && (stamps.costliest() > Duration::ZERO || pace.ends(began.elapsed(), taken, waiting))
             })?;
             write::settle(&tx, &mut self.stamps)?;
             let synced = commits_synced(&tx)?;
