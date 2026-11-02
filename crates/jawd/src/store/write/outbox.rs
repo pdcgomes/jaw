@@ -2391,14 +2391,19 @@ mod tests {
                 }
             }
         }
-        // A commit that meets the checkpointer's pass waits for its syncs, which it starts each
-        // time about 1,024 frames wait, every ten or so steps here, at the same steps each run, and
-        // other processes' I/O sets how long they take. So the steps are judged on their median.
+        // Every step is judged at its quickest, since other processes' I/O can stall any one run's.
+        // The checkpointer's passes fall at the same steps each run, about every 1,024 frames, and
+        // on the Mac's own drive, where barriers fence their syncs, the commits beside them stay
+        // within 3 ms too. So one step in thirty may take 3 ms or more at its quickest, and none 15
+        // ms; what a step may do is checked exactly, in `steps_in_a_thousand`.
         for (what, took) in [("regrouping", &quickest.0), ("letting go", &quickest.1)] {
-            let mut sorted = took.clone();
-            sorted.sort();
-            let median = sorted[sorted.len() / 2];
-            assert!(median < Duration::from_millis(3), "steps of {what} took {median:?} at the median: {took:?}");
+            let over = took.iter().filter(|took| **took >= Duration::from_millis(3)).count();
+            assert!(
+                over <= 1 + took.len() / 30,
+                "{over} steps of {what} took 3 ms or more at their quickest: {took:?}"
+            );
+            let slowest = took.iter().max().unwrap();
+            assert!(*slowest < Duration::from_millis(15), "a step of {what} took {slowest:?} at its quickest");
         }
         steps
     }
