@@ -28,7 +28,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::chat_actions::{self, Undo};
 use super::{
     Amendment, CHAT, Change, Chat, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid,
-    delete_row, located, now_ms, upsert_message,
+    delete_row, expiry, located, now_ms, upsert_message,
 };
 use crate::convert;
 
@@ -236,6 +236,10 @@ const DEQUEUE: &str = "DELETE FROM outbox WHERE message = ?1";
 const SENT: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2";
 /// What message ?1 of yours goes as, while it waits for the server.
 const WENT: &str = "SELECT raw FROM outbox WHERE message = ?1";
+/// What outbox row ?1 goes as.
+const GOES_AS: &str = "SELECT raw FROM outbox WHERE n = ?1";
+/// Whether message ?1 was deleted for everyone.
+const REVOKED: &str = "SELECT 1 FROM messages WHERE n = ?1 AND deleted";
 const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
@@ -1161,7 +1165,9 @@ fn unsent(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Res
             Ok(true)
         }
         // Its message was deleted for you.
-        Some(None) if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? => dropped(db, outbox),
+        Some(None) if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? => {
+            dropped(db, stamps, outbox)
+        }
         // An HD copy's row shows nothing of its own; its message shows its media row's error.
         _ => {
             if let Some((Some(n), _)) = copy {
@@ -1192,9 +1198,16 @@ fn outboxed(db: &Connection, outbox: i64) -> Result<Option<Option<Its>>> {
 }
 
 /// Removes outbox row `outbox`, whose message was deleted for you: it has gone, or it can't, and
-/// with nothing left to show it, nothing can retry it.
-fn dropped(db: &Connection, outbox: i64) -> Result<bool> {
-    db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+/// with nothing left to show it, nothing can retry it. One that goes with a disappearing timer
+/// goes as an erasure takes it, since it holds the last of what its message said.
+fn dropped(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
+    let goes_as: Option<Vec<u8>> = db.prepare_cached(GOES_AS)?.query_row([outbox], |r| r.get(0)).optional()?;
+    let remove = || Ok(db.prepare_cached(DROP_ROW)?.execute([outbox])? > 0);
+    if goes_as.as_deref().and_then(convert::timer).is_some() {
+        expiry::unsaid(db, stamps, &[], |_| remove())?;
+    } else {
+        remove()?;
+    }
     Ok(false)
 }
 
@@ -1219,7 +1232,7 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     }
     let (n, chat, status) = match outboxed(db, outbox)? {
         None => return Ok(false),
-        Some(None) => return dropped(db, outbox),
+        Some(None) => return dropped(db, stamps, outbox),
         Some(Some(row)) => row,
     };
     received(db, stamps, n)?;
@@ -1239,12 +1252,20 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
 pub(super) fn received(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     let went: Option<Vec<u8>> = db.prepare_cached(WENT)?.query_row([n], |r| r.get(0)).optional()?;
     let Some(went) = went else { return Ok(()) };
-    db.prepare_cached(DEQUEUE)?.execute([n])?;
-    if let Some(seconds) = convert::timer(&went) {
-        let at = now_ms() + i64::from(seconds) * 1000;
-        let expires: Option<i64> = db.prepare_cached(EXPIRES)?.query_row(params![n, at], |r| r.get(0)).optional()?;
-        stamps.expires(expires);
+    let Some(seconds) = convert::timer(&went) else {
+        db.prepare_cached(DEQUEUE)?.execute([n])?;
+        return Ok(());
+    };
+    // Once it's deleted for everyone, its row says nothing of it, and its outbox row was the last
+    // that did.
+    if db.prepare_cached(REVOKED)?.exists([n])? {
+        expiry::unsaid(db, stamps, &[], |_| Ok(db.prepare_cached(DEQUEUE)?.execute([n])? > 0))?;
+    } else {
+        db.prepare_cached(DEQUEUE)?.execute([n])?;
     }
+    let at = now_ms() + i64::from(seconds) * 1000;
+    let expires: Option<i64> = db.prepare_cached(EXPIRES)?.query_row(params![n, at], |r| r.get(0)).optional()?;
+    stamps.expires(expires);
     Ok(())
 }
 
@@ -1285,7 +1306,7 @@ fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_a
     timer_refused(db, stamps, outbox)?;
     match row {
         Some((n, chat, status)) => failed_message(db, stamps, chat, n, status.as_deref()),
-        None => dropped(db, outbox),
+        None => dropped(db, stamps, outbox),
     }
 }
 
@@ -1327,7 +1348,7 @@ fn no_receipt(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) ->
     }
     match row {
         Some((n, chat, status)) => failed_message(db, stamps, chat, n, status.as_deref()),
-        None => dropped(db, outbox),
+        None => dropped(db, stamps, outbox),
     }
 }
 

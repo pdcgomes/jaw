@@ -80,14 +80,24 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
     erase(db, stamps, chat, n)
 }
 
-/// Whether message ?1 has a time to go or is marked to open once.
-const ERASABLE: &str = "SELECT expires_at IS NOT NULL OR view_once FROM messages WHERE n = ?1";
+/// Whether message ?1 has a time to go or is marked to open once, and, for one of yours still
+/// waiting for the server, what it goes as.
+const ERASABLE: &str = "SELECT m.expires_at IS NOT NULL OR m.view_once, o.raw FROM messages m
+    LEFT JOIN outbox o ON o.message = m.n WHERE m.n = ?1";
 
 /// Whether message `n` has a time to go or is marked to open once, so whatever changes what it
 /// says, or takes it away, takes its words as an erasure takes them (`unsaid`), lest they outlive
-/// it: an edit, a revoke, a deletion for you, a copy, a fold, a backfill's reading it again.
+/// it: an edit, a revoke, a deletion for you, a copy, a fold, a backfill's reading it again. One of
+/// yours still waiting for the server has a time to go once it gets there if it goes with a timer,
+/// so it counts as one from when it's written.
 pub(super) fn erasable(db: &Connection, n: i64) -> Result<bool> {
-    Ok(db.prepare_cached(ERASABLE)?.query_row([n], |r| r.get(0)).optional()?.unwrap_or(false))
+    let row: Option<(bool, Option<Vec<u8>>)> =
+        db.prepare_cached(ERASABLE)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    Ok(match row {
+        Some((true, _)) => true,
+        Some((false, Some(goes_as))) => convert::timer(&goes_as).is_some(),
+        _ => false,
+    })
 }
 
 /// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it.
