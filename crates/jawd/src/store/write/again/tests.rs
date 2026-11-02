@@ -1,3 +1,7 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use wa_proto::wa_common::MessageKey;
@@ -7,8 +11,8 @@ use super::*;
 use crate::convert::Me;
 use crate::store::read::{self, Around};
 use crate::store::write::{Packed, links};
-use crate::store::{Applied, Lane, Store, schema};
-use crate::work::Priority;
+use crate::store::{Applied, Lane, Message, Store, schema};
+use crate::work::{Priority, Report};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
 const AT: i64 = 1_792_000_000_000;
@@ -440,7 +444,7 @@ async fn the_voice_messages_held_before_take_their_length_and_waveform_a_step_at
 
     store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
     let (after, _) = voices_left(&store).await.expect("more to look at");
-    assert!((5..=64).contains(&after), "a step looks at 64 messages at most: {after}");
+    assert!((5..=16).contains(&after), "a step looks at 16 messages at most: {after}");
     assert_eq!(voices_said(&jawd), 150 - after as u64, "jawd status says what's left");
     let first = rows(&store).await;
     let waveform: Vec<u8> = (0..64).map(|i| ((i * 7 + 5) % 101) as u8).collect();
@@ -630,15 +634,51 @@ async fn voices_finished(store: &Store) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_step_of_the_voices_backfill_looks_at_16_messages_so_it_reads_16_again_at_most() {
+    // Every twentieth a voice message: the first step, looking at 16, has none to read again, and the
+    // next reads m20 again and ends at m32, however fast the machine.
+    let home = tempfile::tempdir().unwrap();
+    before_voices_in(home.path(), 100, 1, 20);
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+    assert_eq!(voices_left(&store).await, Some((16, 100)), "a step looks at 16 messages");
+    store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+    assert_eq!(voices_left(&store).await, Some((32, 100)), "and the next at the 16 after them");
+    let voiced = |n: i64| {
+        query(&store, move |db| {
+            let detail: Option<String> = db.query_row("SELECT detail FROM messages WHERE n = ?1", [n], |r| r.get(0))?;
+            Ok(detail.is_some_and(|d| d.contains("\"voice\"")))
+        })
+    };
+    assert!(voiced(20).await && !voiced(40).await, "m20 is read again, and m40 not yet");
+
+    // All voice messages: a step reads 16 again at most, fewer once it has read them for a while.
+    let home = tempfile::tempdir().unwrap();
+    before_voices_in(home.path(), 64, 1, 1);
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Background, vec![Change::Backfill(links::VOICES)]).await.unwrap();
+    let (after, _) = voices_left(&store).await.expect("more to look at");
+    assert!((1..=16).contains(&after), "a step of voice messages in a row reads 16 again at most: {after}");
+    voices_backfilled(&store).await;
+    let read: i64 = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*) FROM messages WHERE detail LIKE '%\"voice\"%'", [], |r| r.get(0))?)
+    })
+    .await;
+    assert_eq!(read, 64, "and the next goes on from the first it didn't read");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_voices_backfill_stopped_after_every_committed_step_ends_as_one_run_does() {
+    // 450 messages, some 30 steps of 16, as many as the audit's 1,500 took of 64: each stop takes
+    // every step before it again.
     let seed = tempfile::tempdir().unwrap();
-    before_voices_in(seed.path(), 1_500, 7, 5);
+    before_voices_in(seed.path(), 450, 7, 5);
     {
         let db = Connection::open(seed.path().join("jaw.db")).unwrap();
         db.execute_batch(
-            "UPDATE messages SET deleted = 1, raw = NULL, detail = NULL WHERE n = 500;
-            UPDATE messages SET edited_at = 1 WHERE n = 700;
-            UPDATE messages SET raw = x'00ff' WHERE n = 900;
+            "UPDATE messages SET deleted = 1, raw = NULL, detail = NULL WHERE n = 200;
+            UPDATE messages SET edited_at = 1 WHERE n = 300;
+            UPDATE messages SET raw = x'00ff' WHERE n = 400;
             PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
@@ -654,7 +694,7 @@ async fn the_voices_backfill_stopped_after_every_committed_step_ends_as_one_run_
     let expected = voices_left_by(&store).await;
     drop(store);
     let read_again = expected.0.iter().filter(|r| r.4.as_deref().is_some_and(|d| d.contains("\"voice\""))).count();
-    assert_eq!(read_again, 300 - 3, "all but the deleted, the edited and the unreadable");
+    assert_eq!(read_again, 90 - 3, "all but the deleted, the edited and the unreadable");
     for k in 1..steps {
         let home = copied();
         let store = Store::open(home.path()).unwrap();
@@ -669,4 +709,130 @@ async fn the_voices_backfill_stopped_after_every_committed_step_ends_as_one_run_
         assert_eq!(got.0, expected.0, "rows after a stop after step {k}");
         assert_eq!(got.1, expected.1, "each row's events after a stop after step {k}");
     }
+}
+
+fn percentile(sorted: &[Duration], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let i = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[i].as_secs_f64() * 1e3
+}
+
+/// Measures the voices backfill on a jaw.db from before voices, of `JAW_MEASURE_MESSAGES` messages
+/// in `JAW_MEASURE_CHATS` one-to-one chats, one in `JAW_MEASURE_EVERY` of them a voice message with
+/// its waveform, as jawd takes it, 64 steps to the writer at a time, by itself or, with
+/// `JAW_MEASURE_LIVE=1`, beside a live message every 5 ms:
+/// `JAW_MEASURE_MESSAGES=1000000 JAW_MEASURE_CHATS=2000 JAW_MEASURE_EVERY=5 cargo test --release -p jawd measure_the_voices -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement, five minutes long at a million messages, most of it making them"]
+async fn measure_the_voices_backfill() {
+    let env = |name: &str, default: i64| std::env::var(name).ok().and_then(|n| n.parse().ok()).unwrap_or(default);
+    let (messages, every, chats) =
+        (env("JAW_MEASURE_MESSAGES", 84_465), env("JAW_MEASURE_EVERY", 20), env("JAW_MEASURE_CHATS", 450));
+    let live = env("JAW_MEASURE_LIVE", 0) > 0;
+    let home = tempfile::tempdir().unwrap();
+    let began = Instant::now();
+    before_voices_in(home.path(), messages, chats, every);
+    let made = began.elapsed();
+    let size = |name: &str| std::fs::metadata(home.path().join(name)).map_or(0, |m| m.len());
+    let db_before = size("jaw.db");
+    let began = Instant::now();
+    let store = Store::open(home.path()).unwrap();
+    let migrated = began.elapsed();
+    let left = store.backfill_left(links::VOICES).unwrap();
+    let events_before = store.count("events").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = live.then(|| {
+        let (store, stop) = (store.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut took = Vec::new();
+            let mut k = 0i64;
+            while !stop.load(Ordering::SeqCst) {
+                k += 1;
+                let jid = "351900000001@s.whatsapp.net";
+                let message = Message {
+                    chat: jid.into(),
+                    id: format!("live{k}"),
+                    at: AT + 5_000_000_000 + k,
+                    sender: Some(jid.into()),
+                    kind: "text",
+                    text: Some(format!("olá {k}")),
+                    summary: format!("olá {k}"),
+                    live: true,
+                    ..Message::default()
+                };
+                let t = Instant::now();
+                if store.apply(Lane::Live, vec![Change::Message(message)]).await.is_err() {
+                    break;
+                }
+                took.push(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            took
+        })
+    });
+    let began = Instant::now();
+    let (mut transactions, mut applies, mut wal_most) = (0u64, 0u64, 0u64);
+    let mut apply_took = Vec::new();
+    while store.backfill_left(links::VOICES).unwrap() > 0 {
+        let t = Instant::now();
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(links::VOICES); 64]).await.unwrap();
+        apply_took.push(t.elapsed());
+        assert_eq!(applied.quarantined, 0, "a step failed");
+        transactions += applied.transactions as u64;
+        applies += 1;
+        wal_most = wal_most.max(size("jaw.db-wal"));
+    }
+    let backfilled = began.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    let live_took = match writer {
+        Some(writer) => {
+            let mut took = writer.await.unwrap();
+            took.sort();
+            Some(took)
+        }
+        None => None,
+    };
+    let runs = store.report().run.unwrap();
+    let voiced: i64 = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT count(*) FROM messages WHERE kind = 'voice' AND json_extract(detail, '$.voice.waveform') IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    })
+    .await;
+    let events = store.count("events").unwrap() - events_before;
+    apply_took.sort();
+    eprintln!(
+        "voices backfill: {messages} messages in {chats} chats, one in {every} voice ({} voice); made in {:.1} s, \
+         {:.1} MB; migrated in {:.1} ms with {left} to look at; backfilled in {:.2} s, {transactions} transactions \
+         in {applies} applies of 64 steps, each transaction {:.2} ms p50 and {:.2} ms p99 with its commit; \
+         an apply {:.2} ms p50, {:.2} ms p99, {:.2} ms max; {voiced} voice rows with a waveform, {events} events; \
+         WAL at most {:.1} MB; jaw.db {:.1} MB to {:.1} MB",
+        messages / every,
+        made.as_secs_f64(),
+        db_before as f64 / 1e6,
+        migrated.as_secs_f64() * 1e3,
+        backfilled.as_secs_f64(),
+        runs.p50_us as f64 / 1e3,
+        runs.p99_us as f64 / 1e3,
+        percentile(&apply_took, 0.5),
+        percentile(&apply_took, 0.99),
+        percentile(&apply_took, 1.0),
+        wal_most as f64 / 1e6,
+        db_before as f64 / 1e6,
+        size("jaw.db") as f64 / 1e6,
+    );
+    if let Some(took) = live_took {
+        eprintln!(
+            "voices backfill, live beside it: {} live messages, {:.2} ms p50, {:.2} ms p99, {:.2} ms max",
+            took.len(),
+            percentile(&took, 0.5),
+            percentile(&took, 0.99),
+            percentile(&took, 1.0)
+        );
+    }
+    assert_eq!(voiced, messages / every, "every voice message read again");
 }

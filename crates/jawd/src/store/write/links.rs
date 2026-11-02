@@ -87,7 +87,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         PLACES => (NEXT_PLACES, super::again::places, Some(kinds::CONVERTING), STEP),
         EVENTS => (NEXT_EVENTS, super::again::events, Some(kinds::CONVERTING), STEP),
         CONTACTS => (contacts::NEXT_CARDS, contacts::backfilled, Some(kinds::CONVERTING), STEP),
-        VOICES => (NEXT_VOICES, super::again::voices, Some(kinds::CONVERTING), STEP),
+        VOICES => (NEXT_VOICES, super::again::voices, Some(kinds::CONVERTING), super::again::VOICES_STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

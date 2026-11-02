@@ -29,6 +29,13 @@ const KEPT_FOR: &str = "SELECT count(*) FROM pending WHERE chat = ?1 AND target 
 /// it's the text), and detail.
 type Shown = (Option<String>, Option<String>, Option<String>, Option<String>);
 
+/// How many messages a step of the voices backfill looks at, so it reads 16 again at most: fewer
+/// than other backfills look at, as copies' steps are, since reading one again costs far more than
+/// a look at one that isn't. Where every fifth message was a voice message, steps of 64 read a
+/// dozen again each, so a transaction took too few steps for the writer to allow for its commit,
+/// and most passed the background's 3 ms with theirs.
+pub(super) const VOICES_STEP: i64 = 16;
+
 /// Reads location `n` again, as `read_again` does; one whose reading fails, or panics, is kept in
 /// quarantine while the step goes on, as the kinds backfill keeps a conversion that fails.
 pub(super) fn places(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
