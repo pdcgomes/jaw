@@ -816,6 +816,18 @@ async fn a_connection_ending_while_the_voice_tasks_requests_are_full_still_throw
     assert_eq!(rig.voice.status().recording, None);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn jawd_stopping_throws_a_stopped_recording_away_and_status_counts_it_meanwhile() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    let file = rig.recorded(&heard).await;
+    let status = rig.voice.status();
+    assert_eq!((status.files, status.bytes), (1, file.len() as u64), "status counts the recording");
+    rig.voice.stop().await;
+    assert!(rig.recordings().is_empty(), "jawd's stop throws it away: {:?}", rig.recordings());
+    assert_eq!((rig.voice.status().files, rig.voice.status().bytes), (0, 0));
+}
+
 impl Rig {
     /// What the demo's WhatsApp was sent as message `id`, each time it was sent.
     fn sent(&self, id: &str) -> Vec<wa_proto::wa_web_protobufs_e2e::Message> {
