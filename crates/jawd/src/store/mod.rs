@@ -399,10 +399,16 @@ const LIVE_PAUSE: Duration = Duration::from_millis(10);
 const STREAM_STEP: Duration = Duration::from_millis(100);
 /// The pages of FTS5 merging a step does, about a millisecond's worth.
 const MERGE_PAGES: i64 = 64;
-/// How long after one whole merge of links_fts began another may, to take out the words of
-/// messages erased since: a message's links are erased from that contentless index only by a merge,
-/// and a merge of the whole of it costs every page it has.
-const LINKS_MERGE_EVERY: Duration = Duration::from_secs(600);
+/// How long after one whole merge of a contentless index, links_fts or library_fts, began another
+/// may, to take out the words of messages erased since: a message's words are erased from one only
+/// by a merge, and a merge of the whole of it costs every page it has.
+const WHOLE_MERGE_EVERY: Duration = Duration::from_secs(600);
+/// A step's worth of merging each contentless index, by its place in `expiry::CONTENTLESS`; with a
+/// negative rank, the first step of merging every segment it has into one.
+const CONTENTLESS_MERGES: [&str; expiry::CONTENTLESS.len()] = [
+    "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
+    "INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)",
+];
 const WRITER_CACHE_KIB: i64 = 32 * 1024;
 /// How long any connection waits for a lock before it fails, which the writer then tries again.
 const BUSY_MS: i64 = 5_000;
@@ -474,7 +480,7 @@ struct Limits {
     stream_step: Duration,
     batch_time: Duration,
     yield_after: Duration,
-    links_merge_every: Duration,
+    whole_merge_every: Duration,
     /// The least a secure delete counts as when work paces itself, none in jawd: a test's makes
     /// one cost what a million messages make it cost.
     secure_delete_least: Duration,
@@ -489,7 +495,7 @@ const LIMITS: Limits = Limits {
     stream_step: STREAM_STEP,
     batch_time: BATCH_TIME,
     yield_after: YIELD_AFTER,
-    links_merge_every: LINKS_MERGE_EVERY,
+    whole_merge_every: WHOLE_MERGE_EVERY,
     secure_delete_least: Duration::ZERO,
 };
 
@@ -739,7 +745,11 @@ impl Store {
                 .optional()?
                 .and_then(|at| at.parse().ok()))
         };
-        let (links_erased, wal_erased) = (noted(expiry::LINKS_ERASED)?, noted(expiry::WAL_ERASED)?);
+        let wal_erased = noted(expiry::WAL_ERASED)?;
+        let mut wholes = expiry::CONTENTLESS.map(|(_, note)| Whole { note, erased: None, merging: None, merged: None });
+        for whole in &mut wholes {
+            whole.erased = noted(whole.note)?;
+        }
         let kept: i64 = db.query_row("SELECT coalesce(sum(bytes), 0) FROM thumbnails", [], |r| r.get(0))?;
         let thumbnails = Arc::new(Thumbnails::open(home, kept.max(0) as u64));
         let stats = Arc::new(Mutex::new(Stats::default()));
@@ -772,10 +782,8 @@ impl Store {
             index_pace: Pace::new(&limits),
             backlog,
             unmerged: true,
-            links_erased,
-            links_merging: None,
-            links_merged: None,
-            links_merge_every: limits.links_merge_every,
+            wholes,
+            whole_merge_every: limits.whole_merge_every,
             wal_erased,
             wal_again: None,
             committed_at: Instant::now(),
@@ -1074,6 +1082,29 @@ impl Report for Store {
 /// How often the writer removes events older than the feed keeps, when it has background work.
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
+/// A contentless index's whole merge, which takes the words erasures left in it out of its
+/// segments.
+struct Whole {
+    /// Where sync_state keeps when an erasure last left words in it.
+    note: &'static str,
+    /// When an erasure last left words in it, as sync_state keeps it, until it has been merged
+    /// whole since.
+    erased: Option<i64>,
+    /// The whole merge under way, as of the erasure it began after.
+    merging: Option<i64>,
+    /// When the last whole merge began.
+    merged: Option<Instant>,
+}
+
+impl Whole {
+    /// When it's next to be merged whole, `every` after the last whole merge began, if an erasure
+    /// has left words in it since and none is under way.
+    fn due(&self, every: Duration) -> Option<Instant> {
+        let since = self.merged.map_or_else(Instant::now, |began| began + every);
+        (self.erased.is_some() && self.merging.is_none()).then_some(since)
+    }
+}
+
 struct Writer {
     stats: Arc<Mutex<Stats>>,
     inboxed: Arc<Notify>,
@@ -1105,13 +1136,10 @@ struct Writer {
     backlog: bool,
     /// Whether FTS5 may have segments to merge.
     unmerged: bool,
-    /// When a message with links was last erased, as sync_state keeps it, until links_fts has
-    /// been merged whole since; the merge of the whole of it under way, as of the erasure it began
-    /// after; and when the last such merge began.
-    links_erased: Option<i64>,
-    links_merging: Option<i64>,
-    links_merged: Option<Instant>,
-    links_merge_every: Duration,
+    /// Each contentless index's whole merge, by its place in `expiry::CONTENTLESS`, and how long
+    /// after one began the next may.
+    wholes: [Whole; expiry::CONTENTLESS.len()],
+    whole_merge_every: Duration,
     /// When a message was last erased, or a caption taken out of its row, as sync_state keeps it,
     /// until the WAL has been emptied since; and, while a reader held it, when to try again.
     wal_erased: Option<i64>,
@@ -1298,7 +1326,7 @@ impl Writer {
     /// How long the writer may wait for work before an indexing step is due.
     fn idle_for(&self) -> Duration {
         if !self.backlog && !self.unmerged {
-            let due = [self.links_merge_due(), self.wal_empty_due()].into_iter().flatten().min();
+            let due = [self.whole_merge_due(), self.wal_empty_due()].into_iter().flatten().min();
             return due.map_or(Duration::from_secs(3600), |due| {
                 due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE)
             });
@@ -1327,7 +1355,7 @@ impl Writer {
         }
         self.unhold();
         // Merging first keeps FTS5's levels short of a merge it would do all at once.
-        let step = if self.unmerged || self.links_merge_due().is_some_and(|due| due <= Instant::now()) {
+        let step = if self.unmerged || self.whole_merge_due().is_some_and(|due| due <= Instant::now()) {
             self.merge()
         } else if self.backlog {
             self.index()
@@ -1374,8 +1402,8 @@ impl Writer {
         if let Some(at) = self.stamps.take_expiring() {
             self.soonest.note(at);
         }
-        if let Some(at) = self.stamps.take_links_erased() {
-            self.links_erased = Some(at);
+        for (whole, at) in self.wholes.iter_mut().zip(self.stamps.take_left_in()) {
+            whole.erased = at.or(whole.erased);
         }
         if let Some(at) = self.stamps.take_wal_erased() {
             self.wal_erased = Some(at);
@@ -1427,11 +1455,10 @@ impl Writer {
         Ok(())
     }
 
-    /// When links_fts is next to be merged whole, for the words of messages erased since the last
-    /// such merge began, if any were.
-    fn links_merge_due(&self) -> Option<Instant> {
-        let since = self.links_merged.map_or_else(Instant::now, |began| began + self.links_merge_every);
-        (self.links_erased.is_some() && self.links_merging.is_none()).then_some(since)
+    /// When a contentless index is next to be merged whole, for the words erasures left in it since
+    /// its last whole merge began, if any did.
+    fn whole_merge_due(&self) -> Option<Instant> {
+        self.wholes.iter().filter_map(|whole| whole.due(self.whole_merge_every)).min()
     }
 
     /// Makes the writer's commits reach the disk before they return, or go back to letting a later
@@ -1802,28 +1829,26 @@ impl Writer {
     }
 
     /// Merges MERGE_PAGES of FTS5's segments, messages', links' or the library's items', if any
-    /// level has enough to merge.
+    /// level has enough to merge; or begins merging a contentless index whole, once an erasure has
+    /// left words in it.
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
-        let whole = self.links_merge_due().is_some_and(|due| due <= Instant::now());
-        let merging = self.links_merging;
+        let every = self.whole_merge_every;
+        let whole = self.wholes.iter().position(|whole| whole.due(every).is_some_and(|due| due <= Instant::now()));
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // The messages' index first, then the links' and the items', each once the one before it has
-        // nothing to merge, a step's worth.
         let mut merged = false;
-        if whole {
-            // Every segment of the links' index made one, a step at a time as the steps after this
-            // go on with it, so the words of the messages erased since, which a contentless index
-            // keeps until a merge, go.
-            tx.execute("INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)", [-MERGE_PAGES])?;
+        if let Some(index) = whole {
+            // Every segment of the index made one, a step at a time as the steps after this go on
+            // with it, so the words of the messages erased since, which a contentless index keeps
+            // until a merge, go.
+            tx.execute(CONTENTLESS_MERGES[index], [-MERGE_PAGES])?;
             merged = true;
         } else {
-            for merge in [
-                "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)",
-                "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
-                "INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)",
-            ] {
+            // The messages' index first, then the links' and the items', each once the one before
+            // it has nothing to merge, a step's worth.
+            let merges = ["INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)"];
+            for merge in merges.into_iter().chain(CONTENTLESS_MERGES) {
                 let before = tx.total_changes();
                 tx.execute(merge, [MERGE_PAGES])?;
                 merged = tx.total_changes() > before + 1;
@@ -1831,19 +1856,28 @@ impl Writer {
                     break;
                 }
             }
-            if let Some(began) = merging.filter(|_| !merged) {
-                // The whole merge is done: the erasures before it began left nothing.
-                tx.execute(
-                    "DELETE FROM sync_state WHERE key = ?1 AND value = ?2",
-                    params![expiry::LINKS_ERASED, began.to_string()],
-                )?;
+            if !merged {
+                // Each whole merge under way is done: the erasures before it began left nothing.
+                for whole in &self.wholes {
+                    if let Some(began) = whole.merging {
+                        tx.execute(
+                            "DELETE FROM sync_state WHERE key = ?1 AND value = ?2",
+                            params![whole.note, began.to_string()],
+                        )?;
+                    }
+                }
             }
         }
         tx.commit()?;
-        if whole {
-            (self.links_merging, self.links_merged) = (self.links_erased, Some(Instant::now()));
-        } else if let Some(began) = self.links_merging.take_if(|_| !merged) {
-            self.links_erased = self.links_erased.filter(|&erased| erased != began);
+        if let Some(index) = whole {
+            let whole = &mut self.wholes[index];
+            (whole.merging, whole.merged) = (whole.erased, Some(Instant::now()));
+        } else if !merged {
+            for whole in &mut self.wholes {
+                if let Some(began) = whole.merging.take() {
+                    whole.erased = whole.erased.filter(|&erased| erased != began);
+                }
+            }
         }
         self.unmerged = merged;
         self.committed();

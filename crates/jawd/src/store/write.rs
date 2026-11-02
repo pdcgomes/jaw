@@ -475,9 +475,10 @@ pub(super) struct Stamps {
     /// The soonest time a message written in the transaction goes, for the timer that erases them.
     /// One a savepoint rolled back stays noted: it only wakes the timer, which looks again.
     expiring: Option<i64>,
-    /// When the transaction erased a message whose links' words only a merge of links_fts takes
-    /// out (`expiry`), as kept in sync_state.
-    links_erased: Option<i64>,
+    /// When the transaction last left words of a message erased, or of what one said before, in
+    /// each contentless index, which only its whole merge takes out (`expiry::CONTENTLESS`), as
+    /// kept in sync_state.
+    left_in: [Option<i64>; expiry::CONTENTLESS.len()],
     /// When the transaction erased a message, or took a caption out of its row, leaving the WAL
     /// to empty (`expiry`), as kept in sync_state.
     wal_erased: Option<i64>,
@@ -535,7 +536,7 @@ impl Stamps {
             opening: false,
             copies_taken: false,
             expiring: None,
-            links_erased: None,
+            left_in: Default::default(),
             wal_erased: None,
             erased: 0,
             closed: Vec::new(),
@@ -556,7 +557,7 @@ impl Stamps {
         self.unsettled.clear();
         self.unsettling.clear();
         self.expiring = None;
-        self.links_erased = None;
+        self.left_in = Default::default();
         self.wal_erased = None;
         self.erased = 0;
         self.closed.clear();
@@ -583,7 +584,7 @@ impl Stamps {
         self.unsettling.clear();
         self.copies_taken = false;
         self.expiring = None;
-        self.links_erased = None;
+        self.left_in = Default::default();
         self.wal_erased = None;
         self.erased = 0;
         self.closed.clear();
@@ -611,14 +612,15 @@ impl Stamps {
         self.expiring.take()
     }
 
-    /// Notes that the transaction erased a message with links, at `at`, as sync_state keeps it.
-    pub(super) fn links_erased(&mut self, at: i64) {
-        self.links_erased = Some(at);
+    /// Notes that the transaction left words in contentless index `index`, at `at`, as sync_state
+    /// keeps it.
+    pub(super) fn left_in(&mut self, index: usize, at: i64) {
+        self.left_in[index] = Some(at);
     }
 
-    /// When the committed transaction last erased a message with links, taken once.
-    pub(super) fn take_links_erased(&mut self) -> Option<i64> {
-        self.links_erased.take()
+    /// When the committed transaction last left words in each contentless index, taken once.
+    pub(super) fn take_left_in(&mut self) -> [Option<i64>; expiry::CONTENTLESS.len()] {
+        std::mem::take(&mut self.left_in)
     }
 
     /// Notes that the transaction left the WAL to empty, at `at`, as sync_state keeps it.

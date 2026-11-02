@@ -35,10 +35,27 @@ pub const EXPIRING: &str = "messages WHERE expires_at IS NOT NULL";
 
 /// Message `n`'s chat, if its time has come by `at`.
 const DUE_IN: &str = "SELECT chat FROM messages WHERE n = ?1 AND expires_at <= ?2";
-/// Where sync_state keeps when a message with links was last erased, until links_fts has been
-/// merged whole since, which the writer does in its idle moments (`Writer::merge`).
+/// The contentless indexes, links_fts and library_fts: a deletion from one only marks its entry
+/// deleted, leaving its words in the segment that holds them until a merge rewrites it, so an
+/// erasure leaving words in one has the writer merge it whole in its idle moments
+/// (`Writer::merge`). Each with where sync_state keeps when an erasure last left words in it, until
+/// it has been merged whole since, by its place in what a transaction notes (`Stamps::left_in`).
+pub const CONTENTLESS: [(&str, &str); 2] = [("links_fts", LINKS_ERASED), ("library_fts", LIBRARY_ERASED)];
+/// links_fts's place in CONTENTLESS: it holds a message's links' words.
+pub const LINKS: usize = 0;
+/// library_fts's: it holds a photo's, a video's, a voice message's or a file's words, and a
+/// message's links' words.
+pub const LIBRARY: usize = 1;
 pub const LINKS_ERASED: &str = "erased.links";
 const NOTE_LINKS_ERASED: &str = "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.links', ?1)";
+pub const LIBRARY_ERASED: &str = "erased.library";
+const NOTE_LIBRARY_ERASED: &str = "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.library', ?1)";
+/// Message ?1's words in the contentless indexes, once it's out of fts_backlog, from which they're
+/// indexed: whether it has links, whose words both hold, and whether it's an item with words, whose
+/// words library_fts holds.
+const IN_CONTENTLESS: &str =
+    "SELECT EXISTS (SELECT 1 FROM links WHERE message = ?1), shelf IS NOT NULL AND text IS NOT NULL
+    FROM messages WHERE n = ?1 AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?1)";
 /// Where sync_state keeps when a message was last erased, or a caption taken out of its row, until
 /// the writer has emptied the WAL since in its idle moments (`Writer::empty_wal`): a running jawd
 /// keeps the WAL's file, and in it the frames written before, which hold what went, until they're
@@ -62,35 +79,65 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
     erase(db, stamps, chat, n)
 }
 
-/// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it; one
-/// whose links' words links_fts holds is noted, for the whole merge that takes them out.
+/// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it.
 pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
-    let linked = db.prepare_cached(LINKED)?.exists([n])?;
-    let began = Instant::now();
-    let erased = erasing(db, || {
+    let erased = unsaid(db, stamps, &[n], |stamps| {
         forget_waiting(db, n)?;
         delete_row(db, stamps, chat, n)
     })?;
-    stamps.securely_deleted(began.elapsed());
     if erased {
         stamps.erased_one();
-        wal_to_empty(db, stamps)?;
-    }
-    if linked && erased {
-        let now = now_ms();
-        db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;
-        stamps.links_erased(now);
     }
     Ok(erased)
+}
+
+/// Runs `change`, which takes what messages `ns` say, or some of it, out of their rows and search's
+/// indexes, as an erasure takes it (`erasing`), saying whether it changed anything. If it did, what
+/// it leaves to do is noted with it, so a kill leaves that to do too: the WAL, whose frames hold
+/// what went, to empty, and each contentless index that held words of theirs to merge whole.
+pub(super) fn unsaid(
+    db: &Connection,
+    stamps: &mut Stamps,
+    ns: &[i64],
+    change: impl FnOnce(&mut Stamps) -> Result<bool>,
+) -> Result<bool> {
+    let mut held = [false; CONTENTLESS.len()];
+    for &n in ns {
+        let words: Option<(bool, bool)> =
+            db.prepare_cached(IN_CONTENTLESS)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((linked, item)) = words {
+            held[LINKS] |= linked;
+            held[LIBRARY] |= linked || item;
+        }
+    }
+    let began = Instant::now();
+    let changed = erasing(db, || change(stamps))?;
+    stamps.securely_deleted(began.elapsed());
+    if changed {
+        wal_to_empty(db, stamps)?;
+        let now = now_ms();
+        for (index, note) in [(LINKS, NOTE_LINKS_ERASED), (LIBRARY, NOTE_LIBRARY_ERASED)] {
+            if held[index] {
+                db.prepare_cached(note)?.execute([now.to_string()])?;
+                stamps.left_in(index, now);
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// Notes, with what went, that the WAL is to be emptied, so a kill before the writer does it
 /// leaves it to do.
 fn wal_to_empty(db: &Connection, stamps: &mut Stamps) -> Result<()> {
+    stamps.wal_erased(wal_noted(db)?);
+    Ok(())
+}
+
+/// Notes in sync_state that the WAL is to be emptied, saying when it noted it.
+pub(crate) fn wal_noted(db: &Connection) -> Result<i64> {
     let now = now_ms();
     db.prepare_cached(NOTE_WAL_ERASED)?.execute([now.to_string()])?;
-    stamps.wal_erased(now);
-    Ok(())
+    Ok(now)
 }
 
 /// Takes what waits for message `n`, which can never apply once it's erased, as a message that
@@ -139,7 +186,6 @@ pub(super) const OPEN_HERE: &str = "SELECT m.id FROM opened o JOIN messages m ON
 const STILL_OPEN: &str = "SELECT message FROM opened ORDER BY message LIMIT ?1";
 /// Whether message ?1 is someone else's view-once message.
 const ONCE: &str = "SELECT chat FROM messages WHERE n = ?1 AND view_once AND NOT mine";
-const LINKED: &str = "SELECT 1 FROM links WHERE message = ?1";
 const OPENED_WAITING_NOW: &str = "SELECT count(*) FROM pending WHERE kind = 'opened'";
 const SET_OPENED_ASIDE: &str = "INSERT OR IGNORE INTO quarantine (at, source, ref, error)
     SELECT ?1, 'opened', chat || ' ' || target,
@@ -241,8 +287,7 @@ const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message 
 
 /// Keeps message `n` as this jawd keeps a view-once message, if an earlier one marked it, saying
 /// whether it changed: one of a kind that can't be opened once is marked no more, and one that can
-/// loses its caption from its row, its words taken out of search's segments as an erasure takes
-/// them, one with links noted for the whole merge of links_fts that takes theirs out.
+/// loses its caption from its row, its words taken out of search's indexes as an erasure takes them.
 pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
     let row: Option<(i64, String, bool, Option<String>)> =
         db.prepare_cached(MARKED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
@@ -254,19 +299,7 @@ pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<boo
     }
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = if once {
-        let linked = db.prepare_cached(LINKED)?.exists([n])?;
-        let began = Instant::now();
-        let hidden = erasing(db, || Ok(db.prepare_cached(UNCAPTIONED)?.execute(params![n, said, seq])? > 0))?;
-        stamps.securely_deleted(began.elapsed());
-        if hidden {
-            wal_to_empty(db, stamps)?;
-        }
-        if linked && hidden {
-            let now = now_ms();
-            db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;
-            stamps.links_erased(now);
-        }
-        hidden
+        unsaid(db, stamps, &[n], |_| Ok(db.prepare_cached(UNCAPTIONED)?.execute(params![n, said, seq])? > 0))?
     } else {
         db.prepare_cached(UNMARKED)?.execute(params![n, seq])? > 0
     };
