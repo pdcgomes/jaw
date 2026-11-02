@@ -1,6 +1,7 @@
-//! `voice.send`'s message: a stopped recording, sent to the chat it was recorded in as WhatsApp's
-//! voice message, a message of yours, as `send.media` sends a file. jaw's copy of the recording is
-//! kept in media's folder for files to send first, cloned where the disk can; then the message is
+//! `voice.send`'s message: a stopped recording, sent to the chat it was recorded in, or the one
+//! that chat has merged into since, with that chat's disappearing timer, as WhatsApp's voice
+//! message, a message of yours, as `send.media` sends a file. jaw's copy of the recording is kept
+//! in media's folder for files to send first, cloned where the disk can; then the message is
 //! written, pending, with its outbox row and the copy to make of its file, in one synced commit,
 //! before it's answered, so it's sent however jawd stops. Media makes the copy, which goes as it is,
 //! and uploads it, and the message goes once it's uploaded, in its chat's order. A voice message
@@ -54,12 +55,18 @@ pub(super) async fn send_voice(inner: &Arc<Inner>, note: Note) -> Result<VoiceSe
     {
         return Ok(sent);
     }
-    let _place = super::composing(inner, &[note.chat.as_str()]).await;
-    let chat = note.chat.clone();
+    // A recording's chat is fixed as it starts, so the chat it goes to is the one that's become of
+    // it, as the writer finds a message's: the same, or, merged since, the chat kept for its person.
+    let recorded = note.chat.clone();
+    let Some(chat) = query(inner, move |db| read::chat_named(db, &recorded)).await? else {
+        return Err(no_chat(&note.chat));
+    };
+    let _place = super::composing(inner, &[chat.as_str()]).await;
+    let named = chat.clone();
     let (found, me, kept_bytes) = query(inner, move |db| {
         let found: Option<(u32, i64, String)> = db
             .prepare_cached(CHAT_TO_SEND)?
-            .query_row([&chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_row([&named], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?;
         Ok((found, me(db)?, outgoing::kept(db)?.1))
     })
@@ -74,7 +81,7 @@ pub(super) async fn send_voice(inner: &Arc<Inner>, note: Note) -> Result<VoiceSe
     let timer = (ephemeral > 0).then(|| e2e::ContextInfo { expiration: Some(ephemeral), ..Default::default() });
     let raw = compose::voice_message(note.seconds, &note.waveform, timer);
     let written = Written::default();
-    let message = match row(&note.chat, &note.id, &raw, now_ms(), &me) {
+    let message = match row(&chat, &note.id, &raw, now_ms(), &me) {
         Ok(mut message) => {
             message.media = None;
             message

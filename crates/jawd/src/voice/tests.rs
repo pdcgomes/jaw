@@ -1098,3 +1098,76 @@ async fn a_disappearing_chats_timer_goes_with_it_and_it_goes_without_ffmpeg() {
     assert_eq!(audio.context_info.as_ref().and_then(|c| c.expiration), Some(86_400), "the chat's timer");
     assert_eq!(*rig.world.file_at(audio.direct_path.as_deref().unwrap()).unwrap(), file, "as it was, with no ffmpeg");
 }
+
+/// How many chats are merging into others now.
+async fn merging(rig: &Rig) -> i64 {
+    rig.store
+        .reads()
+        .query(Priority::Interactive, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0))?))
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_whose_chat_merges_goes_to_the_chat_kept_with_its_timer_before_the_fold_and_after() {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::recording(home.path(), tone(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+    // Nothing goes to WhatsApp until both are written, so nothing it answers moves the merge on.
+    rig.media.hold_making(true);
+    let lid = "100000000099@lid";
+    let from_lid = crate::store::Message {
+        chat: lid.into(),
+        id: "3EB0LID1".into(),
+        at: now_ms() - 60_000,
+        sender: Some(lid.into()),
+        kind: "text",
+        text: Some("olá".into()),
+        summary: "olá".into(),
+        live: true,
+        ..crate::store::Message::default()
+    };
+    let from_ana =
+        crate::store::Message { chat: ANA.into(), id: "3EB0ANA1".into(), sender: Some(ANA.into()), ..from_lid.clone() };
+    let timer = Chat { id: ANA.into(), ephemeral: Some(86_400), ..Chat::default() };
+    let changes = vec![Change::Message(from_lid), Change::Message(from_ana), Change::Chat(timer)];
+    rig.store.apply(Lane::Live, changes).await.unwrap();
+
+    // Recorded in her chat under her LID, then her LID and her number are known to be hers: that
+    // chat merges into the one under her number, which has a timer.
+    rig.call("voice.record", json!({ "chat": lid })).await.unwrap();
+    heard_all(&heard).await;
+    rig.call("voice.stop", json!({})).await.unwrap();
+    let hers =
+        crate::store::Person { jids: vec![lid.into(), ANA.into()], name: Some("Ana".into()), ..Default::default() };
+    rig.store.apply(Lane::Live, vec![Change::Person(hers)]).await.unwrap();
+    assert_eq!(merging(&rig).await, 1, "the merge has begun");
+    let during = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+    assert_eq!(rig.row(ANA, &during).await["kind"], "voice", "while it merges, it's in the chat kept");
+
+    // Recorded there again, and sent once the merge has ended and the chat under her LID is gone.
+    rig.call("voice.record", json!({ "chat": lid })).await.unwrap();
+    heard_all(&heard).await;
+    rig.call("voice.stop", json!({})).await.unwrap();
+    let folded = tokio::time::timeout(PATIENCE, async {
+        while merging(&rig).await > 0 {
+            rig.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+    });
+    assert!(folded.await.is_ok(), "the merge never ended");
+    let gone = rig.store.reads().query(Priority::Interactive, move |db| crate::store::read::chat_n(db, lid)).await;
+    assert_eq!(gone.unwrap(), None, "the chat under her LID is gone");
+    let after = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+    assert_eq!(rig.row(ANA, &after).await["kind"], "voice", "once it has ended, it's in the chat kept too");
+    assert!(rig.recordings().is_empty(), "{:?}", rig.recordings());
+
+    rig.media.hold_making(false);
+    for id in [&during, &after] {
+        rig.until(ANA, id, "sent", sent).await;
+        let chats: Vec<String> = rig.world.sends().into_iter().filter(|s| s.id == *id).map(|s| s.chat).collect();
+        assert_eq!(chats, [ANA], "{id} goes once, to her number");
+        let [message] = rig.sent(id).try_into().unwrap();
+        let audio = message.audio_message.as_deref().unwrap();
+        let expiration = audio.context_info.as_ref().and_then(|c| c.expiration);
+        assert_eq!((audio.ptt, expiration), (Some(true), Some(86_400)), "{id} carries the chat kept's timer");
+    }
+}
