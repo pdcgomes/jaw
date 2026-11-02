@@ -55,6 +55,34 @@ async fn below_the_floor_background_work_waits_until_the_disk_has_the_floor_and_
 }
 
 #[tokio::test]
+async fn while_the_free_space_cant_be_read_what_waits_for_room_does_as_it_did_when_it_last_could() {
+    let home = tempfile::tempdir().unwrap();
+    let (disk, fake) = Disk::faked(home.path(), config(), GB, SIZE);
+    fake.unreadable.store(true, Ordering::Relaxed);
+    assert!(disk.room(), "a disk never read has room");
+    fake.unreadable.store(false, Ordering::Relaxed);
+    assert!(!disk.room());
+    fake.unreadable.store(true, Ordering::Relaxed);
+    fake.free.store(10 * GB, Ordering::Relaxed);
+    assert!(!disk.room(), "short of room when last read, so work still waits");
+    let status = disk.status().unwrap();
+    assert!(status.paused.is_some(), "as status says: {status:?}");
+    assert_eq!(status.free, GB, "the free space last read");
+    let waiting = {
+        let disk = disk.clone();
+        tokio::spawn(async move { disk.wait_for_room().await })
+    };
+    tokio::time::sleep(POLL * 2).await;
+    assert!(!waiting.is_finished(), "it waits while the disk can't be read");
+    fake.unreadable.store(false, Ordering::Relaxed);
+    tokio::time::timeout(POLL * 20, waiting).await.expect("and goes on once it's read with room").unwrap();
+    fake.unreadable.store(true, Ordering::Relaxed);
+    fake.free.store(GB, Ordering::Relaxed);
+    assert!(disk.room(), "with room when last read, work goes on");
+    assert_eq!(disk.paused(), None);
+}
+
+#[tokio::test]
 async fn the_ballast_is_made_whole_given_up_and_made_again_once_theres_room() {
     let home = tempfile::tempdir().unwrap();
     let (disk, fake) = Disk::faked(home.path(), config(), 10 * GB, SIZE);

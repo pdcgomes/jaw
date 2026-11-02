@@ -65,12 +65,13 @@ enum Source {
     Fake(Arc<Fake>),
 }
 
-/// A disk's free space and size, as a test sets them.
+/// A disk's free space and size, as a test sets them, and whether they can be read.
 #[cfg(test)]
 #[derive(Default)]
 pub struct Fake {
     pub free: Arc<AtomicU64>,
     pub size: AtomicU64,
+    pub unreadable: std::sync::atomic::AtomicBool,
 }
 
 /// The watchdog of the disk jaw's folder is on, shared by everything that waits for its room.
@@ -106,7 +107,8 @@ impl Disk {
     /// As `watch`, with the free space and size `fake` says.
     #[cfg(test)]
     pub fn faked(home: &Path, config: Config, free: u64, size: u64) -> (Disk, Arc<Fake>) {
-        let fake = Arc::new(Fake { free: Arc::new(AtomicU64::new(free)), size: AtomicU64::new(size) });
+        let fake =
+            Arc::new(Fake { free: Arc::new(AtomicU64::new(free)), size: AtomicU64::new(size), ..Fake::default() });
         (Disk::new(Source::Fake(fake.clone()), config, Some(home.join(BALLAST))), fake)
     }
 
@@ -131,14 +133,15 @@ impl Disk {
             Source::None => None,
             Source::System(folder) => free_space(folder),
             #[cfg(test)]
-            Source::Fake(fake) => Some((fake.free.load(Ordering::Relaxed), fake.size.load(Ordering::Relaxed))),
+            Source::Fake(fake) => (!fake.unreadable.load(Ordering::Relaxed))
+                .then(|| (fake.free.load(Ordering::Relaxed), fake.size.load(Ordering::Relaxed))),
         }
     }
 
-    /// Whether the disk has room for background work and downloads, as it has now. One whose free
-    /// space can't be read has.
+    /// Whether the disk has room for background work and downloads, as it has now; while its free
+    /// space can't be read, as it had when it last could, which is room if it never could.
     pub fn room(&self) -> bool {
-        let Some((free, size)) = self.read() else { return true };
+        let Some((free, size)) = self.read() else { return self.0.paused.borrow().is_none() };
         let inner = &self.0;
         inner.free.store(free, Ordering::Relaxed);
         inner.size.store(size, Ordering::Relaxed);
