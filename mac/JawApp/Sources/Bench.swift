@@ -13,13 +13,16 @@ import QuartzCore
 /// - `open`: opening each of the first 20 chats, from the open to its messages drawn, p50 and p99.
 /// - `memory`: `phys_footprint` once the chat list and a chat are drawn and the app is quiet.
 /// - `idle`: wake-ups over a quiet minute, once the window has settled.
+/// - `pictures` and `library`: a fling through a chat of pictures, and through the library's grid.
 @MainActor
 enum Bench {
     static func run(_ what: String, model: AppModel) {
-        deadline(what == "idle" ? 120 : what == "pictures" ? 150 : 30)
+        deadline(what == "idle" ? 120 : what == "pictures" || what == "library" ? 150 : 30)
         switch what {
         case "pictures":
             BenchPictures.run(model)
+        case "library":
+            BenchLibrary.run(model)
         case "launch":
             model.firstRows = {
                 nextFrame {

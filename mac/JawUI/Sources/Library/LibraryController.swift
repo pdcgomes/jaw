@@ -355,6 +355,17 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         nameShown()
     }
 
+    /// How far down the grid is shown, its height and the height of it shown, whether its window
+    /// holds the kind's newest and oldest, and a scroll to a place in it, for the bench's fling.
+    public var gridShown: (top: CGFloat, height: CGFloat, shown: CGFloat, newest: Bool, oldest: Bool) {
+        let clip = scroll.contentView.bounds
+        return (clip.minY, laid.height, clip.height, holdsNewest, !window.older)
+    }
+
+    public func scrollGrid(to y: CGFloat) {
+        scroll(to: y)
+    }
+
     /// The items on screen, by id, in their order, as many as `library.shown` names.
     public var onScreen: [String] {
         Array(laid.indices(in: scroll.contentView.bounds).compactMap { laid.elements[$0].item }.prefix(LibraryShown.most))
