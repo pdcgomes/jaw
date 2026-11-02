@@ -68,7 +68,7 @@ fn target(to: &str) -> Result<PathBuf, Error> {
 }
 
 /// Waits for the copy's file to be in the cache, and says where; or why it can't be.
-async fn downloaded(inner: &Inner, message: i64, variant: &'static str) -> Result<String, Error> {
+pub(super) async fn downloaded(inner: &Inner, message: i64, variant: &'static str) -> Result<String, Error> {
     let mut committed = inner.store.committed();
     let waited = tokio::time::timeout(WAIT, async {
         loop {

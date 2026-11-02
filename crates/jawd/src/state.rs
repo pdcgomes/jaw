@@ -21,6 +21,7 @@ use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
 use crate::store::{Store, contacts, copies, kinds, links};
 use crate::sync::Shared;
+use crate::voice::Voice;
 use crate::work::Report;
 
 pub struct State {
@@ -48,6 +49,7 @@ pub struct State {
     settings: Option<Arc<Settings>>,
     following: Option<(crate::presence::Following, Arc<crate::organise::Checks>)>,
     media: Option<Media>,
+    voice: Option<Voice>,
 }
 
 impl State {
@@ -82,6 +84,7 @@ impl State {
             settings: None,
             following: None,
             media: None,
+            voice: None,
         })
     }
 
@@ -93,6 +96,16 @@ impl State {
 
     pub fn media(&self) -> Option<&Media> {
         self.media.as_ref()
+    }
+
+    /// Plays and records voice messages through `voice`.
+    pub fn with_voice(mut self, voice: Voice) -> State {
+        self.voice = Some(voice);
+        self
+    }
+
+    pub fn voice(&self) -> Option<&Voice> {
+        self.voice.as_ref()
     }
 
     /// What each interface is looking at: whether one is in front, and which chats they read.
@@ -315,6 +328,7 @@ impl State {
             presence: self.following.as_ref().map(|(following, _)| following.status()),
             folders: self.following.as_ref().map(|(_, checks)| checks.status()),
             media: self.media.as_ref().map(Media::status),
+            voice: self.voice.as_ref().map(Voice::status),
         }
     }
 

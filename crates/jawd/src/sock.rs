@@ -234,6 +234,7 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
         layout: None,
         settings: None,
     };
+    let _voice = VoiceEnded { state: state.clone(), connection: session.id };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
     // Finds and the requests on tasks of their own answer when they're done, so the next line,
@@ -417,6 +418,7 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
             let (reply, then) = match request.method.as_str() {
                 "link.logout" => logout(&state, request.id).await,
                 "layout.get" | "layout.set" => (layouts(&state, request, &client, from).await, None),
+                method if crate::voice::Voice::METHODS.contains(&method) => (voice(&state, request, from).await, None),
                 // Its answer is handed over while the settings are held, so `settings_set` hands
                 // it over itself.
                 "settings.set" => {
@@ -780,6 +782,32 @@ async fn answer_apart(state: &State, request: Request) -> Reply {
             }
         }
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+    }
+}
+
+/// A voice method, down the lane of the connection numbered `from`, whose ending stops what it plays.
+async fn voice(state: &State, request: Request, from: u64) -> Reply {
+    let id = request.id;
+    match state.voice() {
+        Some(voice) => match voice.call(&request.method, request.params, from).await {
+            Ok(result) => succeeded(id, &result),
+            Err(error) => failed(id, error),
+        },
+        None => failed(id, Error::new(code::INTERNAL, "this jawd plays and records nothing")),
+    }
+}
+
+/// What a connection plays stops once it ends, however it ends.
+struct VoiceEnded {
+    state: Arc<State>,
+    connection: u64,
+}
+
+impl Drop for VoiceEnded {
+    fn drop(&mut self) {
+        if let Some(voice) = self.state.voice() {
+            voice.ended(self.connection);
+        }
     }
 }
 

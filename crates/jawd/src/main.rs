@@ -18,6 +18,7 @@ mod sock;
 mod state;
 mod store;
 mod sync;
+mod voice;
 mod work;
 
 use std::os::unix::fs::PermissionsExt;
@@ -631,6 +632,8 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         send::Makers { previews: send::link::Previews::default(), media: Some(media.clone()) },
     )
     .await?;
+    let voice =
+        voice::Voice::start(media.clone(), pushes.clone(), jaw_voice::SystemSpeaker, jaw_voice::SystemMicrophone);
     let me = live.lock().expect("live state").me();
     typing.start(store.clone(), me, sending.hearing());
     let mut pools: Vec<Arc<dyn work::Report>> =
@@ -662,6 +665,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         .with_settings(settings)
         .with_following(following, checks)
         .with_media(media)
+        .with_voice(voice)
         .with_notifications(says)
         .without(&options.without);
     let state = Arc::new(state);
@@ -688,6 +692,9 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
 async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
     state.stop();
     let _ = std::fs::remove_file(socket);
+    if let Some(voice) = state.voice() {
+        voice.stop().await;
+    }
     if let Some(notifications) = notifications {
         notifications.abort();
     }

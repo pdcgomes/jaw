@@ -17,6 +17,7 @@ pub mod settings;
 pub mod sync;
 pub mod themes;
 pub mod vcard;
+pub mod voice;
 pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.
@@ -298,6 +299,9 @@ pub struct Status {
     /// The media cache, and what's downloading and waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<media::MediaStatus>,
+    /// What plays and records, the recordings folder, and the audio thread's counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<voice::VoiceStatus>,
 }
 
 /// Others' typing since jawd started: the chats with someone typing now; the changes WhatsApp sent,

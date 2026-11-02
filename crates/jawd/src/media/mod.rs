@@ -402,7 +402,75 @@ impl Media {
 
     /// The methods `call` answers.
     pub const METHODS: &[&str] = &["media.fetch", "media.save", "media.cancel"];
+
+    /// Voice message `id`'s file, as `voice.play` plays it, found in `chat` or in any chat as
+    /// `media.fetch` finds one and refused as it refuses one, and error 4 for a message that isn't a
+    /// voice message.
+    pub async fn voice_file(&self, id: &str, chat: Option<&str>) -> Result<VoiceCopy, Error> {
+        let inner = &self.inner;
+        let (looked, within) = (id.to_string(), chat.map(str::to_string));
+        let found = inner
+            .store
+            .reads()
+            .query(Priority::Interactive, move |db| {
+                let Some(n) = crate::store::outgoing::message_n(db, &looked, within.as_deref())? else {
+                    return Ok(None);
+                };
+                let kind = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?));
+                Ok(db.prepare_cached(KIND)?.query_row([n], kind).optional()?)
+            })
+            .await
+            .map_err(|e| internal("read jaw.db", e))?;
+        if let Some((kind, _)) = found.as_ref().filter(|(kind, _)| kind != "voice") {
+            return Err(Error::new(code::NOT_ALLOWED, format!("message {id} is a {kind}, not a voice message")));
+        }
+        let named = named(inner, id, chat, Variant::Sd).await?;
+        Ok(VoiceCopy {
+            message: named.message,
+            sha256: named.sha256,
+            path: named.local.map(|p| inner.home.join(p)),
+            seconds: found.and_then(|(_, seconds)| seconds),
+        })
+    }
+
+    /// Wants `copy`'s file now, ahead of what downloads by itself, synced, as `media.fetch` wants
+    /// one.
+    pub async fn fetch_now(&self, copy: &VoiceCopy) -> Result<(), Error> {
+        let inner = &self.inner;
+        let want = Change::Media(Step::Want { message: copy.message, variant: "sd", at: now_ms(), asked: true });
+        durably(inner, vec![want], "keep that the file was asked for").await?;
+        if let Some(sha256) = &copy.sha256 {
+            inner.downloads.promote(&fetch::key(sha256));
+        }
+        inner.schedule.wake();
+        Ok(())
+    }
+
+    /// Waits for message `message`'s file to be in the cache, and says where; or why it can't be.
+    pub async fn downloaded(&self, message: i64) -> Result<PathBuf, Error> {
+        let path = save::downloaded(&self.inner, message, "sd").await?;
+        Ok(self.inner.home.join(path))
+    }
+
+    /// The file named `sha256` is used now, so the cache keeps it longest.
+    pub async fn used(&self, sha256: Vec<u8>) {
+        let used = Change::Media(Step::Used { sha256, at: now_ms() });
+        let _ = self.inner.store.apply(crate::store::Lane::Live, vec![used]).await;
+    }
 }
+
+/// A voice message's file: its message, its copy's hash, its whole path while it's in the cache, and
+/// how long its message says it is.
+#[derive(Clone, Debug)]
+pub struct VoiceCopy {
+    pub message: i64,
+    pub sha256: Option<Vec<u8>>,
+    pub path: Option<PathBuf>,
+    pub seconds: Option<f64>,
+}
+
+const KIND: &str = "SELECT m.kind, md.seconds FROM messages m
+    LEFT JOIN media md ON md.message = m.n AND md.variant = 'sd' WHERE m.n = ?1";
 
 fn params_of<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, Error> {
     let params = if params.is_null() { Value::Object(Default::default()) } else { params };

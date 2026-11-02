@@ -1286,6 +1286,7 @@ dependencies = [
  "jaw-media",
  "jaw-proto",
  "jaw-version",
+ "jaw-voice",
  "libc",
  "nucleo-matcher",
  "prost",

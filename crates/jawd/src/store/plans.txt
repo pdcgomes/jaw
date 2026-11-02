@@ -87,6 +87,11 @@ SELECT made - settled, 0 FROM media_made WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/media/mod.rs
+SELECT m.kind, md.seconds FROM messages m LEFT JOIN media md ON md.message = m.n AND md.variant = 'sd' WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH md USING PRIMARY KEY (message=? AND variant=?) LEFT-JOIN
+
+-- src/media/mod.rs
 SELECT m.n, m.deleted, m.view_once, md.sha256, f.path, md.name, md.variant FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN media md ON md.message = m.n AND md.variant = ?3 LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE c.id = ?1
     SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)

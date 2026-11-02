@@ -19,6 +19,7 @@ jaw-client.workspace = true
 jaw-media.workspace = true
 jaw-proto.workspace = true
 jaw-version.workspace = true
+jaw-voice.workspace = true
 libc.workspace = true
 nucleo-matcher.workspace = true
 prost.workspace = true
