@@ -59,6 +59,7 @@ fmt:
 # account, as one table in target/perf/ (scripts/perf.py says how; --quick leaves out the slowest).
 perf: engine
 	$(CARGO) build --release -p jawd -p jaw
+	$(CARGO) test --release -p jawd --bin jawd --no-run
 	python3 scripts/perf.py
 
 # protoc-gen-go at the version engine/go.mod pins, and buf, which compiles the .proto itself.

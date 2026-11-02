@@ -13,9 +13,10 @@ opens, start, memory and wake-ups. Then the engine's round trip (`jawd bench lin
 the Go engines, the Go engine unlinked so nothing reaches WhatsApp), the windows' fan-out
 (`jawd bench feed`), the store alone (`jawd bench store`), jaw's own flood with pictures
 (`jaw bench`), a 12-megapixel photo (`media-bench`), a 12-megapixel photo's arrival to its 256
-pixel preview (`jawd bench media`) and a 12-megapixel photo of yours sent in SD and HD while texts
-arrive (`jawd bench media-out`); --quick leaves out the last five, and --small runs everything on
-50,000 messages and short floods, to check the harness itself, not the budgets.
+pixel preview (`jawd bench media`), a 12-megapixel photo of yours sent in SD and HD while texts
+arrive (`jawd bench media-out`) and the outbox's background steps in a group of a thousand (their
+tests, which time each step only in a release build); --quick leaves out the last six, and --small
+runs everything on 50,000 messages and short floods, to check the harness itself, not the budgets.
 
 Each row says the load average while it ran. Everything runs with JAW_HOME and TMPDIR in one
 temporary folder, removed afterwards, so nothing touches jaw's own folder; only the processes it
@@ -59,6 +60,12 @@ WAL_LIMIT = 64
 PHOTOS_IN = 3 if SMALL else 10
 # The 12-megapixel photos `jawd bench media-out` sends, one at a time.
 PHOTOS_OUT = 3 if SMALL else 10
+# The tests that time the outbox's steps of regrouping and letting go, each a background
+# transaction, in a group of 1,024.
+OUTBOX_STEPS = [
+    "store::write::outbox::tests::in_a_group_of_a_thousand_a_step_of_regrouping_looks_at_one_message_so_it_stays_short",
+    "store::write::outbox::tests::when_most_of_a_thousand_leave_steps_are_sized_by_who_was_sent_to_and_skip_what_is_read",
+]
 
 
 def load() -> float:
@@ -378,6 +385,17 @@ def main() -> int:
             "shown_during": numbers(r"a text shown to the interface, while a photo went" + row, text),
         }
 
+    def background():
+        command = ["cargo", "test", "--release", "-q", "-p", "jawd", "--bin", "jawd", "--", "--exact", "--nocapture", "--test-threads=1", *OUTBOX_STEPS]
+        run(command, raw, "background", env, 1800)
+        found = re.findall(
+            r"steps of (regrouping|letting go) at their quickest of three: (\d+), ([\d.]+) ms at the median, ([\d.]+) ms at most, (\d+) of 3 ms or more",
+            (raw / "background.log").read_text(),
+        )
+        if len(found) != 2 * len(OUTBOX_STEPS):
+            raise RuntimeError(f"the outbox's step tests timed {len(found)} kinds of step; see {raw / 'background'}.log")
+        return {"steps": [(what, int(n), float(median), float(most), int(over)) for what, n, median, most, over in found]}
+
     started = time.monotonic()
     load_before = os.getloadavg()
     try:
@@ -395,6 +413,7 @@ def main() -> int:
             step("photo", photo)
             step("photo in", photo_in)
             step("photo out", photo_out)
+            step("background", background)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     load_after = os.getloadavg()
@@ -579,6 +598,15 @@ def render(r: dict, steps: dict) -> str:
     for n, (name, label, d) in enumerate((w for w in walls if "wal_peak_mib" in w[2])):
         budget, target = ("The WAL", f"under {WAL_LIMIT} MiB, as Data integrity bounds it") if n == 0 else ("", "")
         row(budget, target, f"{d['wal_peak_mib']:.0f} MiB {label}", "jaw.db-wal's size on disk at most, ten times a second", name, d["wal_peak_mib"] <= WAL_LIMIT)
+
+    if "background" in r:
+        steps = r["background"]["steps"]
+        n, over, most = sum(s[1] for s in steps), sum(s[4] for s in steps), max(s[3] for s in steps)
+        regrouping, letting_go = (" and ".join(ms(s[2]) for s in steps if s[0] == what) for what in ("regrouping", "letting go"))
+        row("A background transaction", "3 ms, commit included, as Storage caps it", f"{ms(most)} at most, {over} of {n:,} at 3 ms or more",
+            f"the outbox's steps of regrouping and letting go in a group of 1,024, each step at its quickest of three runs, from their "
+            f"tests in a release build, which allow one in thirty at 3 ms; the medians {regrouping} regrouping and {letting_go} "
+            f"letting go, with one member leaving and with 1,000", "background", over == 0)
 
     if "photo" in r:
         for n, (name, size, took) in enumerate(r["photo"]["photos"]):

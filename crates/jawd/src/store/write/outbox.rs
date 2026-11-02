@@ -2398,11 +2398,21 @@ mod tests {
         // ms; what a step may do is checked exactly, in `steps_in_a_thousand`.
         for (what, took) in [("regrouping", &quickest.0), ("letting go", &quickest.1)] {
             let over = took.iter().filter(|took| **took >= Duration::from_millis(3)).count();
+            let slowest = took.iter().max().unwrap();
+            let mut sorted = took.clone();
+            sorted.sort();
+            let ms = |took: Duration| took.as_secs_f64() * 1e3;
+            // `make perf` reads this line.
+            eprintln!(
+                "steps of {what} at their quickest of three: {}, {:.2} ms at the median, {:.2} ms at most, {over} of 3 ms or more",
+                took.len(),
+                ms(sorted[sorted.len() / 2]),
+                ms(*slowest)
+            );
             assert!(
                 over <= 1 + took.len() / 30,
                 "{over} steps of {what} took 3 ms or more at their quickest: {took:?}"
             );
-            let slowest = took.iter().max().unwrap();
             assert!(*slowest < Duration::from_millis(15), "a step of {what} took {slowest:?} at its quickest");
         }
         steps
