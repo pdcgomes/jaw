@@ -40,9 +40,23 @@ pub(super) fn panic_if_asked(id: &str) {
     panic!("the conversion of {id} panics once it has made its changes, as a test asks");
 }
 
-/// How many times the message `id` of PANICS has panicked as it was converted.
+/// How many times the message `id` of PANICS has panicked as it was converted, or for BATCH_PANICS
+/// a batch.
 fn panicked(id: &str) -> usize {
     PANICKED.lock().unwrap().get(id).copied().unwrap_or_default()
+}
+
+/// An inbox row of this kind makes its whole batch's conversion panic, outside every row's own
+/// catch, as only the batch's own bookkeeping could.
+const BATCH_PANICS: &str = "test: a batch that panics";
+
+/// The hook each batch's conversion runs before its rows, which panics for a batch holding a row of
+/// BATCH_PANICS, counting each time.
+pub(super) fn panic_for_the_batch_if_asked(rows: &[Row]) {
+    if rows.iter().any(|row| row.kind == BATCH_PANICS) {
+        *PANICKED.lock().unwrap().entry(BATCH_PANICS.to_string()).or_default() += 1;
+        panic!("a batch whose conversion panics outside its rows', as a test asks");
+    }
 }
 
 #[test]
@@ -468,6 +482,22 @@ fn a_batch_keeps_what_each_row_converts_to_besides_its_changes_and_nothing_of_a_
         .collect();
     assert_eq!(ends, ["drained 2", "drained 3", "drained 4", "quarantined 5", "quarantined 6", "drained 7"]);
     assert_eq!((panicked("3EB0PANICSBATCH"), panicked("3EB0PANICSBATCHNOTE")), (1, 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_whose_conversion_panics_outside_its_rows_is_read_again_after_a_pause_that_doubles() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.inbox(BATCH_PANICS, 0, Vec::new(), None);
+    until("the inbox", || store.count("inbox").unwrap() == 1).await;
+    let converter = converting(&store);
+    until("the first try", || panicked(BATCH_PANICS) >= 1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    converter.abort();
+    // Tried again after 10 ms, then 20, 40, 80, 160, 320 and 640 ms more.
+    let tries = panicked(BATCH_PANICS);
+    assert!((2..=9).contains(&tries), "tried {tries} times in a second");
+    assert_eq!(store.count("inbox").unwrap(), 1, "its row stays");
 }
 
 #[tokio::test(flavor = "multi_thread")]

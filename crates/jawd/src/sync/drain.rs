@@ -76,6 +76,8 @@ impl Converted {
 /// does. Each row converts on its own, so one whose conversion panics leaves nothing of itself:
 /// it stays in the inbox too, kept in quarantine, and the rows after it go on.
 pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
+    #[cfg(test)]
+    super::tests::panic_for_the_batch_if_asked(rows);
     let mut out = Converted::default();
     for row in rows {
         match catch_unwind(AssertUnwindSafe(|| convert_row(row, me))) {
@@ -434,7 +436,17 @@ pub async fn inbox(
         if from_before {
             started.get_or_insert_with(Instant::now);
         }
-        let Ok(mut converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
+        let mut converted = match tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await {
+            Ok(converted) => converted,
+            // A panic outside every row's own catch: the rows are read again after a pause, as when
+            // they can't be stored.
+            Err(e) => {
+                eprintln!("jawd: converting the inbox stopped, so it's tried again in {pause:?}: {e}");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(RETRY_MOST);
+                continue;
+            }
+        };
         let lane = if from_before { Lane::Background } else { Lane::Live };
         let thumbnailing = thumbnailing(&mut converted, lane);
         let applied = if from_before {
@@ -535,7 +547,15 @@ pub async fn history_raw(store: Store, live: Shared) {
         let last = rows.last().map(|(chat, id, _)| (chat.clone(), id.clone()));
         let me = super::stored_me(&live, "the history kept raw").await;
         started.get_or_insert_with(Instant::now);
-        let Ok(changes) = tokio::task::spawn_blocking(move || history_rows(rows, &me)).await else { return };
+        let changes = match tokio::task::spawn_blocking(move || history_rows(rows, &me)).await {
+            Ok(changes) => changes,
+            Err(e) => {
+                eprintln!(
+                    "jawd: converting the history kept raw stopped, so what's left of it waits for the next start: {e}"
+                );
+                return;
+            }
+        };
         match store.apply(Lane::Background, changes).await {
             Ok(applied) => {
                 if applied.quarantined > 0 {
