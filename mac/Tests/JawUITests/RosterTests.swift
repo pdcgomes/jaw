@@ -4,10 +4,10 @@ import JawThemes
 @testable import JawUI
 import Testing
 
-/// The roster: under All, grouped by your top folders, then Others, each with who's around listed and
-/// the rest folded; under a folder, its people as jawd sorts them, those jawd has no last seen for
-/// folded; someone typing or recording in their chat around and listed; faint where jawd isn't following someone;
-/// how each is, in words; and more people asked for as it scrolls.
+/// The roster: under All, grouped by your top folders, then Others, each with who's around listed
+/// and the rest folded; under a folder, its people as jawd sorts them, those jawd has no last seen
+/// for folded; someone typing or recording in their chat around and listed; faint where jawd isn't
+/// following someone; how each is, in words; and more people asked for as it scrolls.
 
 /// The roster's lines as words.
 func lineWords(_ lines: [RosterLine]) -> [String] {

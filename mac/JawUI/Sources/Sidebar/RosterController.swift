@@ -371,9 +371,10 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 }
 
 /// Someone's row: a dot in the online colour while they're around, their avatar in its colour, and
-/// their name and how they are, both faint where jawd isn't following them now, unless they're typing
-/// or recording, which shows only while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
-/// one element, saying "last known" after how they are where it's faint.
+/// their name and how they are, both faint where jawd isn't following them now, unless they're
+/// typing or recording, which shows only while jawd hears it; their about text, when they have one,
+/// as its tooltip. VoiceOver reads it as one element, saying "last known" after how they are where
+/// it's faint.
 final class PersonCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("person")
     let dot = NSView()
