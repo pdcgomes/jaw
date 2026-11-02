@@ -11,22 +11,24 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::drain::{self, Row};
 use super::*;
 use crate::engine::EngineError;
+use crate::store::Drained;
 use crate::store::read::{self, Around};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
 const GROUP: &str = "120363000000000001@g.us";
 const AT: i64 = 1_792_000_000_000;
-/// Messages whose conversion panics once it has made its changes, in the inbox or in history: those
-/// whose ID starts with this, each test's with IDs of its own. Their panic says which message it
-/// is, but for those whose ID starts with PANICS_PLAINLY, whose panic says only a literal.
+/// Messages whose conversion panics once it has made its changes, or a notification its offer, in
+/// the inbox or in history: those whose ID starts with this, each test's with IDs of its own. Their
+/// panic says which message it is, but for those whose ID starts with PANICS_PLAINLY, whose panic
+/// says only a literal.
 const PANICS: &str = "3EB0PANICS";
 const PANICS_PLAINLY: &str = "3EB0PANICSPLAINLY";
 
 /// How many times each message of PANICS has panicked as it was converted, by its ID.
 static PANICKED: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
 
-/// The hook each conversion runs once it has made its changes, which panics for a message of
-/// PANICS, counting each time.
+/// The hook each conversion runs once it has made its changes or its offer, which panics for a
+/// message of PANICS, counting each time.
 pub(super) fn panic_if_asked(id: &str) {
     if !id.starts_with(PANICS) {
         return;
@@ -408,6 +410,64 @@ async fn a_history_row_whose_conversion_panics_is_kept_in_quarantine_once_and_th
         kept = now;
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
+}
+
+/// A history notification from the phone, as the engine hands it over, naming the blob at `path`.
+fn notification(id: &str, path: &str) -> pb::Message {
+    let notification = e2e::HistorySyncNotification { direct_path: Some(path.into()), ..Default::default() };
+    let protocol = e2e::ProtocolMessage { history_sync_notification: Some(notification), ..Default::default() };
+    let message = e2e::Message { protocol_message: Some(Box::new(protocol)), ..Default::default() };
+    live_message("351910000001@s.whatsapp.net", "", id, AT, message)
+}
+
+#[test]
+fn a_batch_keeps_what_each_row_converts_to_besides_its_changes_and_nothing_of_a_row_that_panics() {
+    let name = |name: &str| {
+        app_state(&["setting_pushName"], |v| {
+            v.push_name_setting = Some(action::PushNameSetting { name: Some(name.into()) })
+        })
+    };
+    let preview = |id: &str, url: &str, jpeg: &[u8]| {
+        live_message(ANA, ANA, id, AT, previewed(&format!("vê {url}"), url, Some(jpeg.to_vec()))).encode_to_vec()
+    };
+    let (thumbnail, its_own) = (jpeg(40, 30), jpeg(30, 40));
+    let rows = [
+        ("message", notification("3EB0NOTE", "here").encode_to_vec()),
+        ("picture", pb::Picture { jid: ANA.into(), picture_id: "1".into(), ..Default::default() }.encode_to_vec()),
+        ("app_state", name("Pedro")),
+        ("message", preview("p1", "www.8a.nu/sintra", &thumbnail)),
+        // Each panics once it has made what it makes: a preview's thumbnail, a notification's offer.
+        ("message", preview("3EB0PANICSBATCH", "www.8a.nu/peneda", &its_own)),
+        ("message", notification("3EB0PANICSBATCHNOTE", "there").encode_to_vec()),
+        ("app_state", name("Pedro Gomes")),
+    ];
+    let rows: Vec<Row> =
+        rows.into_iter().zip(1..).map(|((kind, payload), seq)| Row { seq, kind: kind.into(), payload }).collect();
+    let drain::Converted { changes, offers, my_name, pictures, thumbnails } = drain::convert_rows(&rows, &me());
+    let offers: Vec<(i64, &str)> = offers.iter().map(|offer| (offer.seq, offer.id.as_str())).collect();
+    assert_eq!(offers, [(1, "3EB0NOTE")], "the notification's offer, and not the one's that panicked");
+    assert_eq!(pictures, [ANA], "the chat whose picture changed");
+    assert_eq!(my_name.as_deref(), Some("Pedro Gomes"), "the later of the two names");
+    let sha = crate::store::thumbnails::sha256(&thumbnail);
+    assert_eq!(thumbnails, [(sha, thumbnail)], "the preview's thumbnail, and not the one's that panicked");
+    let previews: Vec<&str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Thumbnail { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(previews, ["p1"]);
+    let ends: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Drained(Drained::Inbox(seq)) => Some(format!("drained {seq}")),
+            Change::Quarantined { source: "inbox", reference, .. } => Some(format!("quarantined {reference}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, ["drained 2", "drained 3", "drained 4", "quarantined 5", "quarantined 6", "drained 7"]);
+    assert_eq!((panicked("3EB0PANICSBATCH"), panicked("3EB0PANICSBATCHNOTE")), (1, 1));
 }
 
 #[tokio::test(flavor = "multi_thread")]

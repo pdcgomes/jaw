@@ -63,11 +63,12 @@ pub fn history_notification(message: &e2e::Message) -> Option<&e2e::HistorySyncN
 impl Converted {
     /// Takes in what one row converted to, after what the rows before it did.
     fn join(&mut self, row: Converted) {
-        self.changes.extend(row.changes);
-        self.offers.extend(row.offers);
-        self.my_name = row.my_name.or(self.my_name.take());
-        self.pictures.extend(row.pictures);
-        self.thumbnails.extend(row.thumbnails);
+        let Converted { changes, offers, my_name, pictures, thumbnails } = row;
+        self.changes.extend(changes);
+        self.offers.extend(offers);
+        self.my_name = my_name.or(self.my_name.take());
+        self.pictures.extend(pictures);
+        self.thumbnails.extend(thumbnails);
     }
 }
 
@@ -274,6 +275,8 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
             id: web.key.id.clone().unwrap_or_default(),
             notification: notification.encode_to_vec(),
         });
+        #[cfg(test)]
+        super::tests::panic_if_asked(web.key.id.as_deref().unwrap_or_default());
         return false;
     }
     let info = live.info.unwrap_or_default();
