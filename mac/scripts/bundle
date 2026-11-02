@@ -2,9 +2,9 @@
 # `make mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed.
 #
 # jawd and jaw are built for release here, since the build Mac has no Rust or Go, jawd with its
-# Info.plist embedded so macOS asks for the microphone in jaw's words, and jaw-engine by make engine,
-# which stamps it with the version jaw and jawd say; the app is built in Release on
-# the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
+# Info.plist, which its own build embeds, so macOS asks for the microphone in jaw's words, and
+# jaw-engine by make engine, which stamps it with the version jaw and jawd say; the app is built in
+# Release on the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
 # helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and
 # everything is signed from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else
 # the team's Developer ID Application identity by its SHA-1, else ad hoc, which runs here only.
@@ -16,8 +16,7 @@ out="mac/build/release"
 app="$out/Jaw.app"
 
 echo "==> jawd, jaw and jaw-engine for release"
-cargo rustc --release -p jawd --bin jawd --quiet -- \
-    -C link-arg=-Wl,-sectcreate,__TEXT,__info_plist,"$repo/mac/JawApp/Helpers/jawd-Info.plist"
+cargo build --release -p jawd --bin jawd --quiet
 cargo build --release -p jaw --bin jaw --quiet
 make -s engine
 

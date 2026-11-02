@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-    Embedded in jawd's binary (__TEXT,__info_plist) by `make mac`, so macOS asks for the microphone
-    in jaw's words, once, for a jawd signed with a stable identity.
+    Embedded in jawd's binary (__TEXT,__info_plist) by jawd's build on macOS (crates/jawd/build.rs),
+    so macOS asks for the microphone in jaw's words, once, for a jawd signed with a stable identity.
 -->
 <plist version="1.0">
 <dict>
