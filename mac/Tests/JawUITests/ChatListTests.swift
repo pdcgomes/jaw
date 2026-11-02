@@ -214,7 +214,7 @@ func `an unread count sits in the middle of its badge`(scale: Int) throws {
     #expect(!inSight(community.id) && !list.all.contains { $0.community == community.id }, "closed, and out of sight")
     list.showGroups(of: community.id)
     let at = try #require(list.all.firstIndex { $0.id == community.id })
-    #expect(Set(list.all[at + 1 ... at + 2].map(\.name)) == ["Sintra 1", "Sintra 2"] && inSight(community.id), "opened and scrolled to at once")
+    #expect(Set(list.all.dropFirst(at + 1).prefix(2).map(\.name)) == ["Sintra 1", "Sintra 2"] && inSight(community.id), "opened and scrolled to at once")
 
     list.show(folder: "communities")
     list.showGroups(of: community.id)
