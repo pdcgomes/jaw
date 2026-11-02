@@ -103,6 +103,24 @@ func content(width: CGFloat, laidOut: Bool = true) -> WindowContent {
     #expect(c.bar.status.rootView.needs.map(\.id) == [waiting.id])
 }
 
+@MainActor @Test func `a folder's empty list says no chat is open while jawd has chats, not No chats yet, and jawd away leaves the panes drawn`() {
+    let c = content(width: 1180)
+    func show(_ situation: Situation, hasChats: Bool, panes: WindowContent.Panes? = nil) {
+        c.show(situation, chats: [], hasChats: hasChats, focused: nil, panes: panes, roles: Catalog.jaw.dark, now: Date(),
+               actions: WindowContent.Actions())
+    }
+    let up = Situation(reach: .up, connection: Connection(state: .online))
+    show(up, hasChats: true)
+    #expect(c.detail.stateHost?.rootView.kind == .noChat, "an empty folder of yours, with no pane open, while the account has chats")
+    show(up, hasChats: false)
+    #expect(c.detail.stateHost?.rootView.kind == .noChats, "No chats yet only when jawd has none")
+    let pane = NSView()
+    let grid = PaneGrid(cols: [0, 1], rows: [0, 1], slots: [.init(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: "ana")])
+    show(Situation(reach: .unreachable(why: "nothing answers", retry: 2), connection: Connection(state: .online)), hasChats: true,
+         panes: WindowContent.Panes(grid: grid, views: [1: pane], focused: 1, box: nil, look: PaneLook()))
+    #expect(c.detail.shown === c.detail.panesArea && pane.superview != nil, "the panes stay drawn while jawd is away, not its asleep view")
+}
+
 @MainActor @Test func `the status line is set again only when what it draws changes, its dots only for the people it names`() {
     let ana = ChatRow(id: "ana", v: 1, sort: "3", name: "Ana", unread: 2), rui = ChatRow(id: "rui", v: 1, sort: "2", name: "Rui", unread: 1)
     let climbers = ChatRow(id: "climbers", v: 1, sort: "1", kind: .group, name: "Climbers", unread: 4)
