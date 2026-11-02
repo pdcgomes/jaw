@@ -418,12 +418,20 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
 
     // MARK: - Selecting, as the terminal's keys move
 
+    /// Says words to VoiceOver as they happen, as the selection moving says the item it's on.
+    var announce: @MainActor (String) -> Void = { words in
+        NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
+                             userInfo: [.announcement: words, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
     public func select(_ id: String?) {
+        let moved = id != selected
         selected = id
         for case let item as LibraryGridItem in collection.visibleItems() {
             item.cell.selected = item.cell.item?.id == id && id != nil
         }
         guard let id, let i = laid.element(of: id) else { return }
+        if moved, let item = selectedItem { announce(LibraryDrawing.spoken(item, context)) }
         let frame = laid.elements[i].frame
         let clip = scroll.contentView.bounds
         // A heading above the item shows with it.
@@ -506,39 +514,83 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         return first === root || first.isDescendant(of: root)
     }
 
-    /// An item's menu: Open, Go to Message, and for a file what's done with it, or a link's address.
+    /// Something to do with an item, as its menu and VoiceOver offer it, with its key, and whether a
+    /// separator comes before it in the menu.
+    struct Action {
+        let title: String
+        var key = ""
+        var mods: NSEvent.ModifierFlags = []
+        var apart = false
+        let run: () -> Void
+    }
+
+    /// What can be done with an item, selected first: Open, Go to Message, and for a file what's done
+    /// with it, or a link's address.
+    func actions(for item: LibraryRow) -> [Action] {
+        var all = [
+            Action(title: item.kind == .link ? "Open in Browser" : item.kind == .voice ? "Play" : "Quick Look", key: "\r") { [weak self] in
+                self?.openSelected()
+            },
+            Action(title: "Go to Message", key: "\r", mods: .command) { [weak self] in self?.goToSelected() },
+        ]
+        if MediaOffer.of(item) != nil {
+            for (title, act) in [("Save to Downloads", MediaOffer.Act.save), ("Show in Finder", .reveal)] {
+                all.append(Action(title: title, apart: act == .save) { [weak self] in
+                    guard let self else { return }
+                    host?.library(self, media: act, item: item)
+                })
+            }
+        }
+        if let url = item.link?.url {
+            all.append(Action(title: "Copy Link", apart: true) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+            })
+        }
+        return all
+    }
+
+    /// An item's menu: what can be done with it, the pane taking the keys and the item selected.
     func menu(for cell: LibraryCell) -> NSMenu? {
         guard let item = cell.item else { return nil }
         host?.libraryFocused(self)
         select(item.id)
         let menu = NSMenu()
-        func add(_ title: String, _ key: String = "", _ mods: NSEvent.ModifierFlags = [], _ run: @escaping () -> Void) {
-            let i = ClosureItem(title: title, run: run)
-            i.keyEquivalent = key
-            i.keyEquivalentModifierMask = mods
+        for action in actions(for: item) {
+            if action.apart { menu.addItem(.separator()) }
+            let i = ClosureItem(title: action.title, run: action.run)
+            i.keyEquivalent = action.key
+            i.keyEquivalentModifierMask = action.mods
             menu.addItem(i)
         }
-        add(item.kind == .link ? "Open in Browser" : item.kind == .voice ? "Play" : "Quick Look", "\r", []) { [weak self] in self?.openSelected() }
-        add("Go to Message", "\r", .command) { [weak self] in self?.goToSelected() }
-        if MediaOffer.of(item) != nil {
-            menu.addItem(.separator())
-            add("Save to Downloads") { [weak self] in
-                guard let self else { return }
-                host?.library(self, media: .save, item: item)
-            }
-            add("Show in Finder") { [weak self] in
-                guard let self else { return }
-                host?.library(self, media: .reveal, item: item)
-            }
-        }
-        if let url = item.link?.url {
-            menu.addItem(.separator())
-            add("Copy Link") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url, forType: .string)
-            }
-        }
         return menu
+    }
+
+    /// An item's menu as VoiceOver's actions on it, each taking the keys and selecting the item as
+    /// it's done, as the menu does as it opens.
+    func accessibilityActions(for cell: LibraryCell) -> [NSAccessibilityCustomAction] {
+        guard let item = cell.item else { return [] }
+        return actions(for: item).map { action in
+            NSAccessibilityCustomAction(name: action.title) { [weak self] in
+                guard let self else { return false }
+                host?.libraryFocused(self)
+                select(item.id)
+                action.run()
+                return true
+            }
+        }
+    }
+
+    /// The selected item's file, as the Message menu's Save to Downloads and Show in Finder take it
+    /// while the pane is focused.
+    public var selectedOffer: MediaOffer? {
+        selectedItem.flatMap { MediaOffer.of($0) }
+    }
+
+    /// Saves the selected item's file to Downloads, or shows it in the Finder.
+    public func media(_ act: MediaOffer.Act) {
+        guard let item = selectedItem, MediaOffer.of(item) != nil else { return }
+        host?.library(self, media: act, item: item)
     }
 
     // MARK: - The header and the strip
@@ -585,6 +637,7 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         cell.pictures = pictures
         cell.clicked = { [weak self] cell, clicks in self?.clicked(cell, clicks) }
         cell.menuFor = { [weak self] cell in self?.menu(for: cell) }
+        cell.actionsFor = { [weak self] cell in self?.accessibilityActions(for: cell) ?? [] }
         cell.show(element.what, item: row, context: context, selected: row != nil && row?.id == selected)
         return item
     }

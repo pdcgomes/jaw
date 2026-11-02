@@ -16,12 +16,14 @@ final class Asked: LibraryHost {
     var opened: [(LibraryRow, [LibraryRow])] = []
     var went: [LibraryRow] = []
     var shown: [[String]] = []
+    var media: [(MediaOffer.Act, LibraryRow)] = []
     var closed = 0
     func library(_: LibraryController, watch filter: LibraryFilter, _ place: Place) { watched.append((filter, place)) }
     func library(_: LibraryController, move place: Place) { moved.append(place) }
     func library(_: LibraryController, open item: LibraryRow, among: [LibraryRow]) { opened.append((item, among)) }
     func library(_: LibraryController, goTo item: LibraryRow) { went.append(item) }
     func library(_: LibraryController, shown items: [String]) { shown.append(items) }
+    func library(_: LibraryController, media act: MediaOffer.Act, item: LibraryRow) { media.append((act, item)) }
     func libraryClose(_: LibraryController) { closed += 1 }
 }
 

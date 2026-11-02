@@ -129,13 +129,22 @@ extension AppModel {
             add(Command("message.\(id)", title, phrase: phrase, detail: "the selected message's", hint: key, place: .message, group: 2,
                         enabled: enabled) { [weak self] in self?.conversation?.media(act) })
         }
+        // Saving and showing a file act on a library's selected item too, while its pane is focused.
+        let library: @MainActor @Sendable () -> LibraryController? = { [weak self] in self?.focusedLibrary }
+        func itemFileCommand(_ id: String, _ title: String, _ phrase: String, _ key: String?, _ act: MediaOffer.Act) {
+            let enabled: @MainActor @Sendable () -> Bool = { library().map { $0.selectedOffer != nil } ?? (offer() != nil) }
+            add(Command("message.\(id)", title, says: { (phrase, library() == nil ? "the selected message's" : "the selected item's") },
+                        hint: key, place: .message, group: 2, enabled: enabled) { [weak self] in
+                if let library = library() { library.media(act) } else { self?.conversation?.media(act) }
+            })
+        }
         fileCommand("look", "Quick Look", "Look at this file", "Space", .look)
         fileCommand("open", "Open", "Open this file in its app", "⌘↩", .open)
         add(Command("message.open.with", "Open With", place: .message, group: 2, enabled: { offer()?.isHere ?? false },
                     fill: { [weak self] in self?.conversation?.openWithItems() ?? [] }))
-        fileCommand("save", "Save to Downloads", "Save this file to Downloads", "s", .save)
+        itemFileCommand("save", "Save to Downloads", "Save this file to Downloads", "s", .save)
         fileCommand("save.hd", "Save HD Copy to Downloads", "Save this photo's HD copy to Downloads", nil, .saveHD, enabled: { offer()?.media.hd ?? false })
-        fileCommand("reveal", "Show in Finder", "Show this file in Finder", nil, .reveal)
+        itemFileCommand("reveal", "Show in Finder", "Show this file in Finder", nil, .reveal)
         add(Command("message.file.state", "Download", says: { (offer()?.statePhrase ?? "Download this file", "the selected message's") },
                     titled: { offer()?.stateAct?.1 ?? "Download" }, place: .message, group: 2, enabled: { offer()?.stateAct != nil })
             { [weak self] in

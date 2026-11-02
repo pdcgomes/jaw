@@ -54,6 +54,7 @@ final class LibraryCell: NSView {
     var drewOnce = false
     var clicked: ((LibraryCell, Int) -> Void)?
     var menuFor: ((LibraryCell) -> NSMenu?)?
+    var actionsFor: ((LibraryCell) -> [NSAccessibilityCustomAction])?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -254,31 +255,42 @@ final class LibraryCell: NSView {
         true
     }
 
+    /// Whether a press does something: an item opens, and a shelf's heading goes to its kind.
+    var pressable: Bool {
+        switch element {
+        case .tile?, .row?: item != nil
+        case let .heading(_, _, kind)?: kind != nil
+        case .said?, nil: false
+        }
+    }
+
     override func accessibilityRole() -> NSAccessibility.Role? {
-        element.map { if case .heading = $0 { .staticText } else { .button } }
+        element.map { _ in pressable ? .button : .staticText }
     }
 
     override func accessibilityLabel() -> String? {
         switch element {
         case let .heading(title, count, _)?: return [title, count].compactMap(\.self).joined(separator: ", ")
         case let .said(words)?: return words
-        case .tile?, .row?: return item.map(Self.spoken)
+        case .tile?, .row?: return item.flatMap { item in context.map { LibraryDrawing.spoken(item, $0) } }
         case nil: return nil
         }
     }
 
-    /// An item as VoiceOver says it: what it is, its name or length, who shared it and when.
-    static func spoken(_ item: LibraryRow) -> String {
-        let what: String = switch item.kind {
-        case .photo: "Photo"
-        case .video: "Video" + (item.media?.seconds.map { ", \(Format.length($0))" } ?? "")
-        case .voice: "Voice message" + (item.voice?.seconds.map { ", \(Format.length($0))" } ?? "")
-        case .file: item.file?.name ?? "File"
-        case .link: item.link?.title ?? item.link?.url ?? "Link"
-        case .other: "Item"
-        }
-        let who = item.mine ? "You" : item.from?.name ?? ""
-        return [what, who, item.chatName, Format.clock(item.at)].filter { !$0.isEmpty }.joined(separator: ", ")
+    /// A press is a double-click: it opens the item, or goes to the heading's kind.
+    override func accessibilityPerformPress() -> Bool {
+        guard pressable else { return false }
+        clicked?(self, 2)
+        return true
+    }
+
+    override func isAccessibilitySelected() -> Bool {
+        selected
+    }
+
+    /// What its menu does, each on its own.
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        actionsFor?(self)
     }
 }
 

@@ -75,6 +75,12 @@ final class AppModel {
         focusedChat.flatMap { panes[$0] }
     }
 
+    /// The focused pane's library, when it's one, whose selected item the Message menu's file
+    /// commands act on.
+    var focusedLibrary: LibraryController? {
+        focusedChat.flatMap { libraries[$0] }
+    }
+
     init(launch: Launch) {
         self.launch = launch
         agent = Agent(launch: launch)

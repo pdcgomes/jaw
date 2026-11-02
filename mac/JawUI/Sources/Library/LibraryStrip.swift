@@ -149,6 +149,52 @@ final class LibraryStrip: NSView {
     }
 
     override func accessibilityLabel() -> String? {
-        "Kinds: " + labels.map { $0.kind == shown ? "\($0.label), shown" : $0.label }.joined(separator: "; ") + (said.isEmpty ? "" : ". \(said)")
+        "Kinds"
+    }
+
+    /// Each kind's element, kept while the kinds are the same so VoiceOver's place among them stays.
+    var kindElements: [LibraryKindElement] = []
+    let saidElement = NSAccessibilityElement()
+
+    /// Each kind as VoiceOver reaches it, in the strip's order, then what's shown.
+    override func accessibilityChildren() -> [Any]? {
+        let laid = segments
+        if kindElements.map(\.kind) != laid.map(\.kind) {
+            kindElements = laid.map { LibraryKindElement($0.kind, in: self) }
+        }
+        for (element, s) in zip(kindElements, laid) {
+            element.setAccessibilityLabel(s.label)
+            element.setAccessibilityFrameInParentSpace(s.frame)
+            element.setAccessibilityValue(NSNumber(value: s.kind == shown))
+            element.setAccessibilitySelected(s.kind == shown)
+        }
+        guard !said.isEmpty else { return kindElements }
+        let after = laid.last?.frame.maxX ?? 0
+        saidElement.setAccessibilityRole(.staticText)
+        saidElement.setAccessibilityParent(self)
+        saidElement.setAccessibilityLabel(said)
+        saidElement.setAccessibilityFrameInParentSpace(CGRect(x: after, y: 0, width: max(bounds.width - after, 0), height: bounds.height))
+        return kindElements + [saidElement]
+    }
+}
+
+/// A kind on the strip as VoiceOver reaches it: a radio button, selected while its kind's shown,
+/// whose press picks it as a click does.
+final class LibraryKindElement: NSAccessibilityElement {
+    let kind: LibraryKind?
+    weak var strip: LibraryStrip?
+
+    init(_ kind: LibraryKind?, in strip: LibraryStrip) {
+        self.kind = kind
+        self.strip = strip
+        super.init()
+        setAccessibilityRole(.radioButton)
+        setAccessibilityParent(strip)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        let strip = strip, kind = kind
+        MainActor.assumeIsolated { strip?.picked?(kind) }
+        return true
     }
 }

@@ -280,7 +280,7 @@ final class MessageView: NSView {
 
     /// A file's state as VoiceOver says it, nothing once it's here: jawd's whole words and what can
     /// be done, how much has come, or that it isn't downloaded.
-    static func said(_ media: Media) -> String? {
+    nonisolated static func said(_ media: Media) -> String? {
         if let words = MessageLayout.Builder.comingWords(media) { return [words.why, words.act].compactMap(\.self).joined(separator: ", ") }
         switch media.state {
         case .downloading: return "downloading" + (media.progress.map { ", \(Int(($0 * 100).rounded()))%" } ?? "")

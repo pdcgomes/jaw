@@ -87,6 +87,32 @@ enum LibraryDrawing {
         Format.when(item.at, now: c.now, tz: c.tz)
     }
 
+    /// An item as VoiceOver says it, in the words it's drawn with: what it is, its name, title or
+    /// length, how its file is when it isn't here, a file's type, size and pages or a link's host,
+    /// who shared it where, and when.
+    static func spoken(_ item: LibraryRow, _ c: Context) -> String {
+        let f = item.file, l = item.link
+        let what: [String?] = switch item.kind {
+        case .photo: ["Photo", item.media.flatMap(MessageView.said)]
+        case .video: ["Video", item.media?.seconds.map(Format.length), item.media.flatMap(MessageView.said)]
+        case .voice: ["Voice message", item.voice?.seconds.map(Format.length)]
+        case .file: [f?.name.isEmpty == false ? f?.name : "a file", coming(f), f?.type, f?.bytes.map(Self.size), f?.pages.map(Self.pages)]
+        case .link: [l?.title.flatMap { $0.isEmpty ? nil : $0 } ?? l?.url ?? "Link", l?.host]
+        case .other: ["Item"]
+        }
+        return (what + [who(item, c), when(item, c)]).compactMap(\.self).filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    /// A file's size, as its row says it: "2.4 MB".
+    static func size(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    /// A document's pages, as its row says them: "12 pages".
+    static func pages(_ n: Int) -> String {
+        "\(n) page\(n == 1 ? "" : "s")"
+    }
+
     // MARK: Elements
 
     static func heading(_ title: String, count: String?, clickable: Bool, size: CGSize, _ c: Context) -> LibraryDrawn {
@@ -251,9 +277,7 @@ enum LibraryDrawing {
         let f = item.file
         d.under.append(.fill(icon, r.accent.opacity(0.15).cgColor, Radius.small + 2))
         symbol(Self.fileSymbol(f), 13, r.accent, centredIn: icon, into: &d.under)
-        let pages = f?.pages.map { "\($0) page\($0 == 1 ? "" : "s")" }
-        let bytes = f?.bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
-        let said = [Self.coming(f), f?.type, bytes, pages, who(item, c)].compactMap(\.self).filter { !$0.isEmpty }
+        let said = [Self.coming(f), f?.type, f?.bytes.map(Self.size), f?.pages.map(Self.pages), who(item, c)].compactMap(\.self).filter { !$0.isEmpty }
         let details = marked(item, then: who(item, c), c) ?? line(said.joined(separator: " · "), font(.caption), r.secondary)
         twoLines(f?.name.isEmpty == false ? f!.name : "a file", details, x: x, right: right, size: size, item, c, into: &d)
     }
