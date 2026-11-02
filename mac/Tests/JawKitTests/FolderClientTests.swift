@@ -218,6 +218,33 @@ func moves(_ jawd: Jawd) -> [Jawd.Moving] {
         #expect(await eventually { requests(fake, "watch.move").first?["after"]?.int == 400 })
     }
 
+    @Test func `the tree and a roster show none of the chat list's chats, so typing where no list or pane shows isn't kept, and goes as its chat leaves the list`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            guard method == "chats.watch" else { return foldering(method, params, id) }
+            return [chatList(id, ["ana", "rui"], typing: #"{"ana":[\#(typist("person:2", "Ana"))]}"#)]
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let tree = jawd.watchFolders()
+        let roster = jawd.watchRoster("folder:9", .top(200))
+        _ = jawd.watchChats("all", .top(60))
+        let first = await drain(jawd) { all in !trees(all, tree).isEmpty && !rosters(all, roster).isEmpty && typing(all)?["ana"] != nil }
+        #expect(typing(first)?["ana"] == [anaTyping], "the chat list's answer says Ana's typing in her chat")
+
+        // Someone types in a chat no list or pane shows, nor anyone's in the roster, then Rui records in one the list shows.
+        fake.send(typingPush("elsewhere", typist("person:9", "Xavier")))
+        fake.send(typingPush("rui", typist("person:3", "Rui", "recording")))
+        let pushed = await drain(jawd) { typing($0)?["rui"] != nil }
+        #expect(typing(pushed)?["rui"] == [ruiRecording])
+        #expect(typing(pushed)?["elsewhere"] == nil, "neither the tree nor the roster shows a chat the list doesn't: \(String(describing: typing(pushed)))")
+
+        fake.send(#"{"method":"chats","params":{"watch":"w1","seq":11,"remove":["ana"]}}"#)
+        let gone = await drain(jawd) { typing($0)?["ana"] == nil && typing($0)?["rui"] != nil }
+        #expect(typing(gone)?["ana"] == nil && typing(gone)?["rui"] == [ruiRecording],
+                "Ana's chat left the list, and her typing with it, though the tree and the roster are still watched")
+    }
+
     @Test func `Move to files the chat in the other folder, and takes it out of this one only once jawd has it there`() async throws {
         let add = HeldBack()
         let fake = try FakeJawd { method, params, id in
