@@ -1870,6 +1870,77 @@ async fn a_failed_hd_copy_whose_sent_message_is_deleted_for_you_leaves_nothing()
     assert_eq!(left, (0, 0, 0), "a failed HD copy of a message deleted for you stays, out of send.retry's reach");
 }
 
+/// A disappearing photo of yours erased at its time, as the timer erases it, while its HD copy is
+/// still on its way up, leaves nothing of the copy: no HD copy to go, no copy's row, no copy of your
+/// file kept for it and no failed send for send.retry to find, and WhatsApp is never sent it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erased_photo_of_yours_whose_hd_copy_is_on_its_way_leaves_no_copy_row_file_or_failed_send() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let timer = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    rig.store.apply(Lane::Live, vec![Change::Chat(timer)]).await.unwrap();
+    rig.world.gate_uploads(true);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let both = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.world.uploads().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    both.await.expect("both copies made and on their way up");
+    // The SD copy is up, as its upload's answer leaves it, and its message goes; the HD copy's
+    // upload is still held.
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("UPDATE outgoing SET state = 'ready' WHERE variant = 'sd'", []).unwrap();
+    drop(db);
+    rig.media.inner.sending.changed();
+    rig.until(&id, "sent", sent).await;
+    let looked_up = id.clone();
+    let (n, expires_at): (i64, Option<i64>) = rig
+        .query(move |db| {
+            Ok(db.query_row("SELECT n, expires_at FROM messages WHERE id = ?1", [&looked_up], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
+        })
+        .await;
+    let expires_at = expires_at.expect("the photo has its time to go once the server has it");
+    let left = |db: &Connection| -> anyhow::Result<(i64, i64, i64)> {
+        Ok((
+            db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?,
+            db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get(0))?,
+            db.query_row("SELECT count(*) FROM outbox WHERE state = 'failed'", [], |r| r.get(0))?,
+        ))
+    };
+    assert_eq!(rig.query(left).await, (1, 1, 0), "its HD copy, and the copy's row, wait to go");
+    assert_eq!(rig.files("media/outgoing").len(), 1, "with jaw's copy of your file, which it's made from");
+    let erased = rig.store.apply(Lane::Background, vec![Change::Expire { n, at: expires_at }]).await.unwrap();
+    assert_eq!(erased.changed, 1, "the photo is erased");
+    // Withdrawn by the erasure itself, while its upload is still held, not once the sender finds it
+    // has no message, after the upload.
+    assert_eq!(rig.query(left).await, (0, 0, 0), "the erasure withdraws the HD copy and the copy's row");
+    rig.world.gate_uploads(false);
+    for _ in 0..300 {
+        if rig.files("media/outgoing").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(rig.files("media/outgoing").is_empty(), "jaw's copy of your file went: {:?}", rig.files("media/outgoing"));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(rig.query(left).await, (0, 0, 0), "no HD copy, copy's row or failed send is left");
+    let retried = rig.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, jaw_proto::code::NOT_FOUND);
+    let sent: Vec<String> = rig.world.sends().into_iter().map(|s| s.id).collect();
+    assert!(
+        !sent.is_empty() && sent.iter().all(|went| *went == id),
+        "only the photo went, never its HD copy: {sent:?}"
+    );
+}
+
 /// Whether a job making copies is running.
 fn making(rig: &Rig) -> bool {
     rig.media.inner.sending.running.lock().unwrap().values().any(|running| running.making.is_some())

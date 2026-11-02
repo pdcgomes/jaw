@@ -3,7 +3,8 @@
 //! its message gives no name takes the one its vCard gives. Each message of kind contact takes the
 //! text, spans, summary and detail its raw protobuf converts to now, at a new version with its
 //! event, where that changes any of them; the rest of its row (its quote, its timer, its status)
-//! stays as it is, as an amendment may have moved it on since. One whose raw protobuf doesn't read,
+//! stays as it is, as an amendment may have moved it on since. What a card with a time to go said
+//! before goes as an erasure takes it (`expiry::unsaid`). One whose raw protobuf doesn't read,
 //! or no longer converts to a card, is left as it is, and one whose conversion fails is kept in
 //! quarantine with its raw protobuf while the step goes on, so no card holds up the rest.
 
@@ -14,7 +15,7 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{CHAT, MESSAGE, Stamps, record_quarantine, transient, unpack};
+use super::{CHAT, MESSAGE, Stamps, expiry, record_quarantine, transient, unpack};
 use crate::convert::{self, Me};
 use crate::store::Change;
 
@@ -81,8 +82,20 @@ fn read_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
     });
     let Some(card) = card else { return Ok(false) };
     let seq = stamps.seq(MESSAGE, Some(n));
-    let changed =
-        db.prepare_cached(SHOWN)?.execute(params![n, card.text, card.spans, card.summary, card.detail, seq])?;
+    let shown = || -> Result<usize> {
+        Ok(db.prepare_cached(SHOWN)?.execute(params![n, card.text, card.spans, card.summary, card.detail, seq])?)
+    };
+    // What one with a time to go said before goes as an erasure takes it.
+    let changed = if expiry::erasable(db, n)? {
+        let mut changed = 0;
+        expiry::unsaid(db, stamps, &[n], |_| {
+            changed = shown()?;
+            Ok(changed > 0)
+        })?;
+        changed
+    } else {
+        shown()?
+    };
     #[cfg(test)]
     anyhow::ensure!(id != tests::FAILS, "a conversion that fails once it has written, as a test asks");
     #[cfg(test)]

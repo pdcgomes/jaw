@@ -8,6 +8,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::*;
+use crate::store::contacts::CONTACTS;
 use crate::store::kinds::KINDS;
 use crate::store::write::links::PLACES;
 use crate::store::write::{Packed, now_ms};
@@ -1542,6 +1543,78 @@ async fn a_backfill_reading_a_disappearing_message_again_leaves_nothing_of_what_
     settled(&store).await;
     gone_but_for(home.path(), "gnuplace", &before, "what its row said before");
     assert_eq!(said(&store, "place").await.0.as_deref(), Some("Miradouro\nLargo de Santa Luzia, Lisboa"));
+}
+
+/// The contacts backfill reading a card with a time to go again takes what its row said before out
+/// as an erasure takes it: a card whose row has words and a link an earlier converter gave it, read
+/// again into the name its vCard gives. Among thirty captioned photos and thirty messages with links,
+/// so each index's segment holding its words holds others too.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_contacts_backfill_reading_a_disappearing_card_again_leaves_nothing_of_what_its_row_said() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let vcard = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Marta Lopes\r\nTEL;waid=351213456789:+351 21 345 6789\r\nEND:VCARD";
+    let contact = e2e::Message {
+        contact_message: Some(Box::new(e2e::ContactMessage {
+            display_name: Some("Marta Lopes".into()),
+            vcard: Some(vcard.into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let card = Message { kind: "contact", raw: Some(Packed(raw_of("card", contact))), ..linked("card", "gnucard", 90) };
+    let mut changes = several_of_each();
+    changes.push(Change::Message(card));
+    apply(&store, changes).await;
+    store.indexed().await.unwrap();
+    let blocks = index_blocks(home.path(), "gnucard");
+    assert!(blocks.iter().all(|(_, held)| *held > 0), "its words are in every index: {blocks:?}");
+    let before = free_holding(&store, home.path(), b"gnucard").await;
+    // The contacts backfill left to do over every message, as its migration leaves it.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) SELECT 'contacts', 0, max(n) FROM messages", []).unwrap();
+    let left =
+        || db.query_row("SELECT count(*) FROM backfills WHERE name = 'contacts'", [], |r| r.get::<_, i64>(0)).unwrap();
+    for _ in 0..20 {
+        if left() == 0 {
+            break;
+        }
+        store.apply(Lane::Background, vec![Change::Backfill(CONTACTS)]).await.unwrap();
+    }
+    assert_eq!(left(), 0, "the backfill is done");
+    drop(db);
+    settled(&store).await;
+    gone_but_for(home.path(), "gnucard", &before, "what the card's row said before");
+    assert_eq!(said(&store, "card").await.0.as_deref(), Some("Marta Lopes"));
+    still_found(&store, "what stays").await;
+}
+
+/// Thirty captioned photos and thirty messages with links that stay, put in the segments of every
+/// index beside what a test changes: with others in it, a segment isn't rewritten when one of its
+/// entries goes, so a contentless index keeps that one's words until it's merged whole.
+fn several_of_each() -> Vec<Change> {
+    let photos = (0..30i64).map(|k| {
+        Change::Message(Message { at: AT + k, ..captioned(&format!("p{k:02}"), &format!("photo{k} by the lake")) })
+    });
+    let links = (0..30i64).map(|k| {
+        Change::Message(Message { expires_at: None, ..linked(&format!("l{k:02}"), &format!("site{k}"), 40 + k) })
+    });
+    photos.chain(links).collect()
+}
+
+/// Asserts that every photo and link of `several_of_each` is still found in each index.
+async fn still_found(store: &Store, what: &'static str) {
+    let found = query(store, |db| {
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
+        Ok((
+            count("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'lake'")?,
+            count("SELECT count(*) FROM links_fts WHERE links_fts MATCH 'example'")?,
+            count("SELECT count(*) FROM library_fts WHERE library_fts MATCH 'lake OR example'")?,
+        ))
+    })
+    .await;
+    assert_eq!(found, (30, 30, 60), "{what}: the others are still found in messages_fts, links_fts and library_fts");
 }
 
 fn opened(chat: &str, id: &str) -> Change {
