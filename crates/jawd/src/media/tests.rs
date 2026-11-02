@@ -3291,13 +3291,16 @@ async fn a_view_once_photo_goes_once_the_interface_that_opened_it_goes() {
     let rig = rig(quick()).await;
     view_once_photo(&rig, &Picture::lake(320, 240), "3EB0LEFT").await;
     let socket = rig.serve_sending().await;
-    {
+    let until = {
         let mut ui = Interface::open(&socket).await;
         ui.call(1, "hello", json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" })).await;
         let opened = ui.call(2, "view_once.open", json!({ "message": "3EB0LEFT" })).await;
         assert!(opened["result"]["path"].is_string(), "{opened}");
-    }
+        opened["result"]["until"].as_i64().expect("opened")
+    };
     gone_with_its_files(&rig, "3EB0LEFT").await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(now < until, "it went at its time, a minute after it was opened, not as its interface went");
 }
 
 /// How many view-once messages `status` says are open, asked as call `id`.
