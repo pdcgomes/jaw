@@ -2147,6 +2147,43 @@ async fn a_notification_whose_conversion_panics_keeps_its_blob_in_the_spool_for_
     assert!(!its_blob.exists());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_that_cant_read_which_blobs_are_in_keeps_every_blob() {
+    let home = tempfile::tempdir().unwrap();
+    let spool = home.path().join("spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let rest = Packed::new(b"what the blob carried besides its messages");
+    store.apply_durable(vec![Change::HistoryKept { id: "3EB0DONE".into(), raw: rest }]).await.unwrap();
+    let (done, waiting, part) =
+        (spool.join("3EB0DONE.pb"), spool.join("3EB0WAITING.pb"), spool.join("3EB0HALF.pb.part"));
+    std::fs::write(&done, blob("h0")).unwrap();
+    std::fs::write(&waiting, blob("h1")).unwrap();
+    std::fs::write(&part, b"half a blob").unwrap();
+    // The sweep's read of which blobs are in fails.
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute("ALTER TABLE history_kept RENAME TO history_kept_away", []).unwrap();
+    }
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().insert("later".into(), Blob::Here(blob("h2")));
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching =
+        tokio::spawn(fetch::run(offers, store.clone(), supervisor, knowing(), spool.clone(), Merges::default()));
+    // The fetcher sweeps before it takes the offer after it, so the sweep is done once that
+    // offer's blob is walked.
+    offered.send(fetch::Work::Offered).unwrap();
+    offered.send(offer(1, "later")).unwrap();
+    until("the blob offered after the sweep", || store.count("messages WHERE id = 'h2'").unwrap() == 1).await;
+    fetching.abort();
+    assert!(!part.exists(), "a download cut short goes");
+    assert!(waiting.exists(), "a blob whose rows aren't in stays");
+    assert!(done.exists(), "and so does one whose rows are in, as the sweep can't know it");
+}
+
 /// A connection event as the engine sends it, for the account 351910000001 (Pedro).
 fn connection_event(state: pb::connection::State) -> crate::engine::Incoming {
     let linked = !matches!(state, pb::connection::State::Unlinked);
