@@ -31,8 +31,6 @@ public enum PictureFiles: Sendable, Hashable {
 /// that draws it copies it rather than scaling or converting it; and a thumbnail blurred to stand in
 /// for its preview.
 enum Decode {
-    static let space = CGColorSpace(name: CGColorSpace.sRGB)!
-
     /// The picture `key` names, from `files`, or nil when it can't be read, or isn't a JPEG where only
     /// one is read.
     static func picture(_ key: PictureKey, from files: PictureFiles) -> CGImage? {
