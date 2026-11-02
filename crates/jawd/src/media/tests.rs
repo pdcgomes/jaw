@@ -1909,6 +1909,31 @@ async fn downloads_wait_while_the_disk_is_nearly_full_and_go_on_once_there_is_ro
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn below_the_disks_floor_no_download_starts_one_asked_for_included_and_both_go_once_there_is_room() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let config = crate::disk::Config { ballast: 0, ..Default::default() };
+    let (disk, fake) = crate::disk::Disk::faked(home.path(), config, 10_000_000_000, 500_000_000_000);
+    let store = Store::open_watched(home.path(), disk.clone()).unwrap();
+    crate::sync::running(&store).await.unwrap();
+    let rig = rig_on(home, store, quick()).await;
+    fake.free.store(1_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    assert!(!disk.room());
+    let (asked, waiting) = (Picture::lake(640, 480), Picture::lake(320, 240));
+    rig.photo(&waiting, ANA, ANA, "3EB0WAITING").await;
+    rig.photo(&asked, ANA, ANA, "3EB0ASKED").await;
+    rig.until(ANA, "3EB0ASKED", "converted", |row| !row.is_null()).await;
+    rig.call("media.fetch", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    tokio::time::sleep(crate::disk::POLL * 3).await;
+    assert_eq!(rig.world.downloads(), 0, "nothing downloads, what an interface asked for included");
+    let paused = rig.media.status().paused.expect("downloads say why they wait");
+    assert!(paused.starts_with("jaw's disk has 1.0 GB free"), "{paused}");
+    fake.free.store(10_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    rig.until(ANA, "3EB0ASKED", "downloaded once there's room, without being asked again", local).await;
+    rig.until(ANA, "3EB0WAITING", "and the one nobody asked for", local).await;
+    assert_eq!(rig.media.status().paused, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_start_asks_the_phone_again_for_what_a_stopped_jawd_left_waiting_for_it() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();

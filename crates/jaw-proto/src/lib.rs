@@ -279,6 +279,9 @@ pub struct Status {
     /// jaw.db's WAL and commits, and why it can't be written if it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
+    /// The disk jaw's folder is on, as the watchdog last read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<Disk>,
     /// The layouts kept for interfaces, and the limits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
@@ -453,6 +456,25 @@ pub struct Storage {
     /// The backups of jaw.db taken before upgrades, kept beside it for a while.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backups: Vec<Backup>,
+}
+
+/// The disk jaw's folder is on, as the watchdog last read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disk {
+    /// Its free space and size, and the floor below which background work and downloads wait.
+    pub free: u64,
+    pub size: u64,
+    pub floor: u64,
+    /// Why background work and downloads wait, while they do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<String>,
+    /// The bytes of the ballast kept in jaw's folder, 0 once it's given up for a write a full disk
+    /// refused, until there's room to make it again; and how often it was given up.
+    pub ballast: u64,
+    pub ballast_given_up: u64,
+    /// How often background transactions waited for room, and for how long in all.
+    pub waits: u64,
+    pub waited_ms: u64,
 }
 
 /// A backup of jaw.db taken before an upgrade changed its rows, and until when it's kept.

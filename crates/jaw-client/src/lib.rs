@@ -355,6 +355,32 @@ pub fn describe(status: &Status) -> String {
             ));
         }
     }
+    if let Some(disk) = &status.disk {
+        let mut line = format!(
+            "disk      {:.1} GB free of {:.1} GB; background work and downloads wait below {:.1} GB",
+            disk.free as f64 / 1e9,
+            disk.size as f64 / 1e9,
+            disk.floor as f64 / 1e9
+        );
+        match disk.ballast {
+            0 => line.push_str("; no ballast kept"),
+            bytes => line.push_str(&format!("; a ballast of {} MB kept", bytes / 1_000_000)),
+        }
+        if disk.ballast_given_up > 0 {
+            line.push_str(&format!(", given up {} times for a full disk", disk.ballast_given_up));
+        }
+        if disk.waits > 0 {
+            line.push_str(&format!(
+                "; background waited for room {} times, {:.1} s in all",
+                disk.waits,
+                disk.waited_ms as f64 / 1e3
+            ));
+        }
+        lines.push(line);
+        if let Some(paused) = &disk.paused {
+            lines.push(format!("paused    background work and downloads: {paused}"));
+        }
+    }
     if let Some(layouts) = &status.layouts {
         let mut kept = format!(
             "layouts   {} kept of {}, the biggest {} of {} bytes",
@@ -391,7 +417,9 @@ pub fn describe(status: &Status) -> String {
             cache.push_str(&format!("; {}", counts.join(", ")));
         }
         lines.push(cache);
-        if let Some(paused) = &media.paused {
+        if let Some(paused) =
+            media.paused.as_ref().filter(|&paused| status.disk.as_ref().and_then(|d| d.paused.as_ref()) != Some(paused))
+        {
             lines.push(format!("paused    background downloads: {paused}"));
         }
         let mut previews = vec![format!("{} preview writes to settle", media.unsettled)];
@@ -504,6 +532,28 @@ mod tests {
         let said = super::describe(&status);
         let typing = "typing    someone in 2 chats now; 1840 changes heard, 3 dropped for coming too fast, 0 waiting of 1024; 1210 pushes sent, 418 changes merged into a newer one";
         assert!(said.lines().any(|l| l == typing), "{said}");
+    }
+
+    #[test]
+    fn status_says_the_disks_free_space_its_floor_and_ballast_and_why_background_work_waits() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/status.result.json")).unwrap();
+        let mut status: super::Status = serde_json::from_value(fixture["result"].clone()).unwrap();
+        let said = super::describe(&status);
+        let disk = "disk      12.4 GB free of 494.4 GB; background work and downloads wait below 2.0 GB; a ballast of 64 MB kept, given up 1 times for a full disk; background waited for room 3 times, 41.2 s in all";
+        assert!(said.lines().any(|l| l == disk), "{said}");
+        assert!(!said.contains("paused"), "{said}");
+        let disk = status.disk.as_mut().unwrap();
+        (disk.free, disk.ballast, disk.paused) = (1_200_000_000, 0, Some("jaw's disk has 1.2 GB free".into()));
+        let said = super::describe(&status);
+        assert!(
+            said.lines()
+                .any(|l| l.starts_with("disk      1.2 GB free of 494.4 GB;") && l.contains("; no ballast kept"))
+        );
+        assert!(
+            said.lines().any(|l| l == "paused    background work and downloads: jaw's disk has 1.2 GB free"),
+            "{said}"
+        );
     }
 
     #[test]

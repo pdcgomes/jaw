@@ -203,6 +203,7 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
     let path = spool.join(spool_name(&offer.id));
     let started = Instant::now();
     if !path.exists() {
+        store.disk().wait_for_room().await;
         let command = pb::command::Kind::HistoryDownload(pb::HistoryDownload {
             notification: offer.notification.clone(),
             path: path.display().to_string(),

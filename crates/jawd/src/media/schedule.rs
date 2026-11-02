@@ -8,7 +8,8 @@
 //! changes (at most so often while it keeps changing), when a job ends, when WhatsApp can be
 //! reached again, and when a copy waiting to be tried again may be; so idle, it sleeps. A copy that
 //! couldn't be done for a reason that may pass stays wanted, and is tried again after a pause that
-//! doubles each time.
+//! doubles each time. While the disk is short of room it starts nothing, a copy asked for included,
+//! which stays asked for and goes once there's room.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,7 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use super::fetch::{self, Asking, Fetched};
 use super::previews::{self, Drawn};
 use super::{Inner, lane, now_ms};
+use crate::disk;
 use crate::engine::pb;
 use crate::store::files::Seen;
 use crate::store::media::{Keys, Step, from_hex};
@@ -267,16 +269,18 @@ async fn wanted(inner: &Inner, pass: Pass, most: usize) -> anyhow::Result<Vec<Ro
     inner.store.reads().query(Priority::Interactive, move |db| Ok(read(db, pass, most)?)).await
 }
 
-/// Takes what's wanted and does it, until jawd stops.
+/// Takes what's wanted and does it, until jawd stops; while the disk is short of room it takes
+/// nothing, and looks at the disk again every `disk::POLL`.
 async fn run(inner: Arc<Inner>) {
     let mut committed = inner.store.committed();
     loop {
         let woken = inner.schedule.wake.notified();
         let looked = Instant::now();
-        if let Err(e) = take(&inner).await {
+        let room = inner.store.disk().room();
+        if room && let Err(e) = take(&inner).await {
             eprintln!("jawd: can't read which media is wanted: {e:#}");
         }
-        let next = inner.schedule.next_try();
+        let next = if room { inner.schedule.next_try() } else { Some(Instant::now() + disk::POLL) };
         tokio::select! {
             () = woken => {}
             changed = committed.changed() => {

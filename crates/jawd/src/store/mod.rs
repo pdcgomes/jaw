@@ -65,6 +65,7 @@ pub use self::write::{
     merge_reference,
 };
 pub use self::write::{contacts, copies, expiry, kinds, links, media, outbox, outgoing, polls};
+use crate::disk::{self, Disk};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 
@@ -348,6 +349,7 @@ pub struct Store {
     erased: Arc<AtomicU64>,
     /// The view-once messages open here erased since sending last looked, by n and ID.
     closed: Arc<Mutex<Vec<(i64, String)>>>,
+    disk: Disk,
 }
 
 /// The soonest time a message the writer has committed since the timer last looked goes, which
@@ -706,9 +708,16 @@ fn restarting(
 }
 
 impl Store {
-    /// Opens jaw.db in `home`, bringing its schema up to date, and starts the writer and readers.
+    /// Opens jaw.db in `home`, bringing its schema up to date, and starts the writer and readers, on
+    /// a disk that isn't watched.
     pub fn open(home: &Path) -> Result<Store> {
         Store::open_with(home, LIMITS)
+    }
+
+    /// As `open`, with background work waiting while `disk` is short of room, and its ballast given
+    /// up when a full disk refuses a write to jaw.db.
+    pub fn open_watched(home: &Path, disk: Disk) -> Result<Store> {
+        Store::open_on(home, LIMITS, disk)
     }
 
     /// As `open`, with background work waiting for the checkpointer past `soft` frames in the WAL,
@@ -719,6 +728,10 @@ impl Store {
     }
 
     fn open_with(home: &Path, limits: Limits) -> Result<Store> {
+        Store::open_on(home, limits, Disk::unwatched())
+    }
+
+    fn open_on(home: &Path, limits: Limits, disk: Disk) -> Result<Store> {
         let path = home.join("jaw.db");
         let mut db = connect(&path, Role::Writer)?;
         let fenced = vfs::fenced(&db);
@@ -799,12 +812,13 @@ impl Store {
             live_pause: limits.live_pause,
             stream_step: limits.stream_step,
             shared_failing: None,
+            disk: disk.clone(),
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
-        let checkpointing = wal.clone();
+        let (checkpointing, full) = (wal.clone(), disk.clone());
         std::thread::Builder::new()
             .name("jawd-checkpoint".into())
-            .spawn(move || checkpoint(checkpointer, checkpointing, kicks, limits.idle))?;
+            .spawn(move || checkpoint(checkpointer, checkpointing, kicks, limits.idle, full))?;
         Ok(Store {
             path,
             realtime,
@@ -824,6 +838,7 @@ impl Store {
             soonest,
             erased,
             closed,
+            disk,
         })
     }
 
@@ -841,6 +856,11 @@ impl Store {
     /// ID: at their time, opened elsewhere, closed or deleted.
     pub fn take_closed(&self) -> Vec<(i64, String)> {
         std::mem::take(&mut *self.closed.lock().expect("the view-once messages erased"))
+    }
+
+    /// The disk jaw.db is on, which background work and downloads wait for room on.
+    pub fn disk(&self) -> &Disk {
+        &self.disk
     }
 
     /// The thumbnails of link previews, kept as files beside jaw.db.
@@ -1171,6 +1191,17 @@ struct Writer {
     /// Why the last inbox commit with live writes in it failed, said once until the reason changes
     /// or one succeeds.
     shared_failing: Option<String>,
+    disk: Disk,
+}
+
+/// Whether a write failed for a full disk.
+fn disk_full(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _)) if f.code == rusqlite::ErrorCode::DiskFull
+        )
+    })
 }
 
 /// Makes the groups of `changes` in `tx`, each in a savepoint: one that fails is rolled back and
@@ -1354,6 +1385,10 @@ impl Writer {
             return;
         }
         self.unhold();
+        if !self.disk.room() {
+            self.index_after = Some(Instant::now() + disk::POLL);
+            return;
+        }
         // Merging first keeps FTS5's levels short of a merge it would do all at once.
         let step = if self.unmerged || self.whole_merge_due().is_some_and(|due| due <= Instant::now()) {
             self.merge()
@@ -1474,14 +1509,13 @@ impl Writer {
         Ok(())
     }
 
-    /// Says why jaw.db can't be written, once each time it starts failing.
+    /// Says why jaw.db can't be written, once each time it starts failing; on a full disk, the
+    /// ballast goes, so the write tried again has room.
     fn failing(&self, e: &anyhow::Error) {
-        let full = e.chain().any(|cause| {
-            matches!(
-                cause.downcast_ref::<rusqlite::Error>(),
-                Some(rusqlite::Error::SqliteFailure(f, _)) if f.code == rusqlite::ErrorCode::DiskFull
-            )
-        });
+        let full = disk_full(e);
+        if full {
+            self.disk.full();
+        }
         let why = if full {
             "jaw's disk is full, so what arrives waits on the phone until there's room".to_string()
         } else {
@@ -1806,6 +1840,30 @@ impl Writer {
         self.unhold();
     }
 
+    /// Waits until the disk has room for a background transaction, taking inbox and live writes
+    /// meanwhile, so the watchdog never holds one up.
+    fn wait_for_disk(&mut self) {
+        if self.disk.room() {
+            return;
+        }
+        let began = Instant::now();
+        let (realtime, live) = (self.realtime.clone(), self.live.clone());
+        while !self.disk.room() {
+            select_biased! {
+                recv(realtime) -> row => match row {
+                    Ok(row) => self.take_inbox(row),
+                    Err(_) => break,
+                },
+                recv(live) -> write => match write {
+                    Ok(write) => self.live_write(write),
+                    Err(_) => break,
+                },
+                default(disk::POLL) => {}
+            }
+        }
+        self.disk.waited(began.elapsed());
+    }
+
     /// Background work waits for the WAL to start again, so the checkpointer copies however few
     /// frames wait. It's woken as the wait begins: it may have looked at the last commit before
     /// anything waited and left its few frames, and nothing else commits to wake it.
@@ -2124,6 +2182,7 @@ impl Writer {
         let groups = write::groups(changes);
         let mut rest = groups.as_slice();
         while !rest.is_empty() {
+            self.wait_for_disk();
             self.wait_for_room();
             let made = self.retrying(|w| {
                 w.synced(false)?;
@@ -2175,8 +2234,9 @@ impl Writer {
 /// syncs jaw.db itself: otherwise every page copied since the WAL last started again would wait to
 /// be sent to the drive as it next does, and what arrives with it. Once jaw.db has gone IDLE
 /// without a commit, it empties the WAL, and then sleeps until the next commit, so an idle jawd
-/// never wakes for it. It ends when the writer has.
-fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration) {
+/// never wakes for it. A pass a full disk refuses gives up the ballast, so the next has room. It
+/// ends when the writer has.
+fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration, disk: Disk) {
     let mut emptied = false;
     loop {
         let kicked =
@@ -2193,7 +2253,12 @@ fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration
                         emptied = true;
                     }
                     Ok((true, _, _)) => {}
-                    Err(e) => eprintln!("jawd: can't empty the WAL: {e:#}"),
+                    Err(e) => {
+                        eprintln!("jawd: can't empty the WAL: {e:#}");
+                        if disk_full(&e) {
+                            disk.full();
+                        }
+                    }
                 }
                 continue;
             }
@@ -2220,6 +2285,9 @@ fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration
                 Ok((_, log, copied)) => (log, copied),
                 Err(e) => {
                     eprintln!("jawd: a checkpoint failed: {e:#}");
+                    if disk_full(&e) {
+                        disk.full();
+                    }
                     break;
                 }
             };
@@ -3467,6 +3535,116 @@ mod tests {
         .await;
         assert_eq!(kept, ("message".to_string(), 7, b"kept".to_vec()));
         tokio::time::timeout(Duration::from_secs(5), trouble.wait_for(Option::is_none)).await.unwrap().unwrap();
+    }
+
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn below_the_disks_floor_background_work_and_indexing_wait_while_inbox_rows_and_live_writes_go() {
+        let home = tempfile::tempdir().unwrap();
+        let (disk, fake) = Disk::faked(home.path(), disk::Config::default(), 10 * GB, 500 * GB);
+        let store = Store::open_watched(home.path(), disk.clone()).unwrap();
+        fake.free.store(GB, Ordering::Relaxed);
+        let chat = "351910000001@s.whatsapp.net";
+        store.apply(Lane::Live, messages([text(chat, "l", 2_000, "zebra")])).await.unwrap();
+        tokio::time::sleep(disk::POLL * 3).await;
+        assert_eq!(store.count("fts_backlog").unwrap(), 1, "indexing the live message's text waits for room");
+        let background = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Background, messages([text(chat, "b", 1_000, "past")])).await })
+        };
+        tokio::time::sleep(disk::POLL * 2).await;
+        assert!(!background.is_finished(), "background work waits for room");
+        let live = store.apply(Lane::Live, messages([text(chat, "l2", 3_000, "yak")]));
+        tokio::time::timeout(Duration::from_secs(5), live).await.expect("a live write never waits").unwrap();
+        store.inbox("message", 7, b"kept".to_vec(), None);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.count("inbox").unwrap() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("nor does an inbox row");
+        tokio::time::sleep(disk::POLL * 3).await;
+        assert!(!background.is_finished(), "background work still waits");
+        let status = disk.status().unwrap();
+        assert!(
+            status.paused.as_deref().is_some_and(|why| why.starts_with("jaw's disk has 1.0 GB free")),
+            "{status:?}"
+        );
+        fake.free.store(10 * GB, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(5), background)
+            .await
+            .expect("it goes on once there's room")
+            .unwrap()
+            .unwrap();
+        store.indexed().await.unwrap();
+        assert_eq!(store.count("fts_backlog").unwrap(), 0);
+        let status = disk.status().unwrap();
+        assert_eq!((status.paused.as_deref(), status.waits), (None, 1), "the wait is counted");
+        assert!(status.waited_ms >= disk::POLL.as_millis() as u64 * 5, "{status:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn on_a_full_disk_the_ballast_goes_so_an_inbox_rows_commit_has_room_and_comes_back_once_theres_room() {
+        let home = tempfile::tempdir().unwrap();
+        let config = disk::Config { ballast: MB, ..Default::default() };
+        let (disk, fake) = Disk::faked(home.path(), config, 10 * GB, 500 * GB);
+        disk.tick().await;
+        let ballast = home.path().join("ballast");
+        assert!(ballast.exists());
+        let store = Store::open_watched(home.path(), disk.clone()).unwrap();
+        vfs::noted::fill(home.path(), fake.free.clone());
+        let mut trouble = store.trouble();
+        fake.free.store(0, Ordering::Relaxed);
+        store.inbox("message", 7, b"kept".to_vec(), None);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.count("inbox").unwrap() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the row is committed in the ballast's room");
+        assert!(!ballast.exists(), "the ballast was given up for it");
+        assert_eq!(disk.status().unwrap().ballast_given_up, 1);
+        assert!(trouble.has_changed().unwrap(), "the full disk was said");
+        tokio::time::timeout(Duration::from_secs(5), trouble.wait_for(Option::is_none)).await.unwrap().unwrap();
+        disk.tick().await;
+        assert!(!ballast.exists(), "it isn't made again while the disk is short of room");
+        fake.free.store(10 * GB, Ordering::Relaxed);
+        disk.tick().await;
+        assert!(ballast.exists(), "and is once there's room");
+        assert_eq!(disk.status().unwrap().ballast, MB);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_checkpoint_a_full_disk_refuses_gives_up_the_ballast_and_goes_in_its_room() {
+        let home = tempfile::tempdir().unwrap();
+        let config = disk::Config { ballast: MB, ..Default::default() };
+        let (disk, fake) = Disk::faked(home.path(), config, 10 * GB, 500 * GB);
+        disk.tick().await;
+        let idle = Duration::from_millis(200);
+        let store = Store::open_on(home.path(), Limits { idle, ..LIMITS }, disk.clone()).unwrap();
+        let chat = "351910000001@s.whatsapp.net";
+        store.apply(Lane::Live, messages((0..20).map(|n| text(chat, &format!("m{n}"), n, "words")))).await.unwrap();
+        assert!(store.storage().wal_frames > 0, "frames wait for the checkpointer");
+        vfs::noted::fill(home.path(), fake.free.clone());
+        fake.free.store(0, Ordering::Relaxed);
+        let given_up = tokio::time::timeout(Duration::from_secs(5), async {
+            while disk.status().unwrap().ballast_given_up == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        given_up.await.expect("the checkpoint the full disk refused gave up the ballast");
+        assert!(!home.path().join("ballast").exists());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.storage().wal_frames > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("and the WAL is emptied in its room");
     }
 
     #[tokio::test(flavor = "multi_thread")]

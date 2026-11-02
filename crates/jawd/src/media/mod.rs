@@ -370,7 +370,7 @@ impl Media {
             orphans_removed: stats.orphans_removed,
             evicted: stats.evicted,
             remade: stats.remade,
-            paused: inner.paused.lock().expect("paused").clone(),
+            paused: inner.store.disk().paused().or_else(|| inner.paused.lock().expect("paused").clone()),
             unsettled: inner
                 .store
                 .pair("SELECT made - settled, 0 FROM media_made WHERE id = 1")

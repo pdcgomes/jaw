@@ -2034,6 +2034,37 @@ async fn a_history_blob_the_engine_couldnt_ask_for_is_never_quarantined() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn below_the_disks_floor_no_history_blob_is_asked_for_until_there_is_room() {
+    let home = tempfile::tempdir().unwrap();
+    let config = crate::disk::Config { ballast: 0, ..Default::default() };
+    let (disk, fake) = crate::disk::Disk::faked(home.path(), config, 10_000_000_000, 500_000_000_000);
+    let store = Store::open_watched(home.path(), disk.clone()).unwrap();
+    notifications(&store, 1).await;
+    fake.free.store(1_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    assert!(!disk.room());
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().extend([("here".to_string(), Blob::Here(blob("h1")))]);
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(
+        offers,
+        store.clone(),
+        supervisor,
+        knowing(),
+        home.path().join("spool"),
+        Merges::default(),
+    ));
+    offered.send(offer(1, "here")).unwrap();
+    tokio::time::sleep(crate::disk::POLL * 3).await;
+    assert_eq!(engine.asked("history"), 0, "not asked for while the disk is short of room");
+    fake.free.store(10_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    until("the blob's message, once there's room", || store.count("messages").unwrap() == 1).await;
+    fetching.abort();
+    assert_eq!(engine.asked("history"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without_storing_anything_twice() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();

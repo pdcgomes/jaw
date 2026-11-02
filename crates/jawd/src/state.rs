@@ -330,6 +330,7 @@ impl State {
             }),
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
+            disk: self.store.as_ref().and_then(|store| store.disk().status()),
             layouts: self.layouts.as_ref().map(Layouts::status),
             typing: self.feed.as_ref().map(|feed| feed.typing().stats()),
             settings: self.settings.as_ref().map(|s| s.by_domain()).unwrap_or_default(),

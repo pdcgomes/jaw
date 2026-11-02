@@ -247,6 +247,10 @@ unsafe extern "C" fn write(file: *mut ffi::sqlite3_file, buf: *const c_void, amo
         let (real, methods) = inner(file);
         let wrote = || (methods.xWrite.expect("xWrite"))(real, buf, amount, at);
         #[cfg(test)]
+        if noted::filled((*file.cast::<File>()).path) {
+            return ffi::SQLITE_FULL;
+        }
+        #[cfg(test)]
         return noted::around((*file.cast::<File>()).path, wrote, |_| noted::Event::Write {
             path: (*file.cast::<File>()).path.to_string(),
             at,
@@ -410,7 +414,8 @@ static METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
 #[cfg(test)]
 pub mod noted {
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::Made;
@@ -445,6 +450,7 @@ pub mod noted {
 
     static WATCHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     static IN_FULL: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static FILLED: Mutex<Vec<(PathBuf, Arc<AtomicU64>)>> = Mutex::new(Vec::new());
     static SLOW: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
     static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
@@ -482,6 +488,19 @@ pub mod noted {
 
     pub(super) fn flushed_in_full(folder: &Path) -> bool {
         IN_FULL.lock().unwrap().iter().any(|f| f == folder)
+    }
+
+    /// Has writes to the files in `folder` fail as on a full disk while `free` is 0.
+    pub fn fill(folder: &Path, free: Arc<AtomicU64>) {
+        FILLED.lock().unwrap().push((named(folder), free));
+    }
+
+    pub(super) fn filled(path: &str) -> bool {
+        FILLED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(f, free)| Path::new(path).starts_with(f) && free.load(Ordering::Relaxed) == 0)
     }
 
     /// What was asked of the files in `folder`, in order.

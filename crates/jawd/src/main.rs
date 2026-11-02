@@ -4,6 +4,7 @@
 mod attention;
 mod convert;
 mod demo;
+mod disk;
 mod engine;
 mod expiry;
 mod feed;
@@ -735,7 +736,11 @@ async fn start_on(
 /// Starts jawd, keeping the engine's supervisor in `supervised` as soon as there is one, so it's
 /// stopped however the start ends. Whoever calls it holds jaw.lock.
 async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &OnceLock<Supervisor>) -> Result<Started> {
-    let store = store::Store::open(home)?;
+    let (pushes, _) = tokio::sync::broadcast::channel(256);
+    let disk = disk::Disk::watch(home, disk::Config::default());
+    tokio::spawn(disk::tell(disk.changes(), pushes.clone()));
+    let store = store::Store::open_watched(home, disk.clone())?;
+    disk.start();
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
     let expiry = expiry::start(store.clone());
@@ -751,7 +756,6 @@ async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &Once
     if let Ok(supervisor) = &supervisor {
         let _ = supervised.set(supervisor.clone());
     }
-    let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
     let following = presence::Following::default();
