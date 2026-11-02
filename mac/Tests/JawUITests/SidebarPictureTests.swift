@@ -54,7 +54,7 @@ func `the sidebar draws as its reference, the tree over Family's people`(dark: B
     s.select("folder:1")
     s.roster.show(folder: "folder:1")
     s.roster.apply(Update(seq: 1, upsert: familyPeople, total: UInt64(familyPeople.count)))
-    s.roster.typing = ["person:1"]
+    s.roster.typing = ["person:1": .typing]
     #expect(s.roster.said[3] == "Inês Gomes 2 h ago")
     s.roster.table.selectRowIndexes([3], byExtendingSelection: false)
     s.view.layoutSubtreeIfNeeded()

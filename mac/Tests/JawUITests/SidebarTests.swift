@@ -287,7 +287,7 @@ func `someone's row in the roster reads on the selection under it, with the keys
     defer { withExtendedLifetime(window) {} }
     s.apply(Samples.folderUpdate)
     s.roster.apply(Update(seq: 1, upsert: Samples.people, total: UInt64(Samples.people.count)))
-    s.roster.typing = ["person:1"]
+    s.roster.typing = ["person:1": .typing]
     s.roster.toggle("folder:1")
     s.view.layoutSubtreeIfNeeded()
     let table = s.roster.table

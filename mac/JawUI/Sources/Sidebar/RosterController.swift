@@ -24,9 +24,9 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         didSet { rebuild() }
     }
 
-    /// Who's typing or recording in their one-to-one chat now, by person id, as the app reads it from
-    /// who jawd says is typing in each chat.
-    public var typing: Set<String> = [] {
+    /// Who's typing or recording in their one-to-one chat now, and which, by person id, as the app
+    /// reads it from who jawd says is typing in each chat.
+    public var typing: [String: Typist.State] = [:] {
         didSet { if typing != oldValue { rebuild() } }
     }
 
@@ -126,7 +126,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     /// The rows that say how long ago someone was seen, which change as the minutes pass.
     var timed: IndexSet {
         IndexSet(lines.indices.filter { i in
-            if case let .person(p, _) = lines[i] { p.presence.state == .seen && p.presence.at != nil && !typing.contains(p.id) } else { false }
+            if case let .person(p, _) = lines[i] { p.presence.state == .seen && p.presence.at != nil && typing[p.id] == nil } else { false }
         })
     }
 
@@ -206,21 +206,21 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         }
     }
 
-    /// How someone is, typing… from their chat while it says so.
+    /// How someone is, typing… or recording… from their chat while it says so.
     func how(_ p: RosterRow) -> RosterLines.Said {
-        RosterLines.said(p.presence, typing: typing.contains(p.id), now: now())
+        RosterLines.said(p.presence, typing: typing[p.id], now: now())
     }
 
     /// The roster as it's drawn, a line each, for the tests and the snapshot: its title with a colon, a
     /// group's heading with who's around of how many, someone with how they are and "(faint)" where
-    /// jawd isn't following them and they aren't typing, and a fold with ▸ or ▾.
+    /// jawd isn't following them and they aren't typing or recording, and a fold with ▸ or ▾.
     public var said: [String] {
         lines.map { line in
             switch line {
             case let .title(text): "\(text):"
             case let .heading(name, around, of): "\(name) \(around) of \(of)"
             case let .person(p, _):
-                [p.name, how(p).text, p.presence.known || typing.contains(p.id) ? "" : "(faint)"].filter { !$0.isEmpty }
+                [p.name, how(p).text, p.presence.known || typing[p.id] != nil ? "" : "(faint)"].filter { !$0.isEmpty }
                     .joined(separator: " ")
             case let .offline(_, count, open): "\(open ? "▾" : "▸") \(count) offline"
             }
@@ -371,8 +371,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 }
 
 /// Someone's row: a dot in the online colour while they're around, their avatar, their name and how
-/// they are, all faint where jawd isn't following them now, unless they're typing, which shows only
-/// while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
+/// they are, all faint where jawd isn't following them now, unless they're typing or recording, which
+/// shows only while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
 /// one element, saying "last known" after how they are where it's faint.
 final class PersonCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("person")
@@ -384,7 +384,8 @@ final class PersonCell: NSTableCellView, RowSelectable {
     var menuFor: ((PersonCell) -> NSMenu?)?
     var popUp = MenuPopUp()
     var roles: Roles?
-    /// How the row is drawn: faint, the dot shown, and how they are in the online colour, for typing.
+    /// How the row is drawn: faint, the dot shown, and how they are in the online colour, for typing
+    /// or recording.
     var faint = false, around = false, typing = false
 
     /// A selected row in a roster with the keys is drawn on the system's accent, in the selected text's
@@ -441,7 +442,7 @@ final class PersonCell: NSTableCellView, RowSelectable {
         name.stringValue = p.name
         state.stringValue = said.text
         toolTip = p.about
-        // `said.online` is typing, from their chat.
+        // `said.online` is typing or recording, from their chat.
         faint = !p.presence.known && !said.online
         around = (p.presence.around || said.online) && !faint
         typing = said.online

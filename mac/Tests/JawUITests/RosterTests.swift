@@ -6,7 +6,7 @@ import Testing
 
 /// The roster: under All, grouped by your top folders, then Others, each with who's around listed and
 /// the rest folded; under a folder, its people as jawd sorts them, those jawd has no last seen for
-/// folded; someone typing in their chat around and listed; faint where jawd isn't following someone;
+/// folded; someone typing or recording in their chat around and listed; faint where jawd isn't following someone;
 /// how each is, in words; and more people asked for as it scrolls.
 
 /// The roster's lines as words.
@@ -77,17 +77,19 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
 }
 
 @Test func `someone typing in their chat is around and listed, never folded, though jawd has no last seen for them`() {
-    let typing: Set<String> = ["person:7"]
+    let typing: [String: Typist.State] = ["person:7": .typing]
     #expect(Array(lineWords(RosterLines.lines(Samples.people, folder: "all", tree: Samples.tree, open: [], typing: typing))[1 ... 4])
         == ["Family 2 of 5", "Ana Ribeiro", "Avó Lurdes", "▸ 3 offline"], "Avó Lurdes hides her presence, and her chat says she's typing")
     #expect(lineWords(RosterLines.lines(familyPeople, folder: "folder:1", tree: Samples.tree, open: [], typing: typing))
         == ["People in Family:", "Ana Ribeiro", "Mãe", "Inês Gomes", "Avó Lurdes", "▸ 1 offline"], "where jawd sorts her, after those last seen")
 }
 
-@Test func `how someone is: typing in the online colour while their chat says so, online, a time ago, and nothing when they hide it`() {
+@Test func `how someone is: typing or recording in the online colour while their chat says which, online, a time ago, and nothing when they hide it`() {
     let now = Samples.now
-    #expect(RosterLines.said(Presence(state: .seen, at: now - 60000, known: false), typing: true, now: now) == RosterLines.Said(text: "typing…", online: true),
-            "their chat says they're typing or recording, whatever jawd last knew of their presence")
+    #expect(RosterLines.said(Presence(state: .seen, at: now - 60000, known: false), typing: .typing, now: now) == RosterLines.Said(text: "typing…", online: true),
+            "their chat says they're typing, whatever jawd last knew of their presence")
+    #expect(RosterLines.said(Presence(state: .hidden), typing: .recording, now: now) == RosterLines.Said(text: "recording…", online: true),
+            "or recording, as the chat list and the header say it")
     #expect(RosterLines.said(Presence(state: .online), now: now) == RosterLines.Said(text: "online", online: false))
     #expect(RosterLines.said(Presence(state: .seen, at: now - 12 * 60000), now: now).text == "12 min ago")
     #expect(RosterLines.said(Presence(state: .hidden), now: now).text.isEmpty)
@@ -99,17 +101,17 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     let r = roster(host)
     defer { withExtendedLifetime(host) {} }
     #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro online", "▸ 4 offline"])
-    r.typing = ["person:1"]
+    r.typing = ["person:1": .typing]
     #expect(r.said[2] == "Ana Ribeiro typing…", "her chat says she's typing")
     r.toggle("folder:1")
     #expect(r.said[3] == "▾ 4 offline" && r.said[4] == "Mãe 12 min ago (faint)")
-    r.typing = ["person:1", "person:2"]
+    r.typing = ["person:1": .typing, "person:2": .typing]
     #expect(Array(r.said[1 ... 4]) == ["Family 2 of 5", "Ana Ribeiro typing…", "Mãe typing…", "▾ 3 offline"],
             "typing shows only while jawd hears it, so it's never faint")
 }
 
 @MainActor
-@Test func `the roster says who's typing from the app's typing map, in their own chat only, and follows it when only that changes`() throws {
+@Test func `the roster says who's typing or recording from the app's typing map, in their own chat only, and follows it when only that changes`() throws {
     let host = RosterStub()
     let r = roster(host)
     let window = NSWindow(contentViewController: r)
@@ -120,9 +122,16 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     typing[Samples.direct.id] = [Typist(id: "person:1", name: "Ana Ribeiro")]
     r.typing = RosterLines.typing(r.people.list, in: typing)
     r.view.layoutSubtreeIfNeeded()
-    #expect(r.typing == ["person:1"], "the roster's person:7, Avó Lurdes, isn't typing in her own chat")
+    #expect(r.typing == ["person:1": .typing], "the roster's person:7, Avó Lurdes, isn't typing in her own chat")
     #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro typing…", "▸ 4 offline"])
     #expect(try #require(cell(2)).state.stringValue == "typing…")
+    // She records a voice message instead: the roster says so, in the online colour, as the chat list does.
+    typing[Samples.direct.id] = [Typist(id: "person:1", name: "Ana Ribeiro", state: .recording)]
+    r.typing = RosterLines.typing(r.people.list, in: typing)
+    r.view.layoutSubtreeIfNeeded()
+    #expect(r.typing == ["person:1": .recording])
+    #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro recording…", "▸ 4 offline"])
+    #expect(try #require(cell(2)).state.stringValue == "recording…" && cell(2)?.typing == true, "in the online colour")
     // Only who's typing changes, with no roster push and no chat's row: Ana stops, and Avó Lurdes types in her chat.
     let lurdes = try #require(r.people.get("person:7")?.chat)
     r.typing = RosterLines.typing(r.people.list, in: [lurdes: [Typist(id: "person:7", name: "Avó Lurdes")]])
@@ -179,7 +188,7 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     family.view.layoutSubtreeIfNeeded()
     family.grow()
     #expect(other.moved.isEmpty, "under Family, Sofia hides her presence, so she's folded")
-    family.typing = ["person:5"]
+    family.typing = ["person:5": .typing]
     #expect(family.said.contains("Sofia Martins typing…") && other.moved == [.top(205)], "her chat says she's typing, which lists her")
 }
 
@@ -321,7 +330,7 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(Array(r.said[1 ... 3]) == ["Family 2 of 5", "Mãe online", "Ana Ribeiro online"])
     #expect(r.table.selectedRow == 3, "Ana still, a line down")
     r.table.selectRowIndexes([4], byExtendingSelection: false)
-    r.typing = ["person:7"]
+    r.typing = ["person:7": .typing]
     #expect(r.said[4] == "Avó Lurdes typing…" && r.said[5] == "▸ 2 offline" && r.table.selectedRow == 5, "Family's fold still")
     r.apply(Update(seq: 3, remove: ["person:1"]))
     r.table.selectRowIndexes([2], byExtendingSelection: false)

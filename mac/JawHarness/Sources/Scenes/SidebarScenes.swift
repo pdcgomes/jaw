@@ -146,7 +146,7 @@ private struct RosterScene: View {
             r.roles = roles
             _ = r.view
             r.apply(Update(seq: 1, upsert: people, total: UInt64(people.count)))
-            r.typing = ["person:1"]
+            r.typing = ["person:1": .typing]
             if let open { r.toggle(open) }
             return r
         }
