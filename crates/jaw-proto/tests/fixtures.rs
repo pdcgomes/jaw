@@ -17,6 +17,7 @@ use jaw_proto::send::{
 use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::themes::Themes;
+use jaw_proto::voice::{Playback, Recording, VoicePlay, VoiceRecord, VoiceSeek, VoiceSend, VoiceSent, VoiceSpeed};
 use jaw_proto::windows::{
     ChatRow, ChatsPush, ChatsWatch, ChatsWatched, FolderRow, FoldersPush, FoldersWatch, FoldersWatched, MessageRow,
     MessagesPush, MessagesWatch, MessagesWatched, PresencePush, RosterRow, RosterWatch, TypingPush, Watch, WatchMove,
@@ -142,6 +143,11 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "media.fetch" => params::<MediaFetch>(&name, &request.params),
                     "media.save" => params::<MediaSave>(&name, &request.params),
                     "media.cancel" => params::<MediaCancel>(&name, &request.params),
+                    "voice.play" => params::<VoicePlay>(&name, &request.params),
+                    "voice.seek" => params::<VoiceSeek>(&name, &request.params),
+                    "voice.speed" => params::<VoiceSpeed>(&name, &request.params),
+                    "voice.record" => params::<VoiceRecord>(&name, &request.params),
+                    "voice.send" => params::<VoiceSend>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -165,7 +171,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
                     | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set"
                     | "media.fetch" | "media.cancel" | "library.shown" | "chat.pin" | "chat.archive" | "chat.mute"
-                    | "chat.mark_unread" | "star" => {
+                    | "chat.mark_unread" | "star" | "voice.play" | "voice.record" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "media.save" => params::<MediaSaved>(&name, result),
@@ -173,6 +179,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                         params::<Sent>(&name, result)
                     }
                     "send.media" => params::<SentMedia>(&name, result),
+                    "voice.send" => params::<VoiceSent>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),
@@ -209,6 +216,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "typing" => params::<TypingPush>(&name, &push.params),
                     "presence" => params::<PresencePush>(&name, &push.params),
                     "job" => params::<Job>(&name, &push.params),
+                    "playback" => params::<Playback>(&name, &push.params),
+                    "recording" => params::<Recording>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
