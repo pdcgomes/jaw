@@ -8,6 +8,7 @@ use super::{Focus, View};
 use crate::composer::Composer;
 use crate::data::{LibraryAsk, LibraryKind, LibraryRow, LibraryWindow, MarkKind};
 use crate::fmt;
+use chrono::{Datelike, Days, Months, NaiveDate};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -433,11 +434,11 @@ impl View {
             }
             _ => {
                 let since = name == "since:";
-                for (label, at) in self.dates(&rest) {
+                for (label, first, last) in self.dates(&rest) {
                     let chip = if since {
-                        Chip::Since { at, label: label.clone() }
+                        Chip::Since { at: first, label: label.clone() }
                     } else {
-                        Chip::Until { at, label: label.clone() }
+                        Chip::Until { at: last, label: label.clone() }
                     };
                     out.push(Offer { said: label, chip });
                 }
@@ -448,37 +449,32 @@ impl View {
     }
 
     /// Dates a `since:` or `until:` could mean: a day typed, or the usual ones and recent months.
-    fn dates(&self, typed: &str) -> Vec<(String, i64)> {
-        let now = self.now();
-        let day = fmt::DAY;
-        let midnight = |at: i64| at - (at + self.tz.local_minus_utc() as i64 * 1_000).rem_euclid(day);
-        let today = midnight(now);
-        let mut out = vec![
-            ("today".to_string(), today),
-            ("yesterday".to_string(), today - day),
-            ("a week ago".to_string(), today - 7 * day),
-            ("a month ago".to_string(), today - 30 * day),
-            ("a year ago".to_string(), today - 365 * day),
-        ];
-        let mut at = now;
-        for _ in 0..12 {
-            let start = chrono::DateTime::from_timestamp_millis(at)
-                .map(|d| d.with_timezone(&self.tz))
-                .and_then(|d| {
-                    chrono::NaiveDate::from_ymd_opt(chrono::Datelike::year(&d), chrono::Datelike::month(&d), 1)
-                })
-                .and_then(|d| d.and_hms_opt(0, 0, 0))
-                .map(|d| d.and_utc().timestamp_millis() - self.tz.local_minus_utc() as i64 * 1_000);
-            let Some(start) = start else { break };
-            out.push((month(start, self.tz), start));
-            at = start - day;
+    /// Each with its first and last millisecond in the terminal's time zone, however long its
+    /// clocks make it, so `until:` takes in the whole of it, as the Mac's do.
+    fn dates(&self, typed: &str) -> Vec<(String, i64, i64)> {
+        let zone = &*self.zone;
+        // From the first millisecond of `first` to the last before `next` starts.
+        let span = |label: String, first: NaiveDate, next: Option<NaiveDate>| {
+            Some((label, zone.start(first)?, zone.start(next?)? - 1))
+        };
+        if let Ok(d) = NaiveDate::parse_from_str(typed.trim(), "%Y-%m-%d") {
+            return span(d.format("%-d %b %Y").to_string(), d, d.succ_opt()).into_iter().collect();
         }
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(typed.trim(), "%Y-%m-%d") {
-            let at = d.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp_millis()).unwrap_or(now);
-            return vec![(d.format("%-d %b %Y").to_string(), at - self.tz.local_minus_utc() as i64 * 1_000)];
+        let Some(today) = zone.day(self.now()) else { return vec![] };
+        let days = [("today", 0), ("yesterday", 1), ("a week ago", 7), ("a month ago", 30), ("a year ago", 365)];
+        let mut out: Vec<_> = days
+            .into_iter()
+            .filter_map(|(label, back)| {
+                let day = today.checked_sub_days(Days::new(back))?;
+                span(label.to_string(), day, day.succ_opt())
+            })
+            .collect();
+        let months = std::iter::successors(today.with_day(1), |first| first.checked_sub_months(Months::new(1)));
+        for first in months.take(12) {
+            out.extend(span(first.format("%B %Y").to_string(), first, first.checked_add_months(Months::new(1))));
         }
         let t = typed.trim().to_lowercase();
-        out.retain(|(label, _)| t.is_empty() || crate::find::fold(label).starts_with(&crate::find::fold(&t)[..]));
+        out.retain(|(label, ..)| t.is_empty() || crate::find::fold(label).starts_with(&crate::find::fold(&t)[..]));
         out
     }
 

@@ -1,11 +1,13 @@
 //! Frames as text at several sizes, keys driving the view, and anchoring as rows arrive.
 
+use super::library::Chip;
 use super::*;
 use crate::art;
 use crate::data::{Chat, Hit, Kind, LibraryKind, Media, OtherJawd, Sender, Span, SpanKind, Tick};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
+use chrono::{DateTime, Datelike, Days, MappedLocalTime, NaiveDate, NaiveDateTime, TimeZone};
 use jaw_proto::settings::{Messages, Settings, SettingsSet};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -26,6 +28,7 @@ fn view_in(state: State, width: u16, height: u16) -> (View, Receiver<Event>) {
     let mut v = View::new(Box::new(demo));
     v.clock = Some(NOW);
     v.tz = UTC;
+    v.zone = Box::new(UTC);
     v.theme = Theme::with(true);
     v.no_color = false;
     v.resize(width, height);
@@ -2488,6 +2491,80 @@ fn selected_item(v: &View) -> crate::data::LibraryRow {
     l.rows.iter().find(|r| Some(&r.id) == l.at.as_ref()).cloned().unwrap()
 }
 
+/// Milliseconds since the epoch at a time on the UTC clock.
+fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+    NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|d| d.and_hms_opt(hour, minute, 0))
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
+}
+
+/// Whether the library the chips ask for keeps a message sent at `at`: jawd includes both `since`
+/// and `until`, to the millisecond.
+fn keeps(v: &View, at: i64) -> bool {
+    v.library.as_ref().unwrap().chips.iter().all(|c| match c {
+        Chip::Since { at: since, .. } => at >= *since,
+        Chip::Until { at: until, .. } => at <= *until,
+        Chip::From { .. } | Chip::In { .. } => true,
+    })
+}
+
+/// Europe/Lisbon as its clocks go now: WET, and WEST, an hour ahead, from 01:00 UTC on March's
+/// last Sunday to 01:00 UTC on October's, when 2 a.m. goes back to 1.
+#[derive(Clone, Copy, Debug)]
+struct Lisbon;
+
+impl Lisbon {
+    const WEST: FixedOffset = FixedOffset::east_opt(3_600).unwrap();
+
+    /// When the clocks change in `month` of `year`: 01:00 UTC on its last Sunday.
+    fn change(year: i32, month: u32) -> NaiveDateTime {
+        let last = NaiveDate::from_ymd_opt(year, month + 1, 1).and_then(|d| d.pred_opt()).unwrap();
+        let sunday = last - Days::new(last.weekday().num_days_from_sunday().into());
+        sunday.and_hms_opt(1, 0, 0).unwrap()
+    }
+}
+
+impl TimeZone for Lisbon {
+    type Offset = FixedOffset;
+
+    fn from_offset(_: &FixedOffset) -> Lisbon {
+        Lisbon
+    }
+
+    fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+        let summer = (Lisbon::change(utc.year(), 3)..Lisbon::change(utc.year(), 10)).contains(utc);
+        if summer { Lisbon::WEST } else { UTC }
+    }
+
+    fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+        self.offset_from_utc_datetime(&utc.and_hms_opt(0, 0, 0).unwrap())
+    }
+
+    /// Both offsets in the hour the clocks go back over, and neither in the one they skip.
+    fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> MappedLocalTime<FixedOffset> {
+        let shown = |offset: FixedOffset| self.offset_from_utc_datetime(&(*local - offset)) == offset;
+        match (shown(Lisbon::WEST), shown(UTC)) {
+            (true, true) => MappedLocalTime::Ambiguous(Lisbon::WEST, UTC),
+            (true, false) => MappedLocalTime::Single(Lisbon::WEST),
+            (false, true) => MappedLocalTime::Single(UTC),
+            (false, false) => MappedLocalTime::None,
+        }
+    }
+
+    fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<FixedOffset> {
+        self.offset_from_local_datetime(&local.and_hms_opt(0, 0, 0).unwrap())
+    }
+}
+
+/// The view as a terminal started in Lisbon at `now` has it.
+fn in_lisbon(v: &mut View, now: i64) {
+    v.clock = Some(now);
+    v.tz = Lisbon.offset_from_utc_datetime(&DateTime::from_timestamp_millis(now).unwrap().naive_utc());
+    v.zone = Box::new(Lisbon);
+}
+
 #[test]
 fn ctrl_l_opens_the_open_chats_library_in_its_pane_then_all_chats_over_the_screen() {
     let (mut v, rx) = view(140, 44);
@@ -2578,6 +2655,64 @@ fn filters_are_typed_with_completion_and_shown_as_chips_backspace_takes_away() {
     assert!(library_rows(&v).iter().all(|r| r.at >= since && r.chat == "climbing"));
     press(&mut v, &rx, "<backspace>");
     assert!(!frame(&mut v).contains("since:"), "Backspace on an empty search takes the last chip away");
+}
+
+#[test]
+fn until_a_month_keeps_the_whole_month_to_its_last_millisecond() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l>until:Octo<tab>");
+    assert!(frame(&mut v).contains(" until: October 2026 "));
+    let november = utc(2026, 11, 1, 0, 0);
+    assert!(keeps(&v, november - 1), "a message at the last millisecond of 31 October");
+    assert!(!keeps(&v, november), "and not one at midnight on 1 November");
+    assert!(library_rows(&v).iter().any(|r| r.at >= utc(2026, 10, 1, 0, 0)), "October's own items show");
+}
+
+#[test]
+fn until_a_day_keeps_the_whole_day_to_its_last_millisecond() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l>until:yest<tab>");
+    assert!(frame(&mut v).contains(" until: yesterday "));
+    let today = utc(2026, 10, 16, 0, 0);
+    assert!(keeps(&v, today - 1) && !keeps(&v, today), "15 October's last millisecond, not the 16th's first");
+    press(&mut v, &rx, "until:2026-10-02<tab>");
+    assert!(frame(&mut v).contains(" until: 2 Oct 2026 "));
+    let third = utc(2026, 10, 3, 0, 0);
+    assert!(keeps(&v, third - 1) && !keeps(&v, third), "2 October's last millisecond, not the 3rd's first");
+}
+
+#[test]
+fn until_keeps_the_whole_day_or_month_across_the_october_clock_change_in_lisbon() {
+    let (mut v, rx) = view(140, 44);
+    in_lisbon(&mut v, NOW);
+    press(&mut v, &rx, "<c-l><c-l>until:Octo<tab>");
+    assert!(frame(&mut v).contains(" until: October 2026 "));
+    let november = utc(2026, 11, 1, 0, 0);
+    assert!(keeps(&v, november - 1) && !keeps(&v, november), "31 October ends on winter time, at midnight UTC");
+    press(&mut v, &rx, "until:2026-10-25<tab>");
+    let monday = utc(2026, 10, 26, 0, 0);
+    assert!(keeps(&v, monday - 1) && !keeps(&v, monday), "25 October, when the clocks go back, has 25 hours");
+    press(&mut v, &rx, "until:2026-10-24<tab>");
+    let sunday = utc(2026, 10, 24, 23, 0);
+    assert!(keeps(&v, sunday - 1) && !keeps(&v, sunday), "24 October ends on summer time, at 23:00 UTC");
+}
+
+#[test]
+fn since_still_takes_the_first_millisecond_of_the_day_or_month_named() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l>since:Octo<tab>");
+    let october = utc(2026, 10, 1, 0, 0);
+    assert!(keeps(&v, october) && !keeps(&v, october - 1), "1 October's first millisecond, not 30 September's last");
+    press(&mut v, &rx, "since:2026-10-02<tab>");
+    let second = utc(2026, 10, 2, 0, 0);
+    assert!(keeps(&v, second) && !keeps(&v, second - 1), "2 October's first millisecond, not the 1st's last");
+    in_lisbon(&mut v, utc(2026, 11, 2, 12, 0));
+    press(&mut v, &rx, "since:Octo<tab>");
+    let october = utc(2026, 9, 30, 23, 0);
+    assert!(keeps(&v, october) && !keeps(&v, october - 1), "in November, 1 October still starts on summer time");
+    press(&mut v, &rx, "since:2026-10-25<tab>");
+    let sunday = utc(2026, 10, 24, 23, 0);
+    assert!(keeps(&v, sunday) && !keeps(&v, sunday - 1), "25 October starts on summer time, at 23:00 UTC");
 }
 
 #[test]

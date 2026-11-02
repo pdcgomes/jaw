@@ -1,6 +1,6 @@
 //! Times, counts and widths as the screen writes them.
 
-use chrono::{DateTime, Datelike, FixedOffset, TimeZone};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeDelta, TimeZone};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -94,6 +94,29 @@ pub fn until(at: i64, tz: FixedOffset) -> String {
 /// Everything about when, for the selected message.
 pub fn full(at: i64, tz: FixedOffset) -> String {
     local(at, tz).format("%A %-d %B %Y, %H:%M:%S").to_string()
+}
+
+/// What a search needs of a time zone to bound the days and months it names, clock changes and
+/// all: the day an instant falls on there, and when a day starts.
+pub trait Zone {
+    fn day(&self, at: i64) -> Option<NaiveDate>;
+    /// The first millisecond of `day`: its midnight, or, where the clocks skip midnight, the first
+    /// minute after it they show.
+    fn start(&self, day: NaiveDate) -> Option<i64>;
+}
+
+impl<Tz: TimeZone> Zone for Tz {
+    fn day(&self, at: i64) -> Option<NaiveDate> {
+        self.timestamp_millis_opt(at).single().map(|d| d.date_naive())
+    }
+
+    fn start(&self, day: NaiveDate) -> Option<i64> {
+        let midnight = day.and_hms_opt(0, 0, 0)?;
+        (0..=24 * 60)
+            .filter_map(|m| midnight.checked_add_signed(TimeDelta::minutes(m)))
+            .find_map(|t| self.from_local_datetime(&t).earliest())
+            .map(|t| t.timestamp_millis())
+    }
 }
 
 /// A count with its thousands marked, as 1,204.

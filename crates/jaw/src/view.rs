@@ -172,6 +172,9 @@ pub struct View {
     /// A clock that stands still, for frames that must come out the same.
     pub clock: Option<i64>,
     pub tz: FixedOffset,
+    /// The terminal's time zone, clock changes and all, which the days and months a search names
+    /// are bounded in; `tz` is its offset when the view was made.
+    pub zone: Box<dyn fmt::Zone>,
     /// jawd's settings, as hello, a push or an answer last said; what was last asked of it while
     /// its answer is on the way; and how many changes asked are still to be answered.
     settings: Settings,
@@ -349,6 +352,7 @@ impl View {
             no_color: crate::theme::no_color(),
             clock: None,
             tz: *chrono::Local::now().offset(),
+            zone: Box::new(chrono::Local),
             settings: Settings::default(),
             settings_asked: None,
             settings_owed: 0,
