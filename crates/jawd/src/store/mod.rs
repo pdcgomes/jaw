@@ -259,6 +259,9 @@ struct Wal {
     refused: Mutex<Vec<Instant>>,
     #[cfg(test)]
     restarts: Mutex<Vec<Restart>>,
+    /// Whether the checkpointer sleeps through its kicks, for tests of the writer's own checkpoints.
+    #[cfg(test)]
+    parked: AtomicBool,
 }
 
 /// One of the writer's tries to start the WAL again, for tests: when it began and ended, whether it
@@ -295,6 +298,8 @@ impl Wal {
             refused: Mutex::default(),
             #[cfg(test)]
             restarts: Mutex::default(),
+            #[cfg(test)]
+            parked: AtomicBool::new(false),
         }
     }
 
@@ -1815,8 +1820,9 @@ impl Writer {
     /// for the checkpointer to copy every frame, after which the next transaction starts the WAL
     /// again from its beginning. Live writes landing during the checkpointer's passes can keep it
     /// from ever getting there, so after FINISH_AFTER with only a few frames left the writer copies
-    /// those itself, where no commit can land meanwhile. Past the hard limit it waits for that
-    /// whatever holds the frames.
+    /// those itself, where no commit can land meanwhile; a full disk that refuses it gives up the
+    /// ballast, so the next try has room. Past the hard limit it waits for that whatever holds the
+    /// frames.
     fn room(&mut self) -> bool {
         let frames = self.wal.frames.load(Ordering::Relaxed);
         let waiting = self.wal.waiting();
@@ -1843,6 +1849,9 @@ impl Writer {
             }
             Err(e) => {
                 eprintln!("jawd: the writer's checkpoint failed: {e:#}");
+                if disk_full(&e) {
+                    self.disk.full();
+                }
                 frames < self.wal.hard
             }
         }
@@ -2085,7 +2094,7 @@ impl Writer {
     /// WAL_SOFT to WAL_HARD, which a first run's took seconds over. A try that doesn't start the
     /// WAL again wakes the checkpointer as it ends: a pass refused the lock while the try held it
     /// has gone back to sleep, and while background work waits, nothing may commit to wake it
-    /// before its idle timeout.
+    /// before its idle timeout. One a full disk refuses gives up the ballast, so the next has room.
     fn bound_wal(&mut self) {
         let (began, frames) = (Instant::now(), self.wal.frames.load(Ordering::Relaxed));
         let bound = if self.holding.is_some() { self.wal.soft } else { self.wal.hard };
@@ -2109,6 +2118,9 @@ impl Writer {
         }
         let again = tried.unwrap_or_else(|e| {
             eprintln!("jawd: the writer couldn't start the WAL again: {e:#}");
+            if disk_full(&e) {
+                self.disk.full();
+            }
             (true, 0, 0)
         });
         if again.0 {
@@ -2289,6 +2301,10 @@ fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration
             if emptied { kicks.recv().map_err(|_| RecvTimeoutError::Disconnected) } else { kicks.recv_timeout(idle) };
         #[cfg(test)]
         wal.woke.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        if wal.parked.load(Ordering::Relaxed) && kicked.is_ok() {
+            continue;
+        }
         match kicked {
             Ok(()) => emptied = false,
             Err(RecvTimeoutError::Timeout) => {
@@ -3727,6 +3743,74 @@ mod tests {
         })
         .await
         .expect("and the next pass copies the WAL in its room");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_of_the_wal_a_full_disk_refuses_gives_up_the_ballast_and_the_next_starts_it_again_in_its_room() {
+        let home = tempfile::tempdir().unwrap();
+        let config = disk::Config { ballast: MB, ..Default::default() };
+        let (disk, fake) = Disk::faked(home.path(), config, 10 * GB, 500 * GB);
+        disk.tick().await;
+        let limits = Limits { wal_hard: 64, idle: Duration::from_secs(60), ..LIMITS };
+        let store = Store::open_on(home.path(), limits, disk.clone()).unwrap();
+        vfs::noted::fill(&home.path().join("jaw.db"), fake.free.clone());
+        fake.free.store(0, Ordering::Relaxed);
+        let chat = "351910000001@s.whatsapp.net";
+        let mut n = 0;
+        while disk.status().unwrap().ballast_given_up == 0 && store.storage().wal_frames < WAL_EASY / 2 {
+            store.apply(Lane::Live, messages([text(chat, &format!("m{n}"), n, "words")])).await.unwrap();
+            n += 1;
+        }
+        let given_up = tokio::time::timeout(Duration::from_secs(5), async {
+            while disk.status().unwrap().ballast_given_up == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        given_up.await.expect("the restart the full disk refused gave up the ballast");
+        assert!(store.trouble().borrow().is_none(), "no commit was refused");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !store.wal.restarts.lock().unwrap().iter().any(|tried| tried.restarted) {
+                store.apply(Lane::Live, messages([text(chat, &format!("m{n}"), n, "words")])).await.unwrap();
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("and the next try starts the WAL again in its room");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writers_copy_of_the_last_frames_a_full_disk_refuses_gives_up_the_ballast_and_the_next_copies_them() {
+        let home = tempfile::tempdir().unwrap();
+        let config = disk::Config { ballast: MB, ..Default::default() };
+        let (disk, fake) = Disk::faked(home.path(), config, 10 * GB, 500 * GB);
+        disk.tick().await;
+        let limits = Limits { wal_soft: 1, idle: Duration::from_secs(60), ..LIMITS };
+        let store = Store::open_on(home.path(), limits, disk.clone()).unwrap();
+        store.truncate().await.unwrap();
+        store.wal.parked.store(true, Ordering::Relaxed);
+        vfs::noted::fill(&home.path().join("jaw.db"), fake.free.clone());
+        fake.free.store(0, Ordering::Relaxed);
+        let chat = "351910000001@s.whatsapp.net";
+        store.apply(Lane::Live, messages([text(chat, "m", 1, "words to find")])).await.unwrap();
+        let waiting = store.storage().frames_waiting;
+        assert!(waiting > 0 && waiting <= WAL_NEAR, "few enough frames for the writer to copy itself: {waiting}");
+        let given_up = tokio::time::timeout(Duration::from_secs(5), async {
+            while disk.status().unwrap().ballast_given_up == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        given_up
+            .await
+            .expect("the writer's copy the full disk refused, as indexing waited for the WAL, gave up the ballast");
+        assert!(store.trouble().borrow().is_none(), "no commit was refused");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.storage().frames_waiting > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("and its next copies them in its room");
     }
 
     #[tokio::test(flavor = "multi_thread")]
