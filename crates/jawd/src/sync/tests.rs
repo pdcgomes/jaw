@@ -2113,6 +2113,13 @@ async fn a_notification_whose_conversion_panics_keeps_its_blob_in_the_spool_for_
         }
         let ids: Vec<(i64, &str)> = later.iter().map(|offer| (offer.seq, offer.id.as_str())).collect();
         assert_eq!(ids, [(3, "3EB0NOTEAFTER")], "the notification after it is offered, and not the one that panicked");
+        let before = stored(home.path(), &store);
+        let all = blob("h1").len() + blob("h0").len() + b"half a blob".len();
+        assert_eq!(
+            (before.spool_files, before.spool_bytes),
+            (3, all as u64),
+            "jawd status counts every file in the spool before the sweep, the download cut short among them"
+        );
         fetcher.send(fetch::Work::Offered).unwrap();
         for offer in later {
             fetcher.send(fetch::Work::Offer(offer)).unwrap();
