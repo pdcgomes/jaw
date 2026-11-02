@@ -55,7 +55,7 @@ public extension LibraryHost {
 /// screen where it is as its window moves, and moves its window as the grid nears its ends, as a
 /// conversation moves a chat's.
 @MainActor
-public final class LibraryController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate,
+public final class LibraryController: NSViewController, NSCollectionViewDelegate,
     NSCollectionViewPrefetching, NSTextFieldDelegate
 {
     public let scope: LibraryScope
@@ -147,7 +147,8 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         root.controller = self
         grid.laid = laid
         collection.collectionViewLayout = grid
-        collection.dataSource = self
+        grid.pane = self
+        collection.dataSource = grid
         collection.delegate = self
         collection.prefetchDataSource = self
         collection.isSelectable = false
@@ -629,15 +630,9 @@ public final class LibraryController: NSViewController, NSCollectionViewDataSour
         LibraryDrawing.Context(style: style, now: Format.now(), tz: .current, scoped: scope.chat != nil)
     }
 
-    public func numberOfSections(in _: NSCollectionView) -> Int {
-        1
-    }
-
-    public func collectionView(_: NSCollectionView, numberOfItemsInSection _: Int) -> Int {
-        laid.elements.count
-    }
-
-    public func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+    /// The grid's item at `indexPath`, for its layout, which counts the same elements.
+    func item(_ collectionView: NSCollectionView, at indexPath: IndexPath) -> NSCollectionViewItem {
+        guard laid.elements.indices.contains(indexPath.item) else { return LibraryGridLayout.empty(collectionView, indexPath) }
         let element = laid.elements[indexPath.item]
         let reuse = if case .tile = element.what { LibraryGridItem.tile } else { LibraryGridItem.id }
         let item = collectionView.makeItem(withIdentifier: reuse, for: indexPath) as! LibraryGridItem

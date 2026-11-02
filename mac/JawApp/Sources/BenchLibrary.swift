@@ -153,7 +153,7 @@ enum BenchLibrary {
     static func fling(_ c: LibraryController, served: Served, model: AppModel, window: NSWindow, folder: URL) {
         let landed = served.landings.count
         measure(c) { turns, seconds in
-            found(turns, seconds, Array(served.landings[landed...]), model: model, window: window, folder: folder)
+            found(turns, seconds, served, from: landed, model: model, window: window, folder: folder)
         }
     }
 
@@ -205,9 +205,12 @@ enum BenchLibrary {
         }
     }
 
-    /// What the fling found, with the footprint and the decoded pictures after it.
-    static func found(_ turns: [Double], _ seconds: Double, _ landings: [Double], model: AppModel, window: NSWindow, folder: URL) {
-        let sorted = turns.sorted(), over = turns.filter { $0 > 1000.0 / 120 }, moves = landings.sorted()
+    /// What the fling found, with the footprint and the decoded pictures after it; the pane is let go
+    /// of only once its window has let go of its view, which would otherwise lay out without it.
+    static func found(_ turns: [Double], _ seconds: Double, _ served: Served, from landed: Int, model: AppModel, window: NSWindow,
+                      folder: URL)
+    {
+        let sorted = turns.sorted(), over = turns.filter { $0 > 1000.0 / 120 }, moves = served.landings[landed...].sorted()
         let found = BenchPictures.Found()
         found.said = ["photos": Double(photos), "fling_ms": Bench.ms(seconds), "turns": Double(turns.count)]
         found.said["p50_ms"] = BenchPictures.percentile(sorted, 0.5)
@@ -229,6 +232,7 @@ enum BenchLibrary {
                 found.said["load"] = BenchPictures.load()
                 window.contentView = nil
                 window.close()
+                served.pane = nil
                 try? FileManager.default.removeItem(at: folder)
                 Bench.finish(found.said)
             }

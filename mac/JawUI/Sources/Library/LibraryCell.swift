@@ -94,13 +94,7 @@ final class LibraryCell: NSView {
         self.item = item
         self.context = context
         self.selected = selected
-        if wasTile, !isTile, let layer {
-            // Drawn from now on, into a backing store of its own, which its corners no longer clip.
-            layer.contents = nil
-            layer.backgroundColor = nil
-            layer.masksToBounds = false
-            overlay.contents = nil
-        }
+        if wasTile, !isTile { drawnFromNowOn() }
         if changed {
             drawnFrom = 0
             drewOnce = false
@@ -109,6 +103,26 @@ final class LibraryCell: NSView {
             askPictures()
         }
         needsDisplay = true
+    }
+
+    /// Shows nothing, as an item whose pane has gone does.
+    func clear() {
+        let wasTile = isTile
+        letGo()
+        element = nil
+        item = nil
+        if wasTile { drawnFromNowOn() }
+        needsDisplay = true
+    }
+
+    /// What a tile gave its layer undone: drawn from now on, into a backing store of its own, which
+    /// its corners no longer clip.
+    func drawnFromNowOn() {
+        guard let layer else { return }
+        layer.contents = nil
+        layer.backgroundColor = nil
+        layer.masksToBounds = false
+        overlay.contents = nil
     }
 
     var drawn: LibraryDrawn? {
@@ -315,9 +329,28 @@ final class LibraryGridItem: NSCollectionViewItem {
 }
 
 /// The grid's layout: each element where `LibraryLayout` put it, so the collection view places what
-/// was laid out and lays out nothing itself.
-final class LibraryGridLayout: NSCollectionViewLayout {
+/// was laid out and lays out nothing itself. It's the grid's data source too, counting the same
+/// elements and asking its pane for each item: a collection view holds its data source weakly but
+/// its layout strongly, so one whose pane has gone, its view left in a window, still has its items
+/// to ask for, empty ones, rather than none to ask.
+final class LibraryGridLayout: NSCollectionViewLayout, NSCollectionViewDataSource {
     var laid = LibraryLaid.empty
+    weak var pane: LibraryController?
+
+    func collectionView(_: NSCollectionView, numberOfItemsInSection _: Int) -> Int {
+        laid.elements.count
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        pane?.item(collectionView, at: indexPath) ?? Self.empty(collectionView, indexPath)
+    }
+
+    /// An item that shows nothing.
+    static func empty(_ collectionView: NSCollectionView, _ indexPath: IndexPath) -> NSCollectionViewItem {
+        let item = collectionView.makeItem(withIdentifier: LibraryGridItem.id, for: indexPath)
+        (item as? LibraryGridItem)?.cell.clear()
+        return item
+    }
 
     override var collectionViewContentSize: NSSize {
         NSSize(width: laid.width, height: laid.height)
