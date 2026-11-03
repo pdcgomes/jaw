@@ -373,4 +373,4 @@ fn secure_delete(db: &Connection, pragma: &str, expected: i64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

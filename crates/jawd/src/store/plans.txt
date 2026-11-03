@@ -3583,13 +3583,12 @@ SELECT 1 FROM outbox WHERE n = ?1 AND state = 'queued'
     SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
-DELETE FROM outbox WHERE message = ?1 AND state = 'failed' AND (EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted) OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = ?1 AND a.kind = 'revoke' AND a.state = 'failed'))
+SELECT n FROM outbox WHERE message = ?1 AND state = 'failed' AND (EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted) OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = ?1 AND a.kind = 'revoke' AND a.state = 'failed'))
     SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
     SCALAR SUBQUERY 1
       SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SCALAR SUBQUERY 2
       SEARCH a USING INDEX outbox_by_target (target=?)
-    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke') FROM messages m WHERE m.n = ?1

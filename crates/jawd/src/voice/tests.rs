@@ -14,7 +14,10 @@ use crate::engine::demo::{self, DemoEngine, World};
 use crate::engine::pb;
 use crate::engine::supervisor::{Backoff, Supervisor};
 use crate::send::{Makers, Timing};
-use crate::store::{Change, Chat, Lane, Store};
+use crate::store::expiry::tests::{
+    bytes_gone_but_for, free_holding, pages_holding, settled, several_of_each, still_found,
+};
+use crate::store::{Amend, Amendment, Change, Chat, Lane, Store};
 use crate::work::Priority;
 
 const ANA: &str = "351912345678@s.whatsapp.net";
@@ -1211,5 +1214,332 @@ async fn a_recording_whose_chat_merges_goes_to_the_chat_kept_with_its_timer_befo
         let audio = message.audio_message.as_deref().unwrap();
         let expiration = audio.context_info.as_ref().and_then(|c| c.expiration);
         assert_eq!((audio.ptt, expiration), (Some(true), Some(86_400)), "{id} carries the chat kept's timer");
+    }
+}
+
+/// `seconds` of a tone at 48 kHz that swells as it goes, so a recording of it has a rising
+/// waveform, whose bytes nothing else in jaw.db holds.
+fn swell(seconds: f64) -> Vec<f32> {
+    let n = (seconds * 48_000.0) as usize;
+    (0..n)
+        .map(|i| {
+            let loud = 0.05 + 0.9 * i as f32 / n as f32;
+            (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * loud
+        })
+        .collect()
+}
+
+impl Rig {
+    /// A rig recording a swelling tone, whose chat with Ana has a timer of `seconds`, beside thirty
+    /// captioned photos and thirty messages with links in every search index.
+    async fn timed(home: &Path, seconds: u32) -> (Rig, MicrophoneProbe) {
+        let (rig, heard) = Rig::recording(home, swell(1.0), 4.0, jaw_voice::RECORDING_LIMIT).await;
+        let timer = Chat { id: ANA.into(), ephemeral: Some(seconds), ephemeral_at: Some(1_000), ..Chat::default() };
+        let mut changes = several_of_each();
+        changes.push(Change::Chat(timer));
+        rig.store.apply(Lane::Live, changes).await.unwrap();
+        rig.store.indexed().await.unwrap();
+        (rig, heard)
+    }
+
+    async fn query<T: Send + 'static>(
+        &self,
+        query: impl FnOnce(&rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
+    ) -> T {
+        self.store.reads().query(Priority::Interactive, query).await.unwrap()
+    }
+
+    /// Message `id`'s n, when it goes, and its detail, which says how long it is and its waveform.
+    async fn timed_row(&self, id: &str) -> (i64, Option<i64>, String) {
+        let id = id.to_string();
+        let (n, expires_at, detail): (i64, Option<i64>, Option<String>) = self
+            .query(move |db| {
+                Ok(db.query_row("SELECT n, expires_at, detail FROM messages WHERE id = ?1", [&id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?)
+            })
+            .await;
+        let detail = detail.expect("a voice message's row says how long it is");
+        assert!(detail.contains("waveform"), "and gives its waveform: {detail}");
+        (n, expires_at, detail)
+    }
+
+    /// The waveform message `id`'s outbox row sends.
+    async fn waveform_going(&self, id: &str) -> Vec<u8> {
+        let id = id.to_string();
+        let raw: Vec<u8> =
+            self.query(move |db| Ok(db.query_row("SELECT raw FROM outbox WHERE id = ?1", [&id], |r| r.get(0))?)).await;
+        let goes: wa_proto::wa_web_protobufs_e2e::Message = prost::Message::decode(raw.as_slice()).unwrap();
+        goes.audio_message.and_then(|audio| audio.waveform).expect("a voice message goes with its waveform")
+    }
+
+    /// Waits until a recording is on its way up, and held there.
+    async fn uploading(&self) {
+        let up = tokio::time::timeout(PATIENCE, async {
+            while self.world.uploads().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(up.await.is_ok(), "its recording never went up");
+    }
+
+    /// Waits until the outbox holds nothing: every message has gone, or never will.
+    async fn outbox_empty(&self, what: &str) {
+        let left = || {
+            self.query(|db| {
+                Ok(db
+                    .prepare("SELECT kind, state, error FROM outbox")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, String, Option<String>)>>>()?)
+            })
+        };
+        let emptied = tokio::time::timeout(PATIENCE, async {
+            while !left().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(emptied.await.is_ok(), "{what}: the outbox never emptied: {:?}", left().await);
+    }
+
+    /// The files in jaw's folder, wherever they are in it, that are `file`.
+    fn copies_of(&self, file: &[u8]) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut folders = vec![self.home.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap().filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if std::fs::read(&path).is_ok_and(|bytes| bytes == file) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+}
+
+/// A voice note of yours goes by the timer it went with, counted from when WhatsApp has it, as a
+/// text does (round three's D1, the voice audit's O5): one sent while its chat had no timer, the
+/// timer set to a day before WhatsApp answers, has no time to go, so the timer never erases it, as
+/// WhatsApp and your phone keep it; one sent with a day's timer, the timer turned off before the
+/// answer, goes a day after it, as WhatsApp erases it everywhere else, and then nothing of its row
+/// is left. Among thirty captioned photos and thirty messages with links.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_note_of_yours_goes_by_the_timer_it_went_with_not_the_one_its_chat_has_once_the_server_has_it() {
+    let day = 86_400_000;
+    for (went_with, set_before_answer) in [(0u32, 86_400u32), (86_400, 0)] {
+        let home = tempfile::tempdir().unwrap();
+        let (rig, heard) = Rig::timed(home.path(), went_with).await;
+        rig.world.gate(true);
+        rig.recorded(&heard).await;
+        let id = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+        rig.sending.call("chat.disappearing", json!({ "chat": ANA, "seconds": set_before_answer })).await.unwrap();
+        let answered_from = now_ms();
+        rig.world.gate(false);
+        rig.until(ANA, &id, "sent", sent).await;
+        let answered_by = now_ms();
+        let [went] = rig.sent(&id).try_into().unwrap();
+        let audio = went.audio_message.as_deref().unwrap();
+        let carried = audio.context_info.as_ref().and_then(|c| c.expiration);
+        assert_eq!(carried.unwrap_or(0), went_with, "it went with the timer its chat had when it was sent");
+        let (n, expires_at, detail) = rig.timed_row(&id).await;
+        if went_with == 0 {
+            assert_eq!(expires_at, None, "it went without a timer, so it stays, whatever its chat's is now");
+            let timer = Change::Expire { n, at: answered_by + day };
+            let erased = rig.store.apply(Lane::Background, vec![timer]).await.unwrap();
+            assert_eq!(erased.changed, 0, "a day after WhatsApp had it, the timer has nothing of it to erase");
+            assert_eq!(rig.row(ANA, &id).await["kind"], "voice", "and it's still there");
+            continue;
+        }
+        let at = expires_at.expect("it goes, though its chat's timer is off now");
+        assert!(
+            (answered_from + day..=answered_by + day).contains(&at),
+            "it goes a day after WhatsApp had it: {at} not in {}..={}",
+            answered_from + day,
+            answered_by + day,
+        );
+        let waveform = audio.waveform.clone().unwrap();
+        let before = free_holding(&rig.store, &rig.home, &waveform).await;
+        let before_detail = free_holding(&rig.store, &rig.home, detail.as_bytes()).await;
+        let erased = rig.store.apply(Lane::Background, vec![Change::Expire { n, at }]).await.unwrap();
+        assert_eq!(erased.changed, 1, "at its time it's erased");
+        settled(&rig.store).await;
+        bytes_gone_but_for(&rig.home, &waveform, &before, "its waveform, once it's erased");
+        bytes_gone_but_for(&rig.home, detail.as_bytes(), &before_detail, "its row's detail, once it's erased");
+        still_found(&rig.store, "once it's erased").await;
+    }
+}
+
+/// How a test takes a voice note of yours away while it's on its way.
+#[derive(Clone, Copy)]
+enum Away {
+    /// Deleted for you from jaw, which, as on the phone, still sends it.
+    ForYou,
+    /// Deleted for everyone from jaw: shown deleted at once, its row changed once WhatsApp has the
+    /// deletion, which goes after it.
+    ForEveryone,
+    /// Revoked on another of your devices, which changes its row at once, as round three's I7 test
+    /// revokes a text.
+    Revoked,
+}
+
+impl Rig {
+    async fn take_away(&self, id: &str, away: Away) {
+        let for_ = match away {
+            Away::ForYou => "me",
+            Away::ForEveryone => "everyone",
+            Away::Revoked => {
+                let revoke = Amend {
+                    chat: ANA.into(),
+                    target: id.into(),
+                    sender: None,
+                    mine: true,
+                    at: now_ms(),
+                    what: Amendment::Revoke,
+                    raw: None,
+                };
+                let applied = self.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+                assert_eq!(applied.changed, 1, "the revoke changes its row");
+                return;
+            }
+        };
+        self.sending.call("delete", json!({ "chat": ANA, "message": id, "for": for_ })).await.unwrap();
+    }
+
+    /// Whether message `id`'s row is deleted for everyone, and whether it keeps its raw protobuf and
+    /// its detail.
+    async fn revoked_row(&self, id: &str) -> (bool, bool, bool) {
+        let id = id.to_string();
+        self.query(move |db| {
+            Ok(db.query_row(
+                "SELECT deleted, raw IS NOT NULL, detail IS NOT NULL FROM messages WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+    }
+}
+
+/// A voice note of yours still on its way, which goes with its chat's timer, is taken as an erasure
+/// takes it, whatever takes it away while its recording uploads (round three's I7, with a voice
+/// note): deleted for you, revoked on another of your devices, or deleted for everyone from jaw.
+/// Once its row is changed, nothing of what it said is left in jaw.db but in the outbox row that
+/// still sends it, and once WhatsApp has it, nothing anywhere, the WAL included, though the upload
+/// on its way as it was taken away is done after; or, taken away while its copy was made and
+/// refused by WhatsApp's media server, once nothing can send it. Among thirty captioned photos and
+/// thirty messages with links.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_note_of_yours_on_its_way_with_a_timer_deleted_or_revoked_leaves_nothing_of_its_row() {
+    let ways = [
+        (Away::ForYou, "deleted for you"),
+        (Away::Revoked, "revoked on another of your devices"),
+        (Away::ForEveryone, "deleted for everyone"),
+    ];
+    for refused in [false, true] {
+        for (away, way) in ways {
+            let what =
+                format!("{way} {}", if refused { "while its copy is made, then refused" } else { "as it uploads" });
+            taken_away_leaves_nothing(away, refused, &what).await;
+        }
+    }
+}
+
+/// One case of the test above: a voice note taken away `away`, its copy refused if `refused`.
+async fn taken_away_leaves_nothing(away: Away, refused: bool, what: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let (rig, heard) = Rig::timed(home.path(), 86_400).await;
+    if refused {
+        rig.media.hold_making(true);
+        rig.world.refuse_uploads(1);
+    } else {
+        rig.world.gate_uploads(true);
+    }
+    rig.recorded(&heard).await;
+    let id = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+    if !refused {
+        rig.uploading().await;
+    }
+    let (_, _, detail) = rig.timed_row(&id).await;
+    let waveform = rig.waveform_going(&id).await;
+    let before = free_holding(&rig.store, &rig.home, &waveform).await;
+    let before_detail = free_holding(&rig.store, &rig.home, detail.as_bytes()).await;
+    rig.take_away(&id, away).await;
+    // Deleted for everyone from jaw, its row says what it did until WhatsApp has the deletion.
+    if !matches!(away, Away::ForEveryone) {
+        settled(&rig.store).await;
+        let left: Vec<_> = pages_holding(&rig.home, &waveform)
+            .into_iter()
+            .filter(|(page, owner)| owner.as_deref() != Some("outbox") && !before.contains(page))
+            .collect();
+        assert!(left.is_empty(), "{what}: its waveform is left but in the outbox row that sends it: {left:?}");
+        bytes_gone_but_for(&rig.home, detail.as_bytes(), &before_detail, &format!("{what}: its row's detail"));
+    }
+    rig.media.hold_making(false);
+    rig.world.gate_uploads(false);
+    rig.outbox_empty(what).await;
+    assert_eq!(rig.sent(&id).len(), usize::from(!refused), "{what}: it goes once it's uploaded, all the same");
+    settled(&rig.store).await;
+    if !matches!(away, Away::ForYou) {
+        assert_eq!(rig.revoked_row(&id).await, (true, false, false), "{what}: its row says nothing of it");
+    }
+    bytes_gone_but_for(&rig.home, &waveform, &before, &format!("{what}, once it's done with: its waveform"));
+    let detail_left = format!("{what}, once it's done with: its row's detail");
+    bytes_gone_but_for(&rig.home, detail.as_bytes(), &before_detail, &detail_left);
+    still_found(&rig.store, "the others").await;
+}
+
+/// A voice note of yours erased while its recording is still on its way up, with its chat's timer
+/// on, leaves nothing of the recording, as an erased photo's HD copy leaves none (round three's
+/// L3): no file of it anywhere in jaw's folder, no copy's row and no failed send for send.retry to
+/// find, whether it's deleted for you, revoked on another of your devices or deleted for everyone
+/// from jaw, and whether its upload then goes or, taken away while its copy was made, WhatsApp's
+/// media server refuses it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erased_voice_note_of_yours_whose_recording_is_on_its_way_up_leaves_no_file_row_or_failed_send() {
+    let ways = [
+        (Away::ForYou, "deleted for you"),
+        (Away::Revoked, "revoked on another of your devices"),
+        (Away::ForEveryone, "deleted for everyone"),
+    ];
+    for refused in [false, true] {
+        for (away, way) in ways {
+            let what =
+                format!("{way} {}", if refused { "while its copy is made, then refused" } else { "as it uploads" });
+            let home = tempfile::tempdir().unwrap();
+            let (rig, heard) = Rig::timed(home.path(), 86_400).await;
+            if refused {
+                rig.media.hold_making(true);
+                rig.world.refuse_uploads(1);
+            } else {
+                rig.world.gate_uploads(true);
+            }
+            let file = rig.recorded(&heard).await;
+            let id = rig.call("voice.send", json!({})).await.unwrap()["message"].as_str().unwrap().to_string();
+            if !refused {
+                rig.uploading().await;
+            }
+            rig.take_away(&id, away).await;
+            rig.media.hold_making(false);
+            rig.world.gate_uploads(false);
+            rig.outbox_empty(&what).await;
+            let cleaned = tokio::time::timeout(PATIENCE, async {
+                while !rig.copies_of(&file).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+            assert!(cleaned.await.is_ok(), "{what}: the recording is left in {:?}", rig.copies_of(&file));
+            let left = rig
+                .query(|db| {
+                    let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
+                    Ok((count("SELECT count(*) FROM outgoing")?, count("SELECT count(*) FROM outgoing_drop")?))
+                })
+                .await;
+            assert_eq!(left, (0, 0), "{what}: no copy's row, and no file kept for one");
+            let retried = rig.sending.call("send.retry", json!({ "message": id })).await;
+            assert!(retried.is_err(), "{what}: send.retry finds nothing to send: {retried:?}");
+            assert_eq!(rig.sent(&id).len(), usize::from(!refused), "{what}: it goes only once it's uploaded");
+        }
     }
 }

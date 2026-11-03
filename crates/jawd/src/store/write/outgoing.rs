@@ -280,6 +280,8 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
 /// made, and its message and outbox row say what it is. Once a copy is made, jaw's copy of your file
 /// isn't needed for it any more. One cancelled or taken while it was made, as a deletion takes an
 /// HD copy's rows, is in the cache all the same: its file's row lists it to go, as nothing names it.
+/// One whose message was deleted for everyone while it was made goes as its outbox row sends it,
+/// and its message's row, which the deletion took what it said from, shows nothing of it.
 fn prepared(db: &Connection, stamps: &mut Stamps, p: &Prepared) -> Result<bool> {
     let made: Option<(Option<i64>, String)> = db
         .prepare_cached(PREPARED)?
@@ -289,6 +291,9 @@ fn prepared(db: &Connection, stamps: &mut Stamps, p: &Prepared) -> Result<bool> 
     let Some((message, variant)) = made else { return Ok(false) };
     db.prepare_cached(SENDS)?.execute(params![p.outbox, p.raw])?;
     let Some(n) = message else { return Ok(true) };
+    if db.prepare_cached(super::outbox::REVOKED)?.exists([n])? {
+        return Ok(true);
+    }
     let copy = &p.copy;
     let wanted = (variant == "sd").then_some(p.at);
     db.prepare_cached(COPIED)?.execute(params![
@@ -310,7 +315,8 @@ fn prepared(db: &Connection, stamps: &mut Stamps, p: &Prepared) -> Result<bool> 
 }
 
 /// A copy uploaded: its message's media row has what WhatsApp names it by, and its message and
-/// outbox row say where it is, so it goes.
+/// outbox row say where it is, so it goes. One whose message was deleted for everyone while it was
+/// uploaded goes as its outbox row sends it, as one made then does.
 fn uploaded(db: &Connection, stamps: &mut Stamps, u: &Uploaded) -> Result<bool> {
     let done: Option<(Option<i64>, String)> = db
         .prepare_cached(UPLOADED)?
@@ -319,6 +325,9 @@ fn uploaded(db: &Connection, stamps: &mut Stamps, u: &Uploaded) -> Result<bool> 
     let Some((message, variant)) = done else { return Ok(false) };
     db.prepare_cached(SENDS)?.execute(params![u.outbox, u.raw])?;
     let Some(n) = message else { return Ok(true) };
+    if db.prepare_cached(super::outbox::REVOKED)?.exists([n])? {
+        return Ok(true);
+    }
     db.prepare_cached(KEYED)?.execute(params![n, variant, u.media_key, u.enc_sha256, u.direct_path])?;
     show(db, stamps, n, u.shown.as_ref())?;
     Ok(true)

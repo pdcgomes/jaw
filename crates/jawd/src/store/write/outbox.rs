@@ -239,7 +239,7 @@ const WENT: &str = "SELECT raw FROM outbox WHERE message = ?1";
 /// What outbox row ?1 goes as.
 const GOES_AS: &str = "SELECT raw FROM outbox WHERE n = ?1";
 /// Whether message ?1 was deleted for everyone.
-const REVOKED: &str = "SELECT 1 FROM messages WHERE n = ?1 AND deleted";
+pub(super) const REVOKED: &str = "SELECT 1 FROM messages WHERE n = ?1 AND deleted";
 const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
@@ -339,9 +339,9 @@ const KEEP_DELETED: &str = "UPDATE outbox SET target_deleted = 1 WHERE target = 
 const FAILED_ROW: &str = "SELECT 1 FROM outbox WHERE message = ?1 AND state = 'failed'";
 /// Whether an outbox row is still to send.
 const STILL_QUEUED: &str = "SELECT 1 FROM outbox WHERE n = ?1 AND state = 'queued'";
-/// A failed message of yours that nothing can send again: deleted for everyone, or with your
-/// deletion of it kept for a late receipt.
-const UNRETRYABLE: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'failed'
+/// The row of a failed message of yours that nothing can send again: deleted for everyone, or with
+/// your deletion of it kept for a late receipt.
+const UNRETRYABLE: &str = "SELECT n FROM outbox WHERE message = ?1 AND state = 'failed'
     AND (EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted)
         OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = ?1 AND a.kind = 'revoke' AND a.state = 'failed'))";
 /// Whether message ?1 can be sent again by hand: not deleted for everyone, nor being.
@@ -1161,7 +1161,7 @@ fn unsent(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Res
     }
     match outboxed(db, outbox)? {
         Some(Some((n, chat, status))) => {
-            shown_failed(db, stamps, chat, n, status.as_deref())?;
+            failed_message(db, stamps, chat, n, status.as_deref())?;
             Ok(true)
         }
         // Its message was deleted for you.
@@ -1198,8 +1198,9 @@ fn outboxed(db: &Connection, outbox: i64) -> Result<Option<Option<Its>>> {
 }
 
 /// Removes outbox row `outbox`, whose message was deleted for you: it has gone, or it can't, and
-/// with nothing left to show it, nothing can retry it. One that goes with a disappearing timer
-/// goes as an erasure takes it, since it holds the last of what its message said.
+/// with nothing left to show it, nothing can retry it; or one that failed and nothing can send
+/// again (`tidied`). One that goes with a disappearing timer goes as an erasure takes it, since it
+/// holds the last of what its message said.
 fn dropped(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     let goes_as: Option<Vec<u8>> = db.prepare_cached(GOES_AS)?.query_row([outbox], |r| r.get(0)).optional()?;
     let remove = || Ok(db.prepare_cached(DROP_ROW)?.execute([outbox])? > 0);
@@ -1367,7 +1368,9 @@ pub(super) fn prune_kept(db: &Connection) -> Result<()> {
 /// or being, there or in a copy merging with it, as a merge can leave them on a copy deleted
 /// already or being deleted.
 pub(super) fn tidied(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
-    db.prepare_cached(UNRETRYABLE)?.execute([n])?;
+    if let Some(outbox) = db.prepare_cached(UNRETRYABLE)?.query_row([n], |r| r.get(0)).optional()? {
+        dropped(db, stamps, outbox)?;
+    }
     stamps.took_copies(db.prepare_cached(ORPHANED_HD)?.execute([n])?);
     stamps.took_copies(db.prepare_cached(HD_OF_DELETED)?.execute([n])?);
     Ok(())
@@ -1919,7 +1922,7 @@ mod tests {
             (
                 "unretryable",
                 UNRETRYABLE,
-                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSCALAR SUBQUERY 2\nSEARCH a USING INDEX outbox_by_target (target=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSCALAR SUBQUERY 2\nSEARCH a USING INDEX outbox_by_target (target=?)",
             ),
             (
                 "retryable",

@@ -3025,7 +3025,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         // The phones can't edit a view-once message, and its row keeps no caption, so an edit of
         // one changes nothing.
         Amendment::Edit { .. } if once_now(db, n)? => 0,
-        Amendment::Edit { text, spans, summary } => reworded(db, stamps, n, || {
+        Amendment::Edit { text, spans, summary } => reworded(db, stamps, n, |_| {
             Ok(db
                 .prepare_cached(
                     "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), edited_at = ?5, v = ?6
@@ -3033,20 +3033,20 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 )?
                 .execute(params![n, text, spans, summary, at, seq])?)
         })?,
-        Amendment::Revoke => {
+        // Its outbox and media rows go within the change: a message of yours still waiting to go
+        // with a timer has a time to go by the outbox row that sends it, which holds what it said.
+        Amendment::Revoke => reworded(db, stamps, n, |stamps| {
             outbox::deleted_for_everyone(db, stamps, n)?;
             media::revoked(db, n)?;
-            reworded(db, stamps, n, || {
-                Ok(db
-                    .prepare_cached(
-                        "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
-                            summary = iif(mine, 'You deleted this message', 'This message was deleted'),
-                            reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
-                        WHERE n = ?1 AND deleted = 0",
-                    )?
-                    .execute([n, seq])?)
-            })?
-        }
+            Ok(db
+                .prepare_cached(
+                    "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
+                        summary = iif(mine, 'You deleted this message', 'This message was deleted'),
+                        reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
+                    WHERE n = ?1 AND deleted = 0",
+                )?
+                .execute([n, seq])?)
+        })?,
         Amendment::Star { starred } => db
             .prepare_cached("UPDATE messages SET starred = ?2, v = ?3 WHERE n = ?1 AND starred IS NOT ?2")?
             .execute(params![n, starred, seq])?,
@@ -3124,7 +3124,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             changed
         }
         // Only a newer edit replaces what an event shows, so one arriving again changes nothing.
-        Amendment::EventEdit { text, spans, summary, detail } => reworded(db, stamps, n, || {
+        Amendment::EventEdit { text, spans, summary, detail } => reworded(db, stamps, n, |_| {
             Ok(db
                 .prepare_cached(
                     "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5,
@@ -3150,13 +3150,18 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
 /// Runs `change` of what message `n` says, which says how many rows it changed, taking its words
 /// as an erasure takes them if it has a time to go or opens once (`expiry::unsaid`), so what it
 /// said before doesn't outlive it.
-fn reworded(db: &Connection, stamps: &mut Stamps, n: i64, change: impl FnOnce() -> Result<usize>) -> Result<usize> {
+fn reworded(
+    db: &Connection,
+    stamps: &mut Stamps,
+    n: i64,
+    change: impl FnOnce(&mut Stamps) -> Result<usize>,
+) -> Result<usize> {
     if !expiry::erasable(db, n)? {
-        return change();
+        return change(stamps);
     }
     let mut changed = 0;
-    expiry::unsaid(db, stamps, &[n], |_| {
-        changed = change()?;
+    expiry::unsaid(db, stamps, &[n], |stamps| {
+        changed = change(stamps)?;
         Ok(changed > 0)
     })?;
     Ok(changed)

@@ -11,7 +11,7 @@ use super::*;
 use crate::store::contacts::CONTACTS;
 use crate::store::kinds::KINDS;
 use crate::store::outbox::{Step, Written};
-use crate::store::write::links::{EVENTS, PLACES};
+use crate::store::write::links::{EVENTS, PLACES, VOICES};
 use crate::store::write::{Packed, now_ms};
 use crate::store::{
     Amend, Amendment, Applied, Change, Chat, Lane, Message, Person, Store, index_against_text, read, schema,
@@ -1045,7 +1045,7 @@ async fn the_merge_an_erasure_leaves_to_do_is_noted_with_it_so_a_kill_before_it_
 
 /// The pages of jaw.db that hold `needle`, each with the b-tree that has it, or none for a page no
 /// b-tree has, a free one.
-fn pages_holding(home: &Path, needle: &[u8]) -> Vec<(usize, Option<String>)> {
+pub(crate) fn pages_holding(home: &Path, needle: &[u8]) -> Vec<(usize, Option<String>)> {
     let db = Connection::open(home.join("jaw.db")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     let size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
@@ -1071,14 +1071,14 @@ fn index_blocks(home: &Path, word: &str) -> Vec<(&'static str, i64)> {
 
 /// The free pages of jaw.db that hold `needle`, once all that's committed is in it: what pages
 /// freed under FAST before a change keep until they're used again, as the design says.
-async fn free_holding(store: &Store, home: &Path, needle: &[u8]) -> Vec<usize> {
+pub(crate) async fn free_holding(store: &Store, home: &Path, needle: &[u8]) -> Vec<usize> {
     store.truncate().await.unwrap();
     pages_holding(home, needle).into_iter().filter(|(_, owner)| owner.is_none()).map(|(page, _)| page).collect()
 }
 
 /// Asserts that `needle`, which a change took out, is nowhere in jaw.db or its WAL but in pages
 /// that were free and held it before the change (`before`).
-fn bytes_gone_but_for(home: &Path, needle: &[u8], before: &[usize], what: &str) {
+pub(crate) fn bytes_gone_but_for(home: &Path, needle: &[u8], before: &[usize], what: &str) {
     let left: Vec<_> = pages_holding(home, needle)
         .into_iter()
         .filter(|(page, owner)| owner.is_some() || !before.contains(page))
@@ -1090,7 +1090,7 @@ fn bytes_gone_but_for(home: &Path, needle: &[u8], before: &[usize], what: &str) 
 
 /// Waits for what taking words out leaves to do: indexing and merging, each contentless index's
 /// whole merge, and emptying the WAL.
-async fn settled(store: &Store) {
+pub(crate) async fn settled(store: &Store) {
     store.indexed().await.unwrap();
     assert!(merged(store).await, "the whole merges it left to do");
     assert!(wal_emptied(store).await, "the WAL it left to empty");
@@ -1843,6 +1843,57 @@ async fn the_contacts_backfill_reading_a_disappearing_card_again_leaves_nothing_
     still_found(&store, "what stays").await;
 }
 
+/// The voices backfill reading a voice message with a time to go again, for its length and
+/// waveform, takes what its row said before out as an erasure takes it (`read_again`): a
+/// disappearing voice note whose row has words and a link, as no converter gives one, so what the
+/// backfill takes out shows. Among thirty captioned photos and thirty messages with links, so each
+/// index's segment holding its words holds others too.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voices_backfill_reading_a_disappearing_voice_note_again_leaves_nothing_of_what_its_row_said() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let audio = e2e::Message {
+        audio_message: Some(Box::new(e2e::AudioMessage {
+            ptt: Some(true),
+            seconds: Some(14),
+            mimetype: Some("audio/ogg; codecs=opus".into()),
+            waveform: Some((0..64).map(|i| (i * 7 % 101) as u8).collect()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let voice = Message { kind: "voice", raw: Some(Packed(raw_of("voice", audio))), ..linked("voice", "gnuvoice", 90) };
+    let mut changes = several_of_each();
+    changes.push(Change::Message(voice));
+    apply(&store, changes).await;
+    store.indexed().await.unwrap();
+    let blocks = index_blocks(home.path(), "gnuvoice");
+    assert!(blocks.iter().all(|(_, held)| *held > 0), "its words are in every index: {blocks:?}");
+    let before = free_holding(&store, home.path(), b"gnuvoice").await;
+    // The voices backfill left to do over every message, as its migration leaves it.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) SELECT 'voices', 0, max(n) FROM messages", []).unwrap();
+    let left =
+        || db.query_row("SELECT count(*) FROM backfills WHERE name = 'voices'", [], |r| r.get::<_, i64>(0)).unwrap();
+    for _ in 0..20 {
+        if left() == 0 {
+            break;
+        }
+        store.apply(Lane::Background, vec![Change::Backfill(VOICES)]).await.unwrap();
+    }
+    assert_eq!(left(), 0, "the backfill is done");
+    drop(db);
+    settled(&store).await;
+    gone_but_for(home.path(), "gnuvoice", &before, "what the voice note's row said before");
+    let (text, spans, _) = said(&store, "voice").await;
+    assert_eq!((text, spans), (None, None), "read again, it says nothing in words");
+    let detail: Option<String> =
+        query(&store, |db| Ok(db.query_row("SELECT detail FROM messages WHERE id = 'voice'", [], |r| r.get(0))?)).await;
+    assert!(detail.as_deref().is_some_and(|d| d.contains("waveform")), "and its row gives its waveform: {detail:?}");
+    still_found(&store, "what stays").await;
+}
+
 /// A message of yours still waiting for the server, which goes with its chat's timer and so has a
 /// time to go once it gets there, is taken as an erasure takes it, whatever takes it away first
 /// (round three's I7): deleted for you, or revoked. Its words and its link's leave every index's
@@ -2066,7 +2117,7 @@ async fn whatever_changes_a_disappearing_photo_or_link_takes_its_words_out_of_th
 /// Thirty captioned photos and thirty messages with links that stay, put in the segments of every
 /// index beside what a test changes: with others in it, a segment isn't rewritten when one of its
 /// entries goes, so a contentless index keeps that one's words until it's merged whole.
-fn several_of_each() -> Vec<Change> {
+pub(crate) fn several_of_each() -> Vec<Change> {
     let photos = (0..30i64).map(|k| {
         Change::Message(Message { at: AT + k, ..captioned(&format!("p{k:02}"), &format!("photo{k} by the lake")) })
     });
@@ -2077,7 +2128,7 @@ fn several_of_each() -> Vec<Change> {
 }
 
 /// Asserts that every photo and link of `several_of_each` is still found in each index.
-async fn still_found(store: &Store, what: &'static str) {
+pub(crate) async fn still_found(store: &Store, what: &'static str) {
     let found = query(store, |db| {
         let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
         Ok((
