@@ -352,7 +352,11 @@ fn jawd_ends_its_engine_in_order_and_waits_until_it_has_exited_before_it_does() 
     // It never says hello, and once its standard input closes, as jaw-engine exits then, it takes
     // a moment to exit, saying so first.
     let engine = Fake::shell(home.path(), &format!("cat > /dev/null\nsleep 0.1\necho ended > '{}'", said.display()));
-    let mut jawd = jawd(home.path(), &engine.program);
+    // 2 s rather than 1 s to exit once its standard input closes, which a loaded Mac can make it
+    // need, still within the stop's bound.
+    let mut jawd = jawd_started(home.path(), &engine.program, |command| {
+        command.args(["--engine-quitting", "2"]);
+    });
     answering(home.path());
     engine.started();
     let (status, took) = terminate(&mut jawd);

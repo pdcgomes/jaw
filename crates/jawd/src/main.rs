@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::demo::DemoEngine;
 use crate::engine::failing::{Failing, Failure};
-use crate::engine::go::GoEngine;
+use crate::engine::go::{GoEngine, Pauses};
 use crate::engine::supervisor::{Backoff, Supervisor};
 use crate::engine::{End, Engine, Incoming, pb};
 
@@ -71,6 +71,10 @@ struct Cli {
     /// under load can, to test that nothing jawd must do is left to the runtime's last moments
     #[arg(long, value_name = "SECONDS", hide = true)]
     busy_at_exit: Option<f64>,
+    /// Gives the engine SECONDS, ended in order, to exit once its standard input closes, rather
+    /// than 1 s, so a test on a loaded Mac can count on it exiting then
+    #[arg(long, value_name = "SECONDS", hide = true)]
+    engine_quitting: Option<f64>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -315,6 +319,10 @@ fn jawd(cli: Cli) -> Result<()> {
         phone_patience: cli.phone_patience.map(Duration::from_secs_f64),
         hold_start: cli.hold_start,
         busy_at_exit: cli.busy_at_exit.map(Duration::from_secs_f64),
+        engine_pauses: Pauses {
+            quitting: cli.engine_quitting.map_or(Pauses::default().quitting, Duration::from_secs_f64),
+            ..Pauses::default()
+        },
     };
     let demo = matches!(cli.command, Some(Command::Demo { .. }));
     if cli.fail.is_some() && !demo && !matches!(cli.engine, EngineKind::Demo | EngineKind::DemoUnlinked) {
@@ -478,6 +486,11 @@ fn occupy(runtime: &tokio::runtime::Runtime, busy: Duration) {
 
 /// The engine to run, or its kind and why it can't run; a demo engine fails as `fail` says.
 fn engine(kind: EngineKind, home: &Path, fail: Option<Failure>) -> Chosen {
+    engine_with(kind, home, fail, Pauses::default())
+}
+
+/// The same, jaw-engine ended in order with `pauses`.
+fn engine_with(kind: EngineKind, home: &Path, fail: Option<Failure>, pauses: Pauses) -> Chosen {
     let demo = |demo: DemoEngine| -> Arc<dyn Engine> {
         match fail {
             Some(failure) => Arc::new(Failing::new(demo, failure)),
@@ -488,7 +501,7 @@ fn engine(kind: EngineKind, home: &Path, fail: Option<Failure>) -> Chosen {
         EngineKind::Demo => Ok(demo(DemoEngine::new())),
         EngineKind::DemoUnlinked => Ok(demo(DemoEngine::unlinked())),
         EngineKind::Go => match engine_program() {
-            Some(program) => Ok(Arc::new(GoEngine::new(program, home.to_path_buf()))),
+            Some(program) => Ok(Arc::new(GoEngine::new(program, home.to_path_buf()).with_pauses(pauses))),
             None => Err((
                 "go",
                 "jaw-engine isn't beside jawd, in libexec/jaw/ beside its folder or on PATH; make build builds it"
@@ -518,7 +531,7 @@ fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) 
     #[cfg(target_os = "macos")]
     home::keep_out(home);
     let runtime = runtime()?;
-    let chosen = engine(kind, home, fail);
+    let chosen = engine_with(kind, home, fail, options.engine_pauses);
     let ending = Ending::new(chosen.as_ref().ok().cloned());
     stopped(runtime, lock, &ending, options.busy_at_exit, async {
         let mut signals = Signals::new()?;
@@ -660,6 +673,8 @@ pub struct Options {
     pub hold_start: bool,
     /// How long the runtime's threads are kept busy as it shuts down.
     pub busy_at_exit: Option<Duration>,
+    /// How long the engine, ended in order, has to exit at each step.
+    pub engine_pauses: Pauses,
 }
 
 /// jawd running: what it serves, and what stopping it waits for.
@@ -1557,7 +1572,8 @@ mod tests {
         let said = home.path().join("said");
         // It never says hello, and once its standard input closes it takes a moment to exit.
         let then = format!("cat > /dev/null\nsleep 0.1\necho ended > '{}'", said.display());
-        let engine: Arc<dyn Engine> = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().into()));
+        let engine = GoEngine::new(fake::engine(home.path(), &then), home.path().into()).with_pauses(fake::PATIENT);
+        let engine: Arc<dyn Engine> = Arc::new(engine);
         let ending = Ending::new(Some(engine.clone()));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             stopped(runtime().unwrap(), lock(home.path()).unwrap(), &ending, None, async {

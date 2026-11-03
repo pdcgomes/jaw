@@ -36,16 +36,36 @@ const TERMINATING: Duration = Duration::from_millis(500);
 /// moment, unless another process holds its standard error open.
 const LAST_WORDS: Duration = Duration::from_millis(500);
 
+/// How long jaw-engine, ended in order, has to exit once its standard input is closed, and then
+/// once it's sent SIGTERM: QUITTING and TERMINATING, unless a test on a loaded Mac needs longer.
+#[derive(Clone, Copy, Debug)]
+pub struct Pauses {
+    pub quitting: Duration,
+    pub terminating: Duration,
+}
+
+impl Default for Pauses {
+    fn default() -> Pauses {
+        Pauses { quitting: QUITTING, terminating: TERMINATING }
+    }
+}
+
 pub struct GoEngine {
     program: PathBuf,
     home: PathBuf,
     log: String,
+    pauses: Pauses,
     running: Arc<Running>,
 }
 
 impl GoEngine {
     pub fn new(program: PathBuf, home: PathBuf) -> GoEngine {
-        GoEngine { program, home, log: "info".into(), running: Arc::default() }
+        GoEngine { program, home, log: "info".into(), pauses: Pauses::default(), running: Arc::default() }
+    }
+
+    /// The same, its engines ended in order with `pauses`.
+    pub fn with_pauses(self, pauses: Pauses) -> GoEngine {
+        GoEngine { pauses, ..self }
     }
 
     /// Ends every jaw-engine still running as `how` says, and starts none after; says how each
@@ -116,7 +136,7 @@ impl Engine for GoEngine {
         Box::pin(async move {
             let Started { stdin, stdout, stderr, process, mut told } = self
                 .running
-                .start(&mut self.command())
+                .start(&mut self.command(), self.pauses)
                 .with_context(|| format!("can't start {}", self.program.display()))?;
             let speaking = tokio::spawn(speak(stderr));
             let mut reader = BufReader::with_capacity(64 << 10, stdout);
@@ -194,9 +214,9 @@ struct Started {
 
 impl Running {
     /// Starts `command` unless jawd has ended its engine, and keeps it, on a task of its own, until
-    /// it has exited. It starts under the lock `close` takes, so a jaw-engine is either refused or
-    /// among those `close` returns.
-    fn start(self: &Arc<Running>, command: &mut Command) -> Result<Started> {
+    /// it has exited, ending it in order with `pauses`. It starts under the lock `close` takes, so
+    /// a jaw-engine is either refused or among those `close` returns.
+    fn start(self: &Arc<Running>, command: &mut Command, pauses: Pauses) -> Result<Started> {
         let mut processes = self.0.lock().expect("jaw-engine's processes");
         if processes.ended {
             bail!("jawd has ended its engine, so it starts no other");
@@ -212,7 +232,7 @@ impl Running {
         let key = processes.next;
         processes.next += 1;
         processes.live.insert(key, process.clone());
-        tokio::spawn(keep(child, telling.clone(), said, Arc::downgrade(self), key));
+        tokio::spawn(keep(child, telling.clone(), said, Arc::downgrade(self), key, pauses));
         Ok(Started { stdin, stdout, stderr, process, told: telling })
     }
 
@@ -269,8 +289,9 @@ async fn keep(
     said: watch::Sender<Option<String>>,
     running: Weak<Running>,
     key: u64,
+    pauses: Pauses,
 ) {
-    let why = ended(&mut child, &mut told).await;
+    let why = ended(&mut child, &mut told, pauses).await;
     if let Some(running) = running.upgrade() {
         running.forget(key);
     }
@@ -278,9 +299,9 @@ async fn keep(
 }
 
 /// How jaw-engine ended: by itself, or as it was told. In order, whoever writes to its standard
-/// input closes it once it's told, and it's sent SIGTERM if it hasn't exited after QUITTING, and
-/// SIGKILL if it hasn't after TERMINATING more; at once, SIGKILL.
-async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>) -> String {
+/// input closes it once it's told, and it's sent SIGTERM if it hasn't exited after the first of
+/// `pauses`, and SIGKILL if it hasn't after the second; at once, SIGKILL.
+async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>, pauses: Pauses) -> String {
     // What it was told comes first, so an engine killed as it's told to end isn't said to have
     // exited by itself.
     let how = tokio::select! {
@@ -289,12 +310,12 @@ async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>) -> St
         status = child.wait() => return exited("jaw-engine exited", status),
     };
     if how == End::InOrder {
-        if let Some(status) = within(child, told, QUITTING).await {
+        if let Some(status) = within(child, told, pauses.quitting).await {
             return exited("jaw-engine exited once its standard input closed", status);
         }
         if !at_once(told) {
             signal(child, libc::SIGTERM);
-            if let Some(status) = within(child, told, TERMINATING).await {
+            if let Some(status) = within(child, told, pauses.terminating).await {
                 return exited("jaw-engine didn't exit once its standard input closed, so SIGTERM ended it", status);
             }
             if !at_once(told) {
@@ -546,7 +567,7 @@ mod tests {
     /// The engine `make engine` builds, started on `home`, once its session is open: it says it's
     /// unlinked then, as it is on a folder of its own.
     async fn serving(program: &Path, home: &Path) -> (GoEngine, Instance, mpsc::Receiver<Incoming>) {
-        let engine = GoEngine::new(program.to_path_buf(), home.to_path_buf());
+        let engine = GoEngine::new(program.to_path_buf(), home.to_path_buf()).with_pauses(fake::PATIENT);
         let (tx, mut rx) = mpsc::channel(64);
         let instance = engine.start(tx).await.unwrap();
         let unlinked = rx.recv().await.unwrap();
@@ -644,7 +665,8 @@ mod tests {
         // It reads what jawd writes until its standard input closes, then takes its time to exit.
         let then =
             format!("{}\ncat > /dev/null\nsleep 0.1\necho ended > '{}'", fake::hello(home.path()), said.display());
-        let engine = GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf());
+        let engine =
+            GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf()).with_pauses(fake::PATIENT);
         let (tx, _rx) = mpsc::channel(8);
         let instance = engine.start(tx).await.unwrap();
         assert_eq!(instance.hello.program, "a fake jaw-engine");
@@ -782,7 +804,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let (_told, mut telling) = watch::channel(Some(End::AtOnce));
-        let why = ended(&mut child, &mut telling).await;
+        let why = ended(&mut child, &mut telling, Pauses::default()).await;
         assert_eq!(why, "jaw-engine exited by itself just as it was to be killed at once (exit status: 0)");
     }
 
@@ -835,10 +857,15 @@ mod tests {
 pub(crate) mod fake {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use prost::Message as _;
 
-    use super::{PROTOCOL, pb};
+    use super::{PROTOCOL, Pauses, TERMINATING, pb};
+
+    /// Pauses that an engine which exits once its standard input closes always exits within, however
+    /// loaded the Mac running the tests, so a test of an end in order never sees SIGTERM's instead.
+    pub(crate) const PATIENT: Pauses = Pauses { quitting: Duration::from_secs(10), terminating: TERMINATING };
 
     /// A jaw-engine in `home` that writes its PID to engine.pid there, then runs `then`.
     pub(crate) fn engine(home: &Path, then: &str) -> PathBuf {
