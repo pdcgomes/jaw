@@ -110,7 +110,7 @@ All three keep their files in one folder, `~/Library/Application Support/jaw` on
 - **Commands:** link by QR or code, log out, send (a raw message with jawd's ID), upload, download, media retry, mark read, presence, chat presence, subscribe to presence, app-state patches (pin, archive, mute, star, mark read, delete), history request, poll vote (it needs the poll's secret, which whatsmeow keeps), group info and subgroups, user info, profile pictures, `IsOnWhatsApp`, privacy settings.
 - **whatsmeow's settings:** `ManualHistorySyncDownload`, `EmitAppStateEventsOnFullSync`, `AutomaticMessageRerequestFromPhone`, `store.SetOSInfo` so the phone lists "jaw", `RequireFullSync`, and `SetProxyAddress` from `HTTPS_PROXY`.
 - **`session.db`** is whatsmeow's `sqlstore` on mattn's driver (WAL, `synchronous=NORMAL`), unless the spike shows a pure-Go driver keeps up with a backlog. jawd sets the engine's `GOMEMLIMIT` and `GOGC`.
-- **Supervision:** jawd starts the engine, restarts it with backoff and tells interfaces it's reconnecting meanwhile; the engine exits when its stdin closes.
+- **Supervision:** jawd starts the engine, restarts it with backoff and tells interfaces it's reconnecting meanwhile. The engine exits when its stdin closes or jawd has gone. However jawd stops, it ends the engine in order and waits until it has gone: its stdin closed; SIGTERM to its process group if it hasn't exited after 1 s, and SIGKILL after 500 ms more; or at once, with SIGKILL, on a second signal. jawd holds `jaw.lock` until the engine has gone and its runtime has shut down.
 
 ## jawd
 

@@ -21,6 +21,7 @@ DATA_PATHS = (
     "crates/jawd/src/find",
     "crates/jawd/src/send",
     "crates/jawd/src/engine/",
+    "crates/jawd/src/main.rs",
     "crates/jawd/src/media/",
     "crates/jawd/src/convert/secret.rs",
     "crates/jawd/src/sock.rs",
