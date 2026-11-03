@@ -1,6 +1,6 @@
 //! jawd's start as the binary runs it, with an engine that never says hello: what jawd says at hello
-//! before its engine has said anything, and that it knows its own account before it converts what
-//! the last run left.
+//! before its engine has said anything, that it knows its own account before it converts what the
+//! last run left, and that it leaves its folder out of Time Machine, with Spotlight's marker in it.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -119,4 +119,82 @@ fn jawd_starts_linked_as_its_account_and_converts_what_the_last_run_left_as_that
     drop(db);
     stop(second);
     assert!(mentions_me, "converted knowing whose account it is, so its mention of it counts");
+}
+
+/// jaw's folder, which a start leaves out of Time Machine and gives Spotlight's marker, unless it has them.
+#[cfg(target_os = "macos")]
+mod kept_out {
+    use super::{hello, jawd, silent_engine, stop};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
+    use std::process::Command;
+
+    /// What `tmutil addexclusion` writes on a folder it leaves out of Time Machine: the string
+    /// "com.apple.backupd" as a binary property list.
+    const BY_TMUTIL: &[u8] =
+        b"bplist00\x5f\x10\x11com.apple.backupd\x08\0\0\0\0\0\0\x01\x01\0\0\0\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x1c";
+
+    /// The attribute Time Machine reads on `path`, if it has one.
+    fn excluded(path: &Path) -> Option<Vec<u8>> {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let name = c"com.apple.metadata:com_apple_backup_excludeItem";
+        let mut value = vec![0u8; 256];
+        // SAFETY: both names end in NUL and outlive the call, and `value` is as long as it's said to be.
+        let len = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, 0) };
+        value.truncate(usize::try_from(len).ok()?);
+        Some(value)
+    }
+
+    /// Takes away everyone's right to set `folder`'s attributes, its files left as they were.
+    fn deny_attributes(folder: &Path) {
+        let denied = Command::new("/bin/chmod").arg("+a").arg("everyone deny writeextattr").arg(folder).status();
+        assert!(denied.unwrap().success());
+    }
+
+    fn log(home: &Path) -> String {
+        std::fs::read_to_string(home.join("jawd.log")).unwrap()
+    }
+
+    #[test]
+    fn a_start_leaves_its_folder_out_of_time_machine_with_spotlights_marker_and_the_next_changes_neither() {
+        let home = tempfile::tempdir().unwrap();
+        let engine = silent_engine(home.path());
+        let marker = home.path().join(".metadata_never_index");
+        assert_eq!(excluded(home.path()), None);
+        let first = jawd(home.path(), &engine);
+        hello(home.path());
+        stop(first);
+        assert_eq!(excluded(home.path()).as_deref(), Some(BY_TMUTIL), "as tmutil addexclusion leaves it");
+        let made = std::fs::metadata(&marker).expect("Spotlight's marker is there");
+        assert!(made.is_file() && made.len() == 0);
+        // Neither could be set again, so a start that tried would say it can't.
+        deny_attributes(home.path());
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let second = jawd(home.path(), &engine);
+        hello(home.path());
+        stop(second);
+        assert_eq!(excluded(home.path()).as_deref(), Some(BY_TMUTIL));
+        let kept = std::fs::metadata(&marker).unwrap();
+        assert_eq!((kept.ino(), kept.mtime(), kept.mtime_nsec()), (made.ino(), made.mtime(), made.mtime_nsec()));
+        let log = log(home.path());
+        assert!(!log.contains("Time Machine") && !log.contains("Spotlight"), "{log}");
+    }
+
+    #[test]
+    fn jawd_starts_in_a_folder_it_can_neither_leave_out_of_time_machine_nor_mark_for_spotlight_and_says_each() {
+        let home = tempfile::tempdir().unwrap();
+        let engine = silent_engine(home.path());
+        deny_attributes(home.path());
+        std::fs::create_dir(home.path().join(".metadata_never_index")).unwrap();
+        let started = jawd(home.path(), &engine);
+        hello(home.path());
+        stop(started);
+        assert_eq!(excluded(home.path()), None);
+        let log = log(home.path());
+        assert_eq!(log.matches("can't leave").count(), 1, "{log}");
+        assert_eq!(log.matches("out of Time Machine: Permission denied").count(), 1, "{log}");
+        assert_eq!(log.matches("can't put Spotlight's .metadata_never_index in").count(), 1, "{log}");
+        assert_eq!(log.matches("Is a directory").count(), 1, "{log}");
+    }
 }

@@ -7,6 +7,8 @@ mod demo;
 mod engine;
 mod feed;
 mod find;
+#[cfg(target_os = "macos")]
+mod home;
 mod layout;
 mod media;
 mod notify;
@@ -484,6 +486,8 @@ fn engine_program() -> Option<std::path::PathBuf> {
 fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) -> Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("can't make {}", home.display()))?;
     std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+    #[cfg(target_os = "macos")]
+    home::keep_out(home);
     let runtime = runtime()?;
     let outcome = runtime.block_on(async {
         let mut signals = Signals::new()?;
