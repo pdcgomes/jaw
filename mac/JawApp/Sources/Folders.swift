@@ -229,8 +229,7 @@ extension AppModel: RosterHost {
     /// person does.
     func openPerson(_ person: RosterRow, inNewPane: Bool = false) {
         if let chat = person.chat { return openChat(chat, name: person.name, inNewPane: inNewPane) }
-        startInNewPane = inNewPane
-        jawd.startChat(person: person.id)
+        startChat(person: person.id, inNewPane: inNewPane)
     }
 
     /// Who in the roster is typing or recording in their one-to-one chat, and which, from who jawd

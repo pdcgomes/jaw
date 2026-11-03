@@ -4,7 +4,8 @@ import Testing
 
 /// The client against a fake jawd on a real socket: hello, windows and their pushes, watching
 /// again with `have` after a drop or a resync, what a dropped connection fails, the latest find,
-/// and the interface's half: keys asked again, drafts owed.
+/// each chat started answered once and in order, and the interface's half: keys asked again,
+/// drafts owed.
 
 /// A script that answers hello, watches and anything else as jawd would for a small account.
 func ordinary(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
@@ -188,5 +189,40 @@ func helloed(_ all: [JawUpdate]) -> Int {
                                          data: .object(["limit": .string("outbox"), "waiting": .number(1000), "failed": .number(2)])))
         #expect(Jawd.whyUnsent(full) == "1000 wait to send, 2 failed; it can go once some have")
         #expect(Jawd.whyNot(.jawd(JawError(code: ErrorCode.unknownMethod, message: "?")), "starring") == "starring comes with the next step")
+    }
+
+    @Test func `each chat started is answered once, in the order sent: with its chat, jawd's refusal, or the drop`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            guard method == "chat.start" else { return ordinary(method, params, id) }
+            switch params["phone"]?.string ?? params["person"]?.string {
+            case "+351 913 333 333":
+                return ["{\"id\":\(id),\"result\":{\"chat\":\(FakeJawd.chat("351913333333@s.whatsapp.net", v: 9, sort: "0~9", name: "Rui"))}}"]
+            case "person:7": return [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no person:7")]
+            default: return []
+            }
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        func answers(_ all: [JawUpdate]) -> [String] {
+            all.compactMap {
+                switch $0 {
+                case let .chatStarted(row): row.id
+                case let .notStarted(why): "not started: \(why)"
+                default: nil
+                }
+            }
+        }
+        jawd.startChat(phone: "+351 913 333 333")
+        jawd.startChat(person: "person:7")
+        jawd.startChat(phone: "+351 914 444 444")
+        let two = await drain(jawd) { answers($0).count == 2 }
+        #expect(answers(two) == ["351913333333@s.whatsapp.net", "not started: jawd has no person:7"])
+        #expect(await eventually { requests(fake, "chat.start").count == 3 })
+        fake.drop()
+        let third = await drain(jawd) { answers($0).count == 1 }
+        #expect(answers(third) == ["not started: the connection to jawd dropped before it answered, so it may not have been done"],
+                "the third, which jawd never answered, is said once as the connection drops, and not asked again")
     }
 }

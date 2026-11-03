@@ -230,8 +230,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         switch pick {
         case let .chat(row): model.open(row, opened: true)
         case let .newPane(row): model.openInNewPane(row)
-        case let .person(p): model.jawd.startChat(person: p.id)
-        case let .number(n): model.jawd.startChat(phone: n)
+        case let .person(p): model.startChat(person: p.id)
+        case let .number(n): model.startChat(phone: n)
         case let .message(m): goTo(m)
         case let .link(l): model.openLink(l.link.url)
         case let .linkMessage(l): goTo(message: l.message, in: l.chat)

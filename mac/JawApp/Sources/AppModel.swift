@@ -35,8 +35,8 @@ final class AppModel {
     /// A chat a favourite or the roster opens once jawd finds its row.
     var opening: Opening?
     var rosterWindow: WindowID?
-    /// Whether the chat started with someone from the roster opens in a pane of its own.
-    var startInNewPane = false
+    /// The chats started and not yet answered, each with whether it opens in a pane of its own.
+    var starts = ChatStarts()
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -259,14 +259,13 @@ final class AppModel {
         case let .members(chat, members):
             panes[chat]?.members = members
         case let .chatStarted(row):
-            if startInNewPane {
-                startInNewPane = false
+            if starts.answered() {
                 openInNewPane(row)
             } else {
                 open(row, opened: true)
             }
         case let .notStarted(why):
-            startInNewPane = false
+            starts.answered()
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
@@ -1171,6 +1170,20 @@ extension AppModel: ConversationHost {
     /// and jawd's words say why when it hasn't.
     func startChat(phone: String, name: String) {
         say("opening a chat with \(name)")
+        startChat(phone: phone)
+    }
+
+    /// A chat started with one of jawd's people, as `chat.start` does: it opens once jawd has it, in
+    /// a pane of its own when `inNewPane`. Every start goes into `starts` as it's sent, so each of
+    /// jawd's answers opens its own start's chat where that start said.
+    func startChat(person: String, inNewPane: Bool = false) {
+        starts.sent(inNewPane: inNewPane)
+        jawd.startChat(person: person)
+    }
+
+    /// A chat started with a number, in place, as `startChat(person:)` starts one with someone.
+    func startChat(phone: String) {
+        starts.sent(inNewPane: false)
         jawd.startChat(phone: phone)
     }
 
