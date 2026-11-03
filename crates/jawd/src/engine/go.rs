@@ -316,21 +316,45 @@ async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>, pause
         if !at_once(told) {
             signal(child, libc::SIGTERM);
             if let Some(status) = within(child, told, pauses.terminating).await {
-                return exited("jaw-engine didn't exit once its standard input closed, so SIGTERM ended it", status);
+                return after(Sent::Term, status);
             }
             if !at_once(told) {
                 signal(child, libc::SIGKILL);
-                return exited("jaw-engine didn't exit on SIGTERM either, so SIGKILL ended it", child.wait().await);
+                return after(Sent::Kill, child.wait().await);
             }
         }
     }
     signal(child, libc::SIGKILL);
-    let status = child.wait().await;
-    // What it was told came first, but it may have exited by itself just then: its status says.
-    if status.as_ref().is_ok_and(|status| status.signal() != Some(libc::SIGKILL)) {
-        return exited("jaw-engine exited by itself just as it was to be killed at once", status);
-    }
-    exited("jaw-engine was killed at once, with SIGKILL", status)
+    after(Sent::AtOnce, child.wait().await)
+}
+
+/// The signal jawd last sent jaw-engine to end it.
+#[derive(Clone, Copy)]
+enum Sent {
+    /// SIGTERM, ended in order, once its standard input had closed and the first pause gone by.
+    Term,
+    /// SIGKILL, ended in order, once SIGTERM's pause had gone by too.
+    Kill,
+    /// SIGKILL, at once.
+    AtOnce,
+}
+
+/// How jaw-engine ended once jawd had sent it `sent`, as its status says: SIGTERM's or SIGKILL's
+/// doing, should it show either, and otherwise by itself, just as `sent` came.
+fn after(sent: Sent, status: std::io::Result<ExitStatus>) -> String {
+    let terminated = "jaw-engine didn't exit once its standard input closed, so SIGTERM ended it";
+    let killed = match sent {
+        Sent::Term | Sent::Kill => "jaw-engine didn't exit on SIGTERM either, so SIGKILL ended it",
+        Sent::AtOnce => "jaw-engine was killed at once, with SIGKILL",
+    };
+    let how = match (status.as_ref().map(ExitStatusExt::signal), sent) {
+        (Ok(Some(libc::SIGTERM)), _) | (Err(_), Sent::Term) => terminated,
+        (Ok(Some(libc::SIGKILL)), _) | (Err(_), Sent::Kill | Sent::AtOnce) => killed,
+        (Ok(_), Sent::Term) => "jaw-engine exited by itself just as SIGTERM was sent",
+        (Ok(_), Sent::Kill) => "jaw-engine exited by itself just as SIGKILL was sent",
+        (Ok(_), Sent::AtOnce) => "jaw-engine exited by itself just as it was to be killed at once",
+    };
+    exited(how, status)
 }
 
 /// Its exit, should it come within `pause`, and before it's told to end at once.
@@ -716,8 +740,9 @@ mod tests {
     async fn an_engine_ended_takes_what_it_started_with_it() {
         let home = tempfile::tempdir().unwrap();
         let started = home.path().join("started.pid");
-        // It waits for a sleep of its own, so exits only once that does, or on SIGTERM.
-        let then = format!("sleep 600 &\necho $! > '{}'\nwait", started.display());
+        // It starts a sleep of its own and becomes another, which only SIGTERM ends: a shell waiting
+        // for its sleep can exit 0 as SIGTERM ends that, before SIGTERM ends the shell itself.
+        let then = format!("sleep 600 &\necho $! > '{}'\nexec sleep 600", started.display());
         let engine = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf()));
         let _starting = starting(&engine, home.path()).await;
         while !std::fs::read_to_string(&started).is_ok_and(|pid| pid.ends_with('\n')) {
@@ -806,6 +831,33 @@ mod tests {
         let (_told, mut telling) = watch::channel(Some(End::AtOnce));
         let why = ended(&mut child, &mut telling, Pauses::default()).await;
         assert_eq!(why, "jaw-engine exited by itself just as it was to be killed at once (exit status: 0)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_that_exits_by_itself_just_as_its_end_in_order_sends_a_signal_is_said_to_have() {
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("ready");
+        // It exits 0 as SIGTERM comes, as one exiting by itself just then would, once it's ready to.
+        let then = format!("trap 'exit 0' TERM\necho > '{}'\nwhile :; do sleep 0.05; done", ready.display());
+        let mut child = Command::new("sh").args(["-c", &then]).process_group(0).spawn().unwrap();
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (_told, mut telling) = watch::channel(Some(End::InOrder));
+        let pauses = Pauses { quitting: Duration::from_millis(100), terminating: fake::PATIENT.quitting };
+        let why = ended(&mut child, &mut telling, pauses).await;
+        assert_eq!(why, "jaw-engine exited by itself just as SIGTERM was sent (exit status: 0)");
+        // No process stays to see SIGKILL come, so only a status can say it exited just then.
+        let status = |raw| Ok(ExitStatus::from_raw(raw));
+        let ended = [0, libc::SIGKILL, libc::SIGTERM].map(|raw| after(Sent::Kill, status(raw)));
+        assert_eq!(
+            ended,
+            [
+                "jaw-engine exited by itself just as SIGKILL was sent (exit status: 0)",
+                "jaw-engine didn't exit on SIGTERM either, so SIGKILL ended it (signal: 9 (SIGKILL))",
+                "jaw-engine didn't exit once its standard input closed, so SIGTERM ended it (signal: 15 (SIGTERM))",
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
