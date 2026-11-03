@@ -175,7 +175,7 @@ pub struct Action {
     key: Option<&'static str>,
     /// What it shows before its name, where not ▸: an emoji, for a reaction.
     pub(super) lead: Option<String>,
-    /// The milestone it comes with, while it's not here yet.
+    /// Why it can't be done yet, after its key.
     later: Option<&'static str>,
     pub does: Does,
     marks: Vec<(usize, usize)>,
@@ -201,8 +201,8 @@ impl Action {
         self
     }
 
-    fn later(mut self, when: &'static str) -> Action {
-        self.later = Some(when);
+    fn later(mut self, why: &'static str) -> Action {
+        self.later = Some(why);
         self
     }
 }
@@ -732,8 +732,8 @@ impl View {
             ),
         });
         all.extend([
-            Action::new("New poll", "in this chat", Does::Later("polls come with M2")).key("/poll").later("M2"),
-            Action::new("New group", "with people you pick", Does::Later("groups come with M2")).later("M2"),
+            Action::new("New poll", "in this chat", Does::Later("polls come later")).key("/poll"),
+            Action::new("New group", "with people you pick", Does::Later("groups come later")),
             Action::new("Attach files", "photos, videos, documents", Does::Attach).key("ctrl-o"),
             Action::new("Send a contact", "someone's card, in this chat", Does::SendContact),
             Action::new("Record a voice message", "in this chat", Does::Record).key("ctrl-r"),
@@ -1055,7 +1055,7 @@ impl View {
                     {
                         self.palette_act()
                     }
-                    _ => self.say("ctrl-g goes to a message in its chat; links and files have theirs from M2"),
+                    _ => self.say("ctrl-g goes to a message in its chat; links and files have theirs in the library"),
                 }
             }
             KeyCode::Up | KeyCode::Char('p') if k.code == KeyCode::Up || ctrl => self.palette_move(-1),
@@ -1493,7 +1493,7 @@ impl View {
                 dim("no chat yet · ⏎ starts one".into()),
             ),
             Hit::Folder(_) => {
-                (Span::styled("◇", Style::new().fg(t.comment)), self.marks(&r.text, name), dim("folder · M6".into()))
+                (Span::styled("◇", Style::new().fg(t.comment)), self.marks(&r.text, name), dim("folder".into()))
             }
             Hit::Message(m) => {
                 let colour = m.from.as_ref().map_or(t.comment, |f| t.sender(f.colour));
@@ -1515,7 +1515,7 @@ impl View {
 
     fn action_row(&self, a: &Action) -> (Span<'static>, Vec<Span<'static>>, Vec<Span<'static>>) {
         let t = &self.theme;
-        let later = a.later.is_some();
+        let later = matches!(a.does, Does::Later(_));
         let name = Style::new().fg(if later { t.muted } else { t.fg });
         let text = find::marked(&a.name, &a.marks);
         let mut detail = vec![];
@@ -1530,8 +1530,8 @@ impl View {
                 if later { Style::new().fg(t.comment) } else { Style::new().fg(t.focus).add_modifier(Modifier::BOLD) };
             detail.push(Span::styled(key, style));
         }
-        if let Some(when) = a.later {
-            detail.push(Span::styled(format!(" · {when}"), Style::new().fg(t.gutter)));
+        if let Some(why) = a.later {
+            detail.push(Span::styled(format!(" · {why}"), Style::new().fg(t.gutter)));
         }
         let lead = match &a.lead {
             Some(l) => Span::raw(l.clone()),

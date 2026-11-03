@@ -999,7 +999,7 @@ extension AppModel: LibraryHost {
         case .link:
             if let url = item.link?.url { openLink(url) }
         case .voice:
-            say("playing voice messages comes with jawd's M5")
+            say("playing voice messages comes later")
         case .other:
             break
         }

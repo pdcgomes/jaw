@@ -1035,7 +1035,7 @@ impl View {
             return;
         }
         if text == "/poll" || text.starts_with("/poll ") {
-            self.say("polls come with M2");
+            self.say("polls come later");
             return;
         }
         self.composer.take();

@@ -94,19 +94,19 @@ extension AppModel {
         for c in chatCommands(for: chat) {
             add(c)
         }
-        // The box's + menu: attachments, and what's composed; those still to come say what they wait on.
+        // The box's + menu: attachments, and what's composed; those still to come say so.
         let later = { (what: String) -> @MainActor @Sendable () -> Void in { [weak self] in self?.say(what) } }
         let plus: [(String, String, String, String, String, Shortcut?, @MainActor @Sendable () -> Void)] = [
             ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o"),
-             later("sending photos and videos comes with jawd's M4")),
+             later("sending photos and videos comes later")),
             ("attach.document", "Document…", "Send a document", "any file", "doc", Shortcut("o", [.command, .shift]),
-             later("sending documents comes with jawd's M4")),
-            ("attach.camera", "Camera…", "Take a photo with the iPhone", "Continuity Camera", "camera", nil, later("the camera comes with jawd's M4")),
+             later("sending documents comes later")),
+            ("attach.camera", "Camera…", "Take a photo with the iPhone", "Continuity Camera", "camera", nil, later("the camera comes later")),
             ("attach.contact", "Contact…", "Send a contact", "from Contacts", "person.crop.circle", nil, { [weak self] in self?.composeContact() }),
             ("compose.poll", "Poll…", "New poll", "a question and its options", "chart.bar.xaxis", nil, { [weak self] in self?.composePoll() }),
-            ("compose.event", "Event…", "New event", "a time, a place, a call link", "calendar", nil, later("events come with jawd's send.event")),
+            ("compose.event", "Event…", "New event", "a time, a place, a call link", "calendar", nil, later("events come later")),
             ("attach.location", "Location…", "Send a place", "a search, or where you are", "mappin.and.ellipse", nil,
-             later("sending places comes with jawd's send.location")),
+             later("sending places comes later")),
         ]
         for (id, title, phrase, detail, symbol, key, run) in plus {
             add(Command(id, title, phrase: phrase, detail: detail, symbol: symbol, key: key, place: .chat, group: 2, enabled: isChat, run: run))
@@ -115,9 +115,9 @@ extension AppModel {
                     key: Shortcut("e", [.control, .command]), place: .chat, group: 3, enabled: isChat)
             { [weak self] in self?.conversation?.composer.showEmoji() })
         add(Command("box.gif", "GIFs…", phrase: "GIFs", detail: "from Giphy, through jawd", key: Shortcut("g", [.control, .command]), place: .chat,
-                    group: 3, enabled: isChat) { [weak self] in self?.say("GIF search comes with jawd's gif.search") })
-        add(Command("record", "Record a Voice Message", phrase: "Record a voice message", detail: "comes with jawd's M5", key: Shortcut("r"),
-                    place: .chat, group: 3) { [weak self] in self?.say("recording comes with jawd's M5") })
+                    group: 3, enabled: isChat) { [weak self] in self?.say("GIF search comes later") })
+        add(Command("record", "Record a Voice Message", phrase: "Record a voice message", detail: "comes later", key: Shortcut("r"),
+                    place: .chat, group: 3) { [weak self] in self?.say("recording comes later") })
         add(Command("library", "Library", phrase: "Library", detail: "everything shared, in every chat", symbol: "photo.on.rectangle.angled",
                     key: Shortcut("l"), place: .chat, group: 3) { [weak self] in self?.openLibrary(.every) })
         add(Command("chat.library", "This Chat's Library", phrase: "This chat's library", detail: "everything shared in it",

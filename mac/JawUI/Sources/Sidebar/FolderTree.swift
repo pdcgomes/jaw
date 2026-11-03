@@ -2,7 +2,7 @@ import JawKit
 
 /// The folder tree as jawd keeps it, and what the sidebar, the menus and the keys read from it: the
 /// built-in folders, yours nested by parent and position, the smart ones, and the nine favourite
-/// slots. Until jawd serves folders (its M6) it has All and Archived, as jawd serves them now.
+/// slots. Until jawd has sent its tree it has All and Archived.
 public struct FolderTree: Sendable, Equatable {
     public private(set) var rows: [String: FolderRow]
     /// The slots held, in their order; the empty ones aren't there.
@@ -116,9 +116,9 @@ public struct FolderTree: Sendable, Equatable {
     }
 
     /// What's said of a folder the palette found that the tree doesn't hold: before jawd serves the
-    /// tree, that folders come with its M6; after, that the folder is gone.
+    /// tree, that it hasn't yet; after, that the folder is gone.
     public func notHeld(_ name: String) -> String {
-        served ? "\(name) is gone" : "folders come with jawd's M6"
+        served ? "\(name) is gone" : "jawd hasn't sent the folders yet"
     }
 
     /// What's said when jawd refuses the window of a folder's chats, as when it comes back without the

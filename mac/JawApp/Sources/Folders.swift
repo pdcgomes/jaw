@@ -34,7 +34,7 @@ extension AppModel: SidebarHost {
 
     /// ⇧⌘N: a new folder, in the folder picked when it's yours, or at the top, named in place.
     func newFolder() {
-        guard tree.served else { return say("folders come with jawd's M6") }
+        guard tree.served else { return say("jawd hasn't sent the folders yet") }
         folderAct(.newFolder(parent: tree.row(folder)?.isYours == true ? folder : nil, filing: nil), name: "")
     }
 
@@ -92,7 +92,7 @@ extension AppModel: SidebarHost {
     /// m: the chat's Add to Folder, as a menu of its own under the pane's header.
     func addToFolderMenu(for chat: ChatRow) -> NSMenu? {
         guard tree.served else {
-            say("folders come with jawd's M6")
+            say("jawd hasn't sent the folders yet")
             return nil
         }
         let bound = folderCommands(for: Filed(chat))
@@ -131,7 +131,7 @@ extension AppModel: SidebarHost {
 
     /// ⌘1 to ⌘9: the slot's folder, picked, or its chat, opened in the focused pane.
     func goToFavourite(_ slot: Int) {
-        guard tree.served else { return say("favourites come with jawd's M6") }
+        guard tree.served else { return say("jawd hasn't sent the favourites yet") }
         guard let f = tree.favourite(slot) else {
             return say("nothing is on ⌘\(slot); a chat's or a folder's Favourite menu puts one there")
         }
@@ -145,7 +145,7 @@ extension AppModel: SidebarHost {
     /// ⌥⇧↑ and ⌥⇧↓: the folder before or after, from anywhere ⌥↑ and ⌥↓ work, picked as a click picks it,
     /// the folders it's in opened.
     func stepFolder(_ by: Int) {
-        guard tree.served else { return say("folders come with jawd's M6") }
+        guard tree.served else { return say("jawd hasn't sent the folders yet") }
         let next = tree.step(from: folder, by: by)
         if next != folder { pick(folder: next, saying: true) }
     }

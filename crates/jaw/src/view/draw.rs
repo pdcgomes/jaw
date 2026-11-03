@@ -1272,7 +1272,7 @@ impl View {
             pair(("alt-d", "cut the next word", true), Some(("+  1-6", "react", true))),
             pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward", true))),
             pair(("@", "a name, in a group", true), Some(("i", "info", true))),
-            pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s", "save · M3", false))),
+            pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s", "save", false))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
             pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
         ];

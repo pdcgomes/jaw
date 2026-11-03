@@ -1,6 +1,6 @@
 //! Keys and the mouse, without modes: typing goes to the message box, Up from an empty box steps
 //! into the messages, where single keys act on the selected one, and Esc steps back. Keys for
-//! what jawd can't do yet say in the footer when it comes.
+//! what jaw can't do yet say so in the footer.
 
 use super::{Effect, Focus, HOLD, Overlay, Scroll, View};
 use crate::data::{Kind, Message};
@@ -13,16 +13,16 @@ use ratatui::layout::Rect;
 /// Two clicks on a message this close together open it.
 const DOUBLE_CLICK: i64 = 400;
 
-/// What Enter does on a message of this kind, and when it comes.
+/// What Enter says on a message of this kind when it has nothing to open.
 fn opens(kind: Kind) -> &'static str {
     match kind {
         Kind::Image | Kind::Video | Kind::Gif | Kind::VideoNote | Kind::Document | Kind::Sticker => {
-            "opening photos, videos and files comes with M3"
+            "it opens once jawd has downloaded it"
         }
         Kind::Audio => "playing audio files comes later",
         Kind::Location => "its map link opens from your terminal",
         Kind::Event => "its links open from your terminal",
-        Kind::LiveLocation | Kind::Poll => "opening these comes with M2",
+        Kind::LiveLocation | Kind::Poll => "opening these comes later",
         Kind::Contact => "there's no number on this card to start a chat with",
         _ => "there's nothing to open in this one",
     }
@@ -387,7 +387,7 @@ impl View {
             KeyCode::Char(c @ '1'..='6') => self.react_quick(&m, c as usize - '1' as usize),
             KeyCode::Char('f') => self.palette_forward(&m),
             KeyCode::Char('i') => self.info(&m),
-            KeyCode::Char('s') => self.say("saving files comes with M3"),
+            KeyCode::Char('s') => self.say("saving files comes later"),
             KeyCode::Char('m') => self.file_this(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),
             KeyCode::Char(_) | KeyCode::Backspace if !ctrl && !alt => {

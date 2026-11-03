@@ -54,6 +54,14 @@ fn row_of(screen: &str, text: &str) -> Option<usize> {
     screen.lines().position(|l| l.contains(text))
 }
 
+/// The milestones a screen names, as the M2 of "/poll · M2", which mean nothing to anyone using jaw.
+fn milestones(screen: &str) -> Vec<&str> {
+    screen
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() > 1 && w.starts_with('M') && w[1..].bytes().all(|b| b.is_ascii_digit()))
+        .collect()
+}
+
 fn message(id: &str, v: u64, sort: &str) -> Message {
     Message {
         id: id.into(),
@@ -204,7 +212,7 @@ fn single_keys_act_on_the_selected_message_and_others_type() {
     press(&mut v, &rx, "<up>y");
     assert_eq!(v.take_effects(), [Effect::Copy("vens jantar sexta? a tua mãe pergunta".into())]);
     press(&mut v, &rx, "s");
-    assert!(frame(&mut v).contains("saving files comes with M3"), "a key for later says when it comes");
+    assert!(frame(&mut v).contains("saving files comes later"), "a key for later says so");
     press(&mut v, &rx, "<up>\n");
     assert!(frame(&mut v).contains("there's nothing to open in this one"));
     press(&mut v, &rx, "ok");
@@ -246,10 +254,10 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     let (mut v, rx) = view(100, 30);
     press(&mut v, &rx, "?");
     let screen = frame(&mut v);
-    assert!(
-        screen.contains("╭ keys ─") && screen.contains("save · M3") && screen.contains("any key closes"),
-        "{screen}"
-    );
+    assert!(screen.contains("╭ keys ─") && screen.contains("any key closes"), "{screen}");
+    let save = screen.lines().find(|l| l.contains("attach files")).unwrap();
+    assert!(save.contains("s          save"), "{screen}");
+    assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
     press(&mut v, &rx, "?");
     assert!(v.overlay.is_none());
     assert_eq!(v.composer.text(), "?", "the key that closed them is typed, so a lone ? can be sent");
@@ -1059,20 +1067,64 @@ fn ctrl_g_goes_to_a_message_and_says_what_it_does_on_anything_else() {
     let (mut v, rx) = view(140, 34);
     press(&mut v, &rx, "<c-k>ar<c-g>");
     assert!(v.palette.is_some());
-    assert!(frame(&mut v).contains("ctrl-g goes to a message"));
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("ctrl-g goes to a message in its chat; links and files have theirs in the library"),
+        "{screen}"
+    );
     press(&mut v, &rx, "<c-u>casadapraia<c-g>");
     assert_eq!(v.open.as_deref(), Some("familia"));
     assert!(matches!(v.focus, Focus::Message(_)));
 }
 
 #[test]
-fn a_folder_and_what_comes_later_say_when_they_come() {
+fn a_folder_opens_and_what_comes_later_says_so() {
     let (mut v, rx) = view(140, 34);
-    press(&mut v, &rx, "<c-k>archived\n");
+    press(&mut v, &rx, "<c-k>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("New poll"), "{screen}");
+    assert_eq!(milestones(&screen), Vec::<&str>::new(), "the palette's own actions:\n{screen}");
+    press(&mut v, &rx, "archived");
+    let screen = frame(&mut v);
+    let folder = screen.lines().find(|l| l.contains('◇')).unwrap();
+    assert!(folder.contains("Archived") && folder.contains("folder"), "{screen}");
+    assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
+    press(&mut v, &rx, "\n");
     assert!(frame(&mut v).contains("chats · Archived"), "a folder found shows its chats");
-    press(&mut v, &rx, "<c-k>new poll\n");
-    assert!(frame(&mut v).contains("polls come with M2"));
+    press(&mut v, &rx, "<c-k>new");
+    let screen = frame(&mut v);
+    assert!(screen.contains("/poll") && screen.contains("New group"), "{screen}");
+    assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
+    press(&mut v, &rx, "<c-u>new poll\n");
+    assert!(frame(&mut v).contains("polls come later"));
     assert!(v.palette.is_some(), "it stays open");
+    press(&mut v, &rx, "<c-u>new group\n");
+    assert!(frame(&mut v).contains("groups come later"));
+}
+
+#[test]
+fn poll_in_the_box_says_polls_come_later_and_keeps_what_was_typed() {
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "/poll\n");
+    assert!(frame(&mut v).contains("polls come later"));
+    assert_eq!(v.composer.text(), "/poll");
+}
+
+#[test]
+fn enter_on_a_file_jawd_hasnt_downloaded_says_it_opens_once_it_has_and_on_a_poll_that_that_comes_later() {
+    let (mut v, rx) = view(100, 30);
+    let open = v.open.clone().unwrap();
+    let mut photo = theirs("photo", "9999999999999~1", NOW, "");
+    photo.kind = Kind::Image;
+    let mut poll = theirs("poll", "9999999999999~2", NOW, "");
+    poll.kind = Kind::Poll;
+    arrive(&mut v, &open, vec![photo, poll]);
+    v.focus = Focus::Message("photo".into());
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("it opens once jawd has downloaded it"));
+    v.focus = Focus::Message("poll".into());
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("opening these comes later"));
 }
 
 #[test]
@@ -3206,5 +3258,6 @@ fn the_palettes_attach_files_opens_the_picker() {
     v.attach_from = Some(format!("{}/", dir.path().display()));
     press(&mut v, &rx, "<c-k>attach files\n");
     let screen = frame(&mut v);
-    assert!(screen.contains("╭ attach ─") && !screen.contains("comes with M4"), "{screen}");
+    assert!(screen.contains("╭ attach ─"), "{screen}");
+    assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
 }
