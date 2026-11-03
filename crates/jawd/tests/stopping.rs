@@ -1,8 +1,9 @@
 //! jawd stops on SIGTERM within its bound however its engine is doing: missing, so the supervisor
 //! keeps trying to start it again, or never answering, so a start is waiting for its hello; and
 //! however it was started, even with SIGTERM blocked, as jaw's terminal starts it; and `jawd demo`
-//! stops on one while its phases still run. Whichever way a test ends, it leaves neither jawd nor
-//! an engine of its own running.
+//! stops on one while its phases still run. Stopped while it starts, it takes its engine with it
+//! however late its runtime's threads run at the end. Whichever way a test ends, it leaves neither
+//! jawd nor an engine of its own running.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -154,6 +155,27 @@ fn jawd_whose_engine_never_answers_stops_on_sigterm_and_takes_its_engine_with_it
     while engine.running().is_some() && Instant::now() < gone {
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+}
+
+#[test]
+fn jawd_stopped_while_it_starts_takes_its_engine_with_it_however_late_its_runtime_ends() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = Silent::new(home.path());
+    // Its start held once the engine is started, so SIGTERM comes while it starts, and its
+    // runtime's threads kept busy as it shuts down, as a Mac under load can keep them.
+    let mut jawd = jawd_started(home.path(), &engine.program, |command| {
+        command.args(["--hold-start", "--busy-at-exit", "1"]);
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while engine.running().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(engine.running().is_some(), "the engine started and is waiting to say hello");
+    let (status, took) = terminate(&mut jawd);
+    let log = log(home.path());
+    assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
+    assert!(log.contains("jawd: SIGTERM while starting, so it stops"), "{log}");
     assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
 }
 

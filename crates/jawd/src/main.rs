@@ -62,6 +62,14 @@ struct Cli {
     /// Seconds the phone has to answer before jawd says it's offline, 20 unless asked
     #[arg(long, value_name = "SECONDS", global = true, hide = true)]
     phone_patience: Option<f64>,
+    /// Holds jawd's start once its engine is started, until a signal stops it, to test a stop that
+    /// comes while jawd starts
+    #[arg(long, hide = true)]
+    hold_start: bool,
+    /// Keeps each of the runtime's threads busy for SECONDS as jawd's runtime shuts down, as a Mac
+    /// under load can, to test that nothing jawd must do is left to the runtime's last moments
+    #[arg(long, value_name = "SECONDS", hide = true)]
+    busy_at_exit: Option<f64>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -304,6 +312,8 @@ fn jawd(cli: Cli) -> Result<()> {
         no_notify: cli.no_notify,
         without: cli.without.clone(),
         phone_patience: cli.phone_patience.map(Duration::from_secs_f64),
+        hold_start: cli.hold_start,
+        busy_at_exit: cli.busy_at_exit.map(Duration::from_secs_f64),
     };
     let demo = matches!(cli.command, Some(Command::Demo { .. }));
     if cli.fail.is_some() && !demo && !matches!(cli.engine, EngineKind::Demo | EngineKind::DemoUnlinked) {
@@ -446,7 +456,23 @@ fn bench_inbox(plan: store::bench::Stream) -> Result<()> {
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
-    Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?)
+    Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(WORKERS).enable_all().build()?)
+}
+
+/// The runtime's threads for I/O, as the design has them: at most 4.
+const WORKERS: usize = 4;
+
+/// Blocks each of the runtime's threads for `busy`, all at once.
+fn occupy(runtime: &tokio::runtime::Runtime, busy: Duration) {
+    let all = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+    for _ in 0..WORKERS {
+        let all = all.clone();
+        runtime.spawn(async move {
+            all.wait();
+            std::thread::sleep(busy);
+        });
+    }
+    all.wait();
 }
 
 /// The engine to run, or its kind and why it can't run; a demo engine fails as `fail` says.
@@ -521,6 +547,9 @@ fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) 
         }
         served
     });
+    if let Some(busy) = options.busy_at_exit {
+        occupy(&runtime, busy);
+    }
     // Whatever's still running was told to stop; what doesn't by now is abandoned.
     runtime.shutdown_timeout(Duration::from_millis(100));
     outcome
@@ -538,6 +567,10 @@ pub struct Options {
     pub without: Vec<String>,
     /// How long the phone has to answer before jawd says it's offline, if not `sync::PHONE_PATIENCE`.
     pub phone_patience: Option<Duration>,
+    /// Holds the start once the engine is started, until a signal stops jawd.
+    pub hold_start: bool,
+    /// How long the runtime's threads are kept busy as it shuts down.
+    pub busy_at_exit: Option<Duration>,
 }
 
 /// jawd running: what it serves, and what stopping it waits for.
@@ -623,6 +656,9 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         following.clone(),
         typing.clone(),
     ));
+    if options.hold_start {
+        std::future::pending::<()>().await;
+    }
     let attention = Arc::new(attention::Attention::default());
     let media =
         media::Media::start(store.clone(), engine.clone(), home, &live, &pushes, media::Config::default()).await?;
