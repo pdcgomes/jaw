@@ -55,7 +55,7 @@ jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow uno
 | A 12-megapixel photo ready to upload | 300 ms |
 | Idle | no drawing, no wake-ups, no polling |
 
-An erasure of a disappearing or view-once message can't be split, so a live write or an inbox row may wait behind one, as "Disappearing and view-once messages" says: about 2 ms at a million messages, up to 10 ms at p99 under load, and up to 0.75 s for a 62 KB message.
+An erasure of a disappearing or view-once message can't be split, so a live write or an inbox row may wait behind one, as "Disappearing and view-once messages" says: about 2 ms at a million messages, up to 10 ms at p99 under load, and up to 0.75 s for a 62 KB message. A deletion for you, an edit or a revoke of such a message is an erasure in the live lane itself, so it costs the write that makes it: measured at a million messages under load, one takes 0.5 to 1.2 ms at p50 and up to 6 ms, where an ordinary message's takes 0.1 to 0.4 ms and up to 5 ms; twenty deleted for you in one write, as a phone's selection comes, 4.5 to 6.5 ms, where twenty ordinary ones take 3.5 to 17 ms; and the 62 KB message's deletion for you 150 ms.
 
 The load harness measures them on an M-series Mac and a small Linux machine, and the README's "What it costs" reports them, as ooze's does.
 
