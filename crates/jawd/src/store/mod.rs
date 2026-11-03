@@ -3901,13 +3901,20 @@ mod tests {
                 tokio::spawn(async move { store.apply_leftovers(left).await })
             })
             .collect();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while waiting() != Some(2) {
+        // The writer's own report reads no database, so it says they wait however slow status's
+        // counts are; the lock keeps them waiting while status reads them.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while store.report().queued_background != 2 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("status counts the two batches of rows left in the inbox waiting for the writer");
+        .expect("the writer counts the two batches of rows left in the inbox waiting for it");
+        assert_eq!(
+            waiting(),
+            Some(2),
+            "status counts the two batches of rows left in the inbox waiting for the writer"
+        );
         holder.execute_batch("COMMIT").unwrap();
         for batch in batches {
             batch.await.unwrap().unwrap();

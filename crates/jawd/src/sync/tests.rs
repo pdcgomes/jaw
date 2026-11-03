@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -2125,20 +2126,21 @@ async fn with_room_the_rows_left_in_the_inbox_and_the_live_row_after_them_go_ahe
     until("the rows left from before", || store.count("inbox").unwrap() == drain::READ as u64).await;
     // History, a backfill, media's steps: four tasks, each sending its next batch once its last is
     // in, so background work always waits for the writer. They keep coming until the rows are
-    // converted, or for STREAM at most.
+    // converted, or for STREAM at most once the converter has started.
     const STREAM: Duration = Duration::from_secs(30);
     let (stop, ran_out, batches) =
         (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
-    let began = Instant::now();
+    let converting_since = Arc::new(OnceLock::<Instant>::new());
     let producers: Vec<_> = (0..4usize)
         .map(|p| {
-            let (store, stop, ran_out, batches) = (store.clone(), stop.clone(), ran_out.clone(), batches.clone());
+            let (store, stop, ran_out, batches, since) =
+                (store.clone(), stop.clone(), ran_out.clone(), batches.clone(), converting_since.clone());
             tokio::spawn(async move {
                 for n in 0usize.. {
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    if began.elapsed() >= STREAM {
+                    if since.get().is_some_and(|started| started.elapsed() >= STREAM) {
                         ran_out.store(true, Ordering::Relaxed);
                         return;
                     }
@@ -2162,10 +2164,18 @@ async fn with_room_the_rows_left_in_the_inbox_and_the_live_row_after_them_go_ahe
             })
         })
         .collect();
-    until("background work coming", || batches.load(Ordering::Relaxed) >= 4).await;
+    // The stream is under way before the converter starts, however slow its first batches are.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while batches.load(Ordering::Relaxed) < 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stream of background work never started");
     let converter = converting(&store);
+    let started = *converting_since.get_or_init(Instant::now);
     store.inbox("message", 0, live_message(ANA, ANA, "live", AT + 1_000_000, text("agora")).encode_to_vec(), None);
-    while store.count("inbox").unwrap() > 0 && began.elapsed() < STREAM + Duration::from_secs(10) {
+    while store.count("inbox").unwrap() > 0 && started.elapsed() < STREAM + Duration::from_secs(10) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let coming = !ran_out.load(Ordering::Relaxed);
