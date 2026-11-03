@@ -1,16 +1,56 @@
 # jaw
 
-WhatsApp in a terminal, fast, from the keyboard: your chats, photos, voice messages and polls. A daemon keeps the connection to WhatsApp, so the terminal is one of the interfaces that can show it. In the style of [ooze](https://github.com/pdcgomes/ooze), with [badcoffee.dev](https://badcoffee.dev)'s Mimic.
+jaw is a fast WhatsApp client for the Mac. Its daemon, jawd, is linked to WhatsApp as one of your devices, keeps your chats and messages on your Mac and does all the work; a terminal app, `jaw`, and a Mac app, Jaw, only draw what jawd serves them, over one socket protocol. So opening either never waits on WhatsApp, and your chats, photos, voice messages and polls are there whether it can be reached or not. In the style of [ooze](https://github.com/pdcgomes/ooze), with [badcoffee.dev](https://badcoffee.dev)'s Mimic.
 
-jaw is being built. [The design](docs/plans/2026-10-16-jaw-design.md) says how it works and what it costs, [the protocol](protocol/README.md) how an interface talks to the daemon, and [your first run](docs/first-run.md) what the first start on a real account does.
+[![jaw in a minute: the screen, the daemon, the engines and interfaces, what it costs, the palette and split panes](marketing/jaw-in-a-minute/jaw.gif)](marketing/jaw-in-a-minute/)
 
-Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote them, MIT-licensed ([docs/licenses/omarchy.txt](docs/licenses/omarchy.txt)); Ctrl-, or `jaw settings` picks one.
+[The design](docs/plans/2026-10-16-jaw-design.md) says how it works and why, and [the protocol](protocol/README.md) how an interface talks to jawd.
 
-jaw isn't affiliated with WhatsApp or Meta.
+## What it does
+
+Every picture here is of a made-up account. The terminal's are frames `jaw snapshot --demo` draws, with their photos in half-blocks, as a terminal without graphics shows them; kitty, iTerm2 and sixel terminals draw them whole. The Mac's are scenes from its component harness.
+
+![The terminal at 140 columns: folders and the roster, the chat list, and Ana Ribeiro's chat with her photo and her voice message playing](docs/pictures/terminal-chats.png)
+
+The terminal: folders and the roster beside the chat list, and a conversation with a photo, a voice message playing and someone typing.
+
+![Three split panes: Ana Ribeiro's chat with the keys, Escola do Bairro's under it, and Família Gomes beside them with an album, a sticker, a video and a voice message](docs/pictures/terminal-panes.png)
+
+Split panes, one chat in each, here with an album, a sticker, a video and a voice message in the family's; they're behind `JAW_EXPERIMENTS=panes` for now.
+
+![The palette over Mãe's chat, finding "li": three chats, someone to start a chat with, and the Library action with its key](docs/pictures/terminal-palette.png)
+
+Ctrl-K finds anything: chats, people to start one with, folders, actions with their keys, and messages, links and files.
+
+![The library across every chat: photos and a video as a grid, then files, links and voice messages, each with who shared it, where and when](docs/pictures/terminal-library.png)
+
+Ctrl-L opens the library of everything shared, in every chat or in one, searched by caption, file name and link title, and by `from:`, `in:`, `since:` and `until:`.
+
+![Jaw, the Mac app, with Lisbon Climbing open in bubbles: a contact card, a link, a voice message and an album, and Rui typing](docs/pictures/mac-window-bubbles.png)
+
+Jaw, the Mac app: the sidebar, the chat list and a chat opened at its first unread, its messages in bubbles.
+
+![The same window with Lisbon Climbing's messages in lines](docs/pictures/mac-window-lines.png)
+
+The same chat in lines, as the terminal draws them: names heading their messages, and times on the right.
+
+<img src="docs/pictures/mac-library.png" width="576" alt="The Mac's library across every chat: its kinds with their counts, the search line, photos and videos, files and links">
+
+The library on the Mac, a pane of its own beside the chats: ⌘L for every chat, ⌥⌘L for the one you're in.
 
 ## Install
 
-From a checkout, with Go and Rust:
+jaw is three programs: `jaw`, the terminal app; `jawd`, the daemon; and `jaw-engine`, which speaks WhatsApp for jawd. Either way below builds them from source, with Go and Rust.
+
+With Homebrew:
+
+```sh
+brew install pdcgomes/jaw/jaw
+```
+
+Homebrew builds them with its own Go and Rust, puts `jaw` and `jawd` in its `bin/` and `jaw-engine` in the formula's `libexec/jaw/`, and installs ffmpeg with them. ffmpeg is recommended rather than needed: text, and everything you receive, work without it, and sending videos, GIFs and audio files says it's missing.
+
+From a checkout:
 
 ```sh
 make install                  # jaw and jawd in /usr/local/bin, jaw-engine in /usr/local/libexec/jaw
@@ -18,9 +58,33 @@ make install PREFIX=~/.local  # or under your home folder, without sudo
 make uninstall                # with the same PREFIX, takes them out again
 ```
 
-`make install` builds them first. Into a folder only root can write, run `make release` as yourself, then `sudo make install`, which builds nothing. With Homebrew, once its tap is published: `brew install pdcgomes/jaw/jaw`. ffmpeg is recommended rather than needed: text, and everything you receive, work without it, and sending videos, GIFs and audio files says it's missing.
+`make install` builds them first. Into a folder only root can write, run `make release` as yourself, then `sudo make install`, which builds nothing.
 
-Then run `jaw`. It starts jawd when nothing answers, and jawd runs the engine installed beside it. All three say one version (`jaw --version`), taken from `git describe`, and when the jawd still running after an upgrade is another build, jaw says so and how to stop it. Your chats stay in jaw's folder, `~/Library/Application Support/jaw` on macOS, whichever jaw you run. `scripts/release.sh`, from a clean tree at a tag, makes a release's source tarball and the tap's formula, and prints the commands that publish them.
+The Mac app isn't in the tap yet. `make mac` builds it, with Xcode and [mise](https://mise.jdx.dev) for Tuist, into `mac/build/release/Jaw.app`, with jawd, jaw-engine and jaw inside it, each signed; [mac/README.md](mac/README.md) has the rest. It's younger than the terminal, and doesn't send photos and files, or play and record voice messages, yet.
+
+### How jawd runs
+
+Run `jaw`. When nothing answers on jaw's socket it starts jawd, and keeps drawing while jawd starts; jawd runs the engine installed beside it, and goes on when jaw quits, so messages and notifications keep coming. The Mac app uses the jawd that's running. To start jawd at login instead, `jaw agent install` installs it as a LaunchAgent (`jaw agent status` says how it is, `jaw agent uninstall` takes it out), or the Mac app's Jaw › jawd at Login… starts its own, offering to take over the terminal's, so only one ever runs.
+
+All three programs say one version (`jaw --version`), taken from `git describe`, and when the jawd still running after an upgrade is another build, jaw says so and how to stop it. Your chats stay in jaw's folder, `~/Library/Application Support/jaw`, whichever jaw you run.
+
+## First run
+
+Run `jaw`. jawd isn't linked yet, so jaw shows a QR code beside the Mimic, as the Mac app does: on your phone, open WhatsApp › Settings › Linked devices › Link a device, and point it at the code. `p` in the terminal, or Use a Phone Number Instead in the Mac app, links with a code you type on the phone instead, and `jaw link` does either from the command line. jawd is then one of your linked devices, and the phone lists it as jaw.
+
+Then the phone sends your history, every chat's newest messages first. Chats appear as it comes in, each where its newest message puts it, so older history never moves a chat, and new messages go ahead of it: the history waits while they're stored and acknowledged. `jaw status` says how far it has got. Every message brings its thumbnail, so a photo shows at once. Photos, stickers, GIFs and voice messages that arrive now download by themselves, and those from the history once they're on screen; videos and documents download when you open them. Files gone from WhatsApp's servers, as history from before jaw was linked often is, are asked of the phone again, which needs the phone online. Text becomes searchable as it's indexed, which goes on for a while after a big history is in: a quarter of an hour for a million messages. Scrolling past a chat's oldest message asks the phone for older ones.
+
+After time offline, the terminal's header and the Mac's status line say jawd is catching up, and how far, and notifications wait to come as one summary at the end.
+
+To look around first, `jaw demo` draws the made-up account in the pictures, with no jawd or WhatsApp behind it, and the Mac app's `--demo` runs a jawd of its own on another made-up account.
+
+## How it works
+
+jawd does the work, so every interface gets all of it. It keeps every chat and message in its own database, works out what an interface shows (names, formatting, quotes, reaction and receipt totals, poll tallies, previews sized for display, search, drafts, folders, presence, voice playback and recording, notifications), and serves interfaces on a Unix socket in jaw's folder that only you can reach: one JSON object a line, every request answered as data, and live windows that send what's on screen and then only what changes in it. [The protocol](protocol/README.md) specifies it, so a script, or another app, can be an interface too.
+
+WhatsApp is reached through jaw-engine, a small Go process on [whatsmeow](https://github.com/tulir/whatsmeow), behind an `Engine` trait in jawd. The engine speaks WhatsApp and hands jawd WhatsApp's own protobufs, which jawd understands, so another engine can take its place; the demo engine, with its made-up account, already does, for trying jaw, its tests and its load runs.
+
+Everything stays on your Mac, in jaw's folder, `~/Library/Application Support/jaw` (`$XDG_DATA_HOME/jaw` on Linux), which only you can read: `jaw.db`, jawd's SQLite database, which keeps each message's raw protobuf as the source of truth; `session.db`, whatsmeow's keys for the linked device; and the photos and files jawd downloads. Nothing is acknowledged, to WhatsApp, the phone or an interface, before it's on disk in a way that survives a power cut: WhatsApp hears "received" only once the message is committed and flushed to the drive (`F_FULLFSYNC` on macOS), so after a crash anywhere before that, WhatsApp sends it again.
 
 ## What it costs
 
@@ -56,6 +120,18 @@ Where it falls short, and why:
 
 `make perf` takes half an hour, most of it the indexing above, and writes the full table, with how each number was taken, to `target/perf/`. The same account is there to try jaw without WhatsApp: `jawd demo` in one terminal, then `JAW_HOME=$TMPDIR/jaw-demo jaw` in another. Its history takes a minute and a half to arrive the first time, search fills in over the quarter hour after, and `--flood 20` adds some life.
 
+## What's next
+
+After the first release:
+
+- **GIF search,** from Giphy through jawd, jaw's only request to a service besides WhatsApp, made only while a GIF picker is open.
+- **Scheduled messages and reminders:** anything jaw sends, at a time you give, once or repeating, sent by jawd at its time and held for you when it's more than an hour late; and reminders on messages, which notify and mark their chat unread, so the phone shows it too.
+- **Assistants over MCP:** Claude, Cursor, ChatGPT and other AI assistants reaching jaw through the Model Context Protocol, each through a grant you make in jaw for the folders it sees, read-only unless you allow more, and its sends confirmed in the assistant's app.
+
+## Not affiliated with WhatsApp or Meta
+
+jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow unofficial clients, so use it at your own risk: unofficial clients can get numbers banned.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote them, MIT-licensed ([docs/licenses/omarchy.txt](docs/licenses/omarchy.txt)); Ctrl-, or `jaw settings` picks one.
