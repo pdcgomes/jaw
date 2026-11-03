@@ -2137,7 +2137,10 @@ const MERGE_STEP: i64 = 200;
 /// Moves up to MERGE_STEP messages of the first chat being merged into the chat it's merged into,
 /// folding a message both have into one by the usual rules. Both chats then show their newest
 /// message, so what watches either is told its messages moved, and once none are left the other
-/// chat is removed. Says whether anything changed.
+/// chat is removed. A message whose move took words out as an erasure takes them, as a fold of a
+/// copy with a time to go does, ends the step, as an erasure ends a background transaction: it
+/// can't be split, and an inbox row or a live write waits for all of it. Says whether anything
+/// changed.
 fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result<bool> {
     let found: Option<(i64, i64)> = match gone {
         Some(gone) => db
@@ -2158,13 +2161,18 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
         .prepare_cached("SELECT n FROM messages WHERE chat = ?1 ORDER BY at, n LIMIT ?2")?
         .query_map(params![gone, MERGE_STEP], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut erased = false;
     for &n in &moving {
         move_merged(db, stamps, gone, keep, n)?;
+        erased = stamps.costliest() > Duration::ZERO;
+        if erased {
+            break;
+        }
     }
     show_newest(db, stamps, gone)?;
     show_newest(db, stamps, keep)?;
     // Oldest first, so the chat being merged keeps its newest until the last step.
-    if moving.len() as i64 == MERGE_STEP {
+    if erased || moving.len() as i64 == MERGE_STEP {
         return Ok(true);
     }
     let (gone_jid, keep_jid): (String, String) = db

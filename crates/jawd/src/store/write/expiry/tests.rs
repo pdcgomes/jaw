@@ -1450,6 +1450,73 @@ async fn a_photo_folded_with_its_view_once_copy_leaves_nothing_of_the_caption_it
     }
 }
 
+/// A chat merge's step ends after a fold that takes what a copy said out as an erasure takes it, so
+/// an inbox row or a live write waits behind one such fold at most, as behind one of the timer's
+/// erasures, rather than behind a step's two hundred: Ana's number's chat and her LID's, holding
+/// the same thirty messages with a time to go among thirty plain ones, merge in steps of one
+/// transaction each, each folding one of those at most, the plain ones before it going with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_merge_folds_each_copy_with_a_time_to_go_in_a_transaction_of_its_own() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let copies = |chat: &str| -> Vec<Change> {
+        (0..60i64)
+            .map(|k| {
+                let goes = (k % 2 == 0).then_some(LATER + k);
+                Change::Message(message(
+                    chat,
+                    &format!("c{k:02}"),
+                    AT + k,
+                    &format!("copy{k} said in both chats"),
+                    goes,
+                ))
+            })
+            .collect()
+    };
+    apply(&store, copies(ANA_LID)).await;
+    apply(&store, copies(ANA)).await;
+    store.indexed().await.unwrap();
+    // The merges left, and what's left in the chat going: its copies with a time to go, and all.
+    let left = || async {
+        query(&store, |db| {
+            Ok(db.query_row(
+                "SELECT (SELECT count(*) FROM chat_merges),
+                    (SELECT count(*) FROM messages WHERE chat IN (SELECT gone FROM chat_merges)
+                        AND expires_at IS NOT NULL),
+                    (SELECT count(*) FROM messages WHERE chat IN (SELECT gone FROM chat_merges))",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+            )?)
+        })
+        .await
+    };
+    let joined = Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() };
+    apply(&store, vec![Change::Person(joined)]).await;
+    let mut was = left().await;
+    assert_eq!(was, (1, 30, 60), "one chat merging into the other, with all sixty copies");
+    let mut steps = Vec::new();
+    while was.0 > 0 && steps.len() < 100 {
+        let applied = store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        let now = left().await;
+        steps.push((applied.transactions, was.1 - now.1, was.2 - now.2));
+        was = now;
+    }
+    assert_eq!(was.0, 0, "the merge is done");
+    let unpaced: Vec<_> = steps.iter().filter(|&&(transactions, timed, _)| transactions != 1 || timed > 1).collect();
+    assert!(unpaced.is_empty(), "steps of more than one transaction or fold of a timed copy: {unpaced:?} of {steps:?}");
+    assert_eq!(steps.len(), 31, "one step for each copy with a time to go, and one to end the merge: {steps:?}");
+    let kept: (i64, i64, i64) = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT count(DISTINCT chat), count(*), (SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'said')
+            FROM messages WHERE id LIKE 'c__'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    })
+    .await;
+    assert_eq!(kept, (1, 60, 60), "each message once, in the chat kept, and found once");
+}
+
 /// A whole merge that comes after the WAL an erasure left was emptied, as one waiting for its time
 /// after the last whole merge does, has the WAL emptied again once it's done, so jaw.db takes the
 /// pages it zeroed at once rather than at the checkpointer's next pass.
