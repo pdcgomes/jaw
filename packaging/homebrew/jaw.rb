@@ -8,10 +8,17 @@ class Jaw < Formula
   license "MIT"
   head "https://github.com/pdcgomes/jaw.git", branch: "main"
 
+  # libopus, which jawd compiles in for voice messages, builds with cmake.
+  depends_on "cmake" => :build
   depends_on "go" => :build
   depends_on "rust" => :build
   # Text, and everything received, work without it; sending videos, GIFs and audio files needs it.
   depends_on "ffmpeg" => :recommended
+
+  on_linux do
+    depends_on "pkgconf" => :build
+    depends_on "alsa-lib"
+  end
 
   def install
     system "make", "install", "PREFIX=#{prefix}"
@@ -19,8 +26,18 @@ class Jaw < Formula
 
   def caveats
     <<~EOS
-      jaw starts jawd, the daemon that keeps your chats, when it isn't running. After an
-      upgrade the jawd still running is the old one, and jaw says how to stop it.
+      jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow
+      unofficial clients, so a number that uses one can be banned. Try it on a spare
+      number first.
+
+      jaw is a linked device, as WhatsApp Web is. Run `jaw`, then on the phone go to
+      WhatsApp › Settings › Linked devices › Link a device and scan the code jaw shows;
+      `jaw link --phone 351912345678`, with your number, gives a code to type instead.
+      To unlink it, log it out on the phone, in Linked devices.
+
+      jaw starts jawd, the daemon that keeps your chats, when it isn't running, and
+      `jaw agent install` starts it at login and again if it stops. After an upgrade
+      the jawd still running is the old one, and jaw says how to stop it.
 
       Without ffmpeg, text and everything you receive still work; sending videos, GIFs
       and audio files says it's missing, and `jawd status` lists it.
