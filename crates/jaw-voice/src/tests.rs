@@ -405,7 +405,7 @@ fn refusals_held_while_the_caller_is_behind_never_push_out_a_recordings_end() {
     insist(|| voice.record(dir.path().join("b.ogg"), crate::RECORDING_LIMIT));
     insist(|| voice.stop_recording());
     insist(|| voice.record(dir.path().join("c.ogg"), crate::RECORDING_LIMIT));
-    std::thread::sleep(Duration::from_millis(300));
+    taken(&voice);
 
     let (mut ended, mut refusals) = (0, 0);
     let seen = until(&events, |e| {
