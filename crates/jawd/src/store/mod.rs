@@ -3813,20 +3813,20 @@ mod tests {
         .expect("and its next copies them in its room");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_rows_left_in_the_inbox_go_in_short_transactions_with_a_live_write_going_in_between() {
+    /// Applies `count` changes left in the inbox, their first transaction kept from starting by a
+    /// lock held outside until a live write waits behind it; says how they went in, the feed's last
+    /// seq before them, and the seq the live write went in at.
+    async fn leftovers_with_a_live_write_waiting(count: usize) -> (Applied, i64, i64) {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
         // The writer's prune at its start is done, so the lock below holds up the leftovers.
         store.apply(Lane::Live, Vec::new()).await.unwrap();
         let before = *store.committed().borrow();
-        // A lock held outside keeps the leftovers' first transaction from starting until a live
-        // write waits behind it.
         let holder = Connection::open(home.path().join("jaw.db")).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
         let mut trouble = store.trouble();
         let chat = "351910000001@s.whatsapp.net";
-        let left = messages((0..2 * BATCH_ROWS).map(|n| text(chat, &format!("l{n}"), n as i64, "left from before")));
+        let left = messages((0..count).map(|n| text(chat, &format!("l{n}"), n as i64, "left from before")));
         let leftovers = {
             let store = store.clone();
             tokio::spawn(async move { store.apply_leftovers(left).await })
@@ -3848,15 +3848,24 @@ mod tests {
         holder.execute_batch("COMMIT").unwrap();
         let applied = leftovers.await.unwrap().unwrap();
         let live = live.await.unwrap().unwrap();
-        assert_eq!(store.count("messages").unwrap(), 2 * BATCH_ROWS as u64);
-        assert!(applied.transactions > 1, "{} changes in {} transaction", 2 * BATCH_ROWS, applied.transactions);
-        assert!(
-            before < live.seq && live.seq < applied.seq,
-            "the live write went in at seq {}, not between the leftovers' first and last, after {before} and \
-             before {}",
-            live.seq,
-            applied.seq
-        );
+        assert_eq!(store.count("messages").unwrap(), count as u64);
+        (applied, before, live.seq)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_rows_left_in_the_inbox_go_in_short_transactions_with_a_live_write_going_in_between() {
+        // A converter's batch makes far fewer than BATCH_ROWS changes, so in jawd only BATCH_TIME and
+        // the early end for a waiting live write split the leftovers; BATCH_ROWS splits more than that.
+        for count in [BATCH_ROWS / 2, 2 * BATCH_ROWS] {
+            let (applied, before, live) = leftovers_with_a_live_write_waiting(count).await;
+            assert!(applied.transactions > 1, "{count} changes in {} transaction", applied.transactions);
+            assert!(
+                before < live && live < applied.seq,
+                "{count} changes: the live write went in at seq {live}, not between the leftovers' first and \
+                 last, after {before} and before {}",
+                applied.seq
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
