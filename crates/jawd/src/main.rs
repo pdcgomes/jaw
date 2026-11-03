@@ -513,12 +513,14 @@ fn engine_program() -> Option<std::path::PathBuf> {
 fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) -> Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("can't make {}", home.display()))?;
     std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+    // Taken before the socket is listened on, so a jawd refused never touches it.
+    let lock = lock(home)?;
     #[cfg(target_os = "macos")]
     home::keep_out(home);
     let runtime = runtime()?;
     let chosen = engine(kind, home, fail);
     let ending = Ending::new(chosen.as_ref().ok().cloned());
-    stopped(runtime, &ending, options.busy_at_exit, async {
+    stopped(runtime, lock, &ending, options.busy_at_exit, async {
         let mut signals = Signals::new()?;
         let served = serve(home, chosen, options, &ending, &mut signals).await;
         tokio::select! {
@@ -534,9 +536,11 @@ fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) 
 }
 
 /// Runs `serving` on `runtime` and then, however it ended, done, failed or panicked, has the engine
-/// gone as `ending` says before the runtime goes; then goes on as `serving` ended.
+/// gone as `ending` says before the runtime goes, and lets jaw.lock go only once both have; then
+/// goes on as `serving` ended. A jawd that exits before then lets it go as it exits.
 fn stopped(
     runtime: tokio::runtime::Runtime,
+    lock: std::fs::File,
     ending: &Ending,
     busy_at_exit: Option<Duration>,
     serving: impl Future<Output = Result<()>>,
@@ -548,6 +552,7 @@ fn stopped(
     }
     // Whatever's still running was told to stop; what doesn't by now is abandoned.
     runtime.shutdown_timeout(Duration::from_millis(100));
+    drop(lock);
     outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
@@ -555,9 +560,9 @@ fn stopped(
 /// whatever happens here.
 async fn serve(home: &Path, chosen: Chosen, options: &Options, ending: &Ending, signals: &mut Signals) -> Result<()> {
     let socket = jaw_proto::local::socket(home);
-    let (lock, listener) = open(home, &socket)?;
+    let listener = sock::listen(&socket)?;
     let started = tokio::select! {
-        started = start_on(home, &socket, lock, chosen, options, &ending.supervisor) => started?,
+        started = start_on(home, &socket, chosen, options, &ending.supervisor) => started?,
         signal = signals.next() => {
             eprintln!("jawd: {signal} while starting, so it stops");
             let _ = std::fs::remove_file(&socket);
@@ -661,8 +666,6 @@ pub struct Options {
 struct Started {
     state: Arc<state::State>,
     notifications: Option<tokio::task::JoinHandle<()>>,
-    /// jaw.lock, held while jawd runs.
-    _lock: std::fs::File,
 }
 
 /// Takes jaw.lock in `home`, or says another jawd has it, so two never open jaw.db together: two
@@ -702,12 +705,11 @@ type Chosen = Result<Arc<dyn Engine>, (&'static str, String)>;
 async fn start_on(
     home: &Path,
     socket: &Path,
-    lock: std::fs::File,
     engine: Chosen,
     options: &Options,
     supervised: &OnceLock<Supervisor>,
 ) -> Result<Started> {
-    let started = start(home, lock, engine, options, supervised).await;
+    let started = start(home, engine, options, supervised).await;
     if started.is_err() {
         let _ = std::fs::remove_file(socket);
     }
@@ -715,14 +717,8 @@ async fn start_on(
 }
 
 /// Starts jawd, keeping the engine's supervisor in `supervised` as soon as there is one, so it's
-/// stopped however the start ends.
-async fn start(
-    home: &Path,
-    lock: std::fs::File,
-    engine: Chosen,
-    options: &Options,
-    supervised: &OnceLock<Supervisor>,
-) -> Result<Started> {
+/// stopped however the start ends. Whoever calls it holds jaw.lock.
+async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &OnceLock<Supervisor>) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
@@ -824,7 +820,7 @@ async fn start(
             notify::Timing::default(),
         )
     });
-    Ok(Started { state, notifications, _lock: lock })
+    Ok(Started { state, notifications })
 }
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
@@ -1102,11 +1098,10 @@ mod tests {
     async fn the_demo_engines_account_shows_a_link_preview_with_its_thumbnail_through_the_socket() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let link = tokio::task::spawn_blocking(move || {
@@ -1141,11 +1136,10 @@ mod tests {
     async fn the_demo_engines_account_shows_a_poll_with_its_votes_and_takes_yours_through_the_socket() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let polls = tokio::task::spawn_blocking(move || {
@@ -1223,11 +1217,10 @@ mod tests {
     async fn the_demo_engines_account_shows_a_place_and_takes_yours_through_the_socket() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let places = tokio::task::spawn_blocking(move || {
@@ -1282,11 +1275,10 @@ mod tests {
     async fn the_demo_engines_account_shows_an_event_and_its_answers_and_takes_yours_through_the_socket() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let events = tokio::task::spawn_blocking(move || {
@@ -1349,11 +1341,10 @@ mod tests {
     async fn the_demo_engines_account_shows_its_contact_cards_and_takes_yours_through_the_socket() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let cards = tokio::task::spawn_blocking(move || {
@@ -1410,11 +1401,10 @@ mod tests {
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let (_lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
-            .await
-            .unwrap();
+        let started =
+            start(home.path(), engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new()).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let store = started.state.store().unwrap().clone();
         let chat = "120363012345678901@g.us";
@@ -1472,15 +1462,21 @@ mod tests {
         assert!(!socket.exists(), "the socket is removed");
     }
 
-    #[tokio::test]
-    async fn a_jawd_refused_while_another_stops_leaves_no_socket_behind() {
+    #[test]
+    fn a_jawd_refused_while_another_stops_leaves_no_socket_behind() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         // The other is stopping: its socket is gone, and it still holds jaw.lock.
         let other = lock(home.path()).unwrap();
-        let refused = open(home.path(), &socket).unwrap_err().to_string();
+        let options = Options { no_notify: true, ..Options::default() };
+        let refused = run(home.path(), EngineKind::Demo, None, &options).unwrap_err().to_string();
         assert!(refused.contains("another jawd is running"), "{refused}");
         assert!(!socket.exists(), "the refused jawd didn't bind the socket");
+        let runtime = runtime().unwrap();
+        let _within = runtime.enter();
+        let refused = open(home.path(), &socket).unwrap_err().to_string();
+        assert!(refused.contains("another jawd is running"), "{refused}");
+        assert!(!socket.exists(), "nor did the refused demo");
         drop(other);
         let (_lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
@@ -1491,18 +1487,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("jaw.db"), b"not a database, so jaw.db can't be opened").unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let (lock, _listener) = open(home.path(), &socket).unwrap();
+        let (_lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
         let options = Options { no_notify: true, ..Options::default() };
-        let failed = start_on(
-            home.path(),
-            &socket,
-            lock,
-            engine(EngineKind::Demo, home.path(), None),
-            &options,
-            &OnceLock::new(),
-        )
-        .await;
+        let failed =
+            start_on(home.path(), &socket, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+                .await;
         assert!(failed.is_err(), "jaw.db isn't one");
         assert!(!socket.exists(), "the socket went with the start that failed");
     }
@@ -1515,6 +1505,38 @@ mod tests {
         assert!(refused.contains("another jawd is running"), "{refused}");
         drop(first);
         lock(home.path()).unwrap();
+    }
+
+    /// Notes, as the runtime's shutdown drops it, whether jaw.lock in `home` is still held.
+    struct Witness {
+        home: std::path::PathBuf,
+        held: Arc<AtomicBool>,
+    }
+
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            self.held.store(lock(&self.home).is_err(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn jaw_lock_goes_only_once_the_runtime_has_shut_down() {
+        let home = tempfile::tempdir().unwrap();
+        let held = Arc::new(AtomicBool::new(false));
+        let witness = Witness { home: home.path().into(), held: held.clone() };
+        // Its shutdown drops its tasks on this thread, before it returns.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        stopped(runtime, lock(home.path()).unwrap(), &Ending::new(None), None, async move {
+            // One of jawd's tasks, still running as it stops, which only the runtime's shutdown ends.
+            tokio::spawn(async move {
+                let _witness = witness;
+                std::future::pending::<()>().await
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(held.load(Ordering::Relaxed), "jaw.lock went before the runtime had shut down");
+        assert!(lock(home.path()).is_ok(), "and went once it had");
     }
 
     /// The fake engine in `home` supervised as jawd's start supervises its engine, once it runs.
@@ -1538,7 +1560,7 @@ mod tests {
         let engine: Arc<dyn Engine> = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().into()));
         let ending = Ending::new(Some(engine.clone()));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stopped(runtime().unwrap(), &ending, None, async {
+            stopped(runtime().unwrap(), lock(home.path()).unwrap(), &ending, None, async {
                 let _incoming = supervising(home.path(), &engine, &ending).await;
                 panic!("as jawd might");
             })
@@ -1546,6 +1568,7 @@ mod tests {
         assert!(panicked.is_err(), "the panic goes on");
         assert!(said.is_file(), "its standard input was closed, and it exited on its own, before the runtime went");
         assert_eq!(fake::running(home.path()), None);
+        assert!(lock(home.path()).is_ok(), "jaw.lock went with the runtime");
     }
 
     #[test]

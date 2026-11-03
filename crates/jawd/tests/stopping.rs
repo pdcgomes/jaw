@@ -4,9 +4,10 @@
 //! stops on one while its phases still run. Stopped while it starts, it takes its engine with it
 //! however late its runtime's threads run at the end. However it stops, on SIGTERM or Ctrl-C, on a
 //! second one at once, or failing to start, its engine has gone by the time it has, ended in order
-//! when there's time. Whichever way a test ends, it leaves neither jawd nor an engine of its own
-//! running.
+//! when there's time, and until then it holds jaw.lock, so no other jawd starts beside it. Whichever
+//! way a test ends, it leaves neither jawd nor an engine of its own running.
 
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,13 @@ impl Fake {
     fn silent(home: &Path) -> Fake {
         let sleep = sleep();
         Fake::new(home, &format!("exec {sleep}"), Some(sleep))
+    }
+
+    /// An engine that never says hello, never reads what jawd writes to it and ignores SIGTERM, so
+    /// ended in order it runs on through both pauses, until SIGKILL.
+    fn stubborn(home: &Path) -> Fake {
+        let sleep = sleep();
+        Fake::new(home, &format!("trap '' TERM\nexec {sleep}"), Some(sleep))
     }
 
     /// An engine that says hello, and then never answers or reads what jawd writes to it.
@@ -154,14 +162,30 @@ fn terminate(jawd: &mut Jawd) -> (ExitStatus, Duration) {
 fn stop_with(jawd: &mut Jawd, signal: i32) -> (ExitStatus, Duration) {
     // SAFETY: kill only sends a signal to the jawd this test started.
     unsafe { libc::kill(jawd.0.id() as i32, signal) };
-    let sent = Instant::now();
+    exits(jawd, Instant::now())
+}
+
+/// Waits for jawd to exit, once told to stop at `told`, and says how it ended and how long after.
+fn exits(jawd: &mut Jawd, told: Instant) -> (ExitStatus, Duration) {
     loop {
         if let Some(status) = jawd.0.try_wait().unwrap() {
-            return (status, sent.elapsed());
+            return (status, told.elapsed());
         }
-        assert!(sent.elapsed() < BOUND * 2, "jawd was still running {:?} after signal {signal}", sent.elapsed());
+        assert!(told.elapsed() < BOUND * 2, "jawd was still running {:?} after it was told to stop", told.elapsed());
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Whether jaw.lock in `home` is free, as a second jawd would find it; taken, it's let go at once.
+fn jaw_lock_free(home: &Path) -> bool {
+    let file = std::fs::OpenOptions::new().write(true).open(home.join("jaw.lock")).unwrap();
+    // SAFETY: flock only locks the file opened here, which outlives the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return true;
+    }
+    let e = std::io::Error::last_os_error();
+    assert_eq!(e.raw_os_error(), Some(libc::EWOULDBLOCK), "{e}");
+    false
 }
 
 fn log(home: &Path) -> String {
@@ -260,6 +284,43 @@ fn jawd_stopped_while_it_starts_takes_its_engine_with_it_however_late_its_runtim
 }
 
 #[test]
+fn jawd_stopped_while_it_starts_holds_jaw_lock_until_its_engine_has_gone() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = Fake::stubborn(home.path());
+    let mut jawd = jawd_started(home.path(), &engine.program, |command| {
+        command.arg("--hold-start");
+    });
+    engine.started();
+    // SAFETY: kill only sends a signal to the jawd this test started.
+    unsafe { libc::kill(jawd.0.id() as i32, libc::SIGTERM) };
+    let told = Instant::now();
+    let mut held = 0;
+    loop {
+        // The lock first, so one found free while the engine still runs after was free as it ran.
+        let free = jaw_lock_free(home.path());
+        if engine.running().is_none() {
+            break;
+        }
+        assert!(
+            !free,
+            "jaw.lock was free {:?} after SIGTERM, while the engine still ran:\n{}",
+            told.elapsed(),
+            log(home.path())
+        );
+        held += 1;
+        assert!(told.elapsed() < BOUND * 2, "the engine was still running {:?} after SIGTERM", told.elapsed());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (status, took) = exits(&mut jawd, told);
+    let log = log(home.path());
+    assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
+    assert!(held > 0, "the engine had gone before jaw.lock was looked at:\n{log}");
+    assert!(log.contains("jawd: SIGTERM while starting, so it stops"), "{log}");
+    assert!(log.contains("jawd: jaw-engine didn't exit on SIGTERM either, so SIGKILL ended it"), "{log}");
+    assert!(jaw_lock_free(home.path()), "jaw.lock went with jawd");
+}
+
+#[test]
 fn jawd_ends_its_engine_in_order_and_waits_until_it_has_exited_before_it_does() {
     let home = tempfile::tempdir().unwrap();
     let said = home.path().join("said");
@@ -305,9 +366,16 @@ fn jawd_that_fails_to_start_takes_its_engine_with_it() {
     let engine = Fake::silent(home.path());
     let mut jawd = jawd(home.path(), &engine.program);
     let deadline = Instant::now() + BOUND * 2;
+    let mut held = 0;
     let status = loop {
+        // The lock first, so one found free while the engine still runs after was free as it ran.
+        let free = jaw_lock_free(home.path());
         if let Some(status) = jawd.0.try_wait().unwrap() {
             break status;
+        }
+        if engine.running().is_some() {
+            assert!(!free, "jaw.lock was free while the engine still ran:\n{}", log(home.path()));
+            held += 1;
         }
         assert!(Instant::now() < deadline, "jawd was still running:\n{}", log(home.path()));
         std::thread::sleep(Duration::from_millis(10));
@@ -317,6 +385,7 @@ fn jawd_that_fails_to_start_takes_its_engine_with_it() {
     assert!(log.lines().last().is_some_and(|last| last.starts_with("jawd: ")), "it says why last:\n{log}");
     assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
     if engine.pid.exists() {
+        assert!(held > 0, "the engine ran, but jaw.lock was never looked at while it did:\n{log}");
         assert!(
             log.contains("jawd: jaw-engine didn't exit once its standard input closed, so SIGTERM ended it"),
             "{log}"

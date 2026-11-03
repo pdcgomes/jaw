@@ -234,8 +234,8 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
     let folder = plan.folder.clone();
     let socket = jaw_proto::local::socket(&folder);
     let mut signals = crate::Signals::new()?;
-    let (lock, listener) = crate::open(&folder, &socket)?;
-    let started = crate::start_on(&folder, &socket, lock, Ok(engine), &plan.options, &OnceLock::new()).await?;
+    let (_lock, listener) = crate::open(&folder, &socket)?;
+    let started = crate::start_on(&folder, &socket, Ok(engine), &plan.options, &OnceLock::new()).await?;
     tokio::spawn(crate::sock::serve(started.state.clone(), listener));
     let store = started.state.store().context("the demo's jawd has no store")?.clone();
     println!(
