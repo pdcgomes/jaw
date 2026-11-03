@@ -1,7 +1,8 @@
 #!/bin/sh
 # Makes jaw's release from a clean tree at a tag like v0.1.0: its source tarball, the tarball's
-# sha256, and the Homebrew formula with both filled in, all in target/dist/. It pushes nothing and
-# makes no repository or release: it prints the commands that do, for you to run.
+# sha256, and the Homebrew formula with both filled in, all in target/dist/, for the release notes
+# in docs/releases/. It pushes nothing and makes no repository or release: it prints the commands
+# that do, for you to run.
 #
 #     scripts/release.sh
 #
@@ -28,6 +29,8 @@ tap_folder=~/src/${tap#*/}
 url=${JAW_URL:-https://github.com/$repo/releases/download/$tag/$name.tar.gz}
 dist=$root/target/dist
 tarball=$dist/$name.tar.gz
+notes=$root/docs/releases/$version.md
+[ -e "$notes" ] || fail "there are no release notes for $version: write docs/releases/$version.md first"
 
 mkdir -p "$dist"
 git archive --format=tar.gz --prefix="$name/" -o "$tarball" "$tag"
@@ -56,11 +59,12 @@ cat <<EOF
 Nothing has been pushed or published. To release jaw $version, run these yourself:
 
   git push origin $tag
-  gh release create $tag $tarball --repo $repo --title "jaw $version" --notes "jaw $version"
+  gh release create $tag $tarball --repo $repo --verify-tag --title "jaw $version" --notes-file $notes
 
-The first time, make the tap, private while jaw is:
+The first time, make the tap. Homebrew clones it without signing in, so it's public, as jaw has to
+be by then:
 
-  gh repo create $tap --private --description "Homebrew tap for jaw"
+  gh repo create $tap --public --description "Homebrew tap for jaw"
   git clone https://github.com/$tap $tap_folder
 
 then, for each release, put the formula in it:
@@ -69,7 +73,7 @@ then, for each release, put the formula in it:
   cp $dist/jaw.rb $tap_folder/Formula/jaw.rb
   git -C $tap_folder add Formula/jaw.rb
   git -C $tap_folder commit -m "jaw $version"
-  git -C $tap_folder push
+  git -C $tap_folder push origin HEAD
 
 and install it with: brew install ${tap%%/*}/${tap#*/homebrew-}/jaw
 
