@@ -3814,6 +3814,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_rows_left_in_the_inbox_go_in_short_transactions_with_a_live_write_going_in_between() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
+        // The writer's prune at its start is done, so the lock below holds up the leftovers.
+        store.apply(Lane::Live, Vec::new()).await.unwrap();
+        let before = *store.committed().borrow();
+        // A lock held outside keeps the leftovers' first transaction from starting until a live
+        // write waits behind it.
+        let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut trouble = store.trouble();
+        let chat = "351910000001@s.whatsapp.net";
+        let left = messages((0..2 * BATCH_ROWS).map(|n| text(chat, &format!("l{n}"), n as i64, "left from before")));
+        let leftovers = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply_leftovers(left).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), trouble.wait_for(Option::is_some)).await.unwrap().unwrap();
+        // It makes no event, so the feed's last seq once it's in says where it went among theirs.
+        let live = {
+            let store = store.clone();
+            let change = Change::Remember { key: "live".into(), value: "between".into() };
+            tokio::spawn(async move { store.apply(Lane::Live, vec![change]).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.report().queued_interactive == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the live write waits");
+        holder.execute_batch("COMMIT").unwrap();
+        let applied = leftovers.await.unwrap().unwrap();
+        let live = live.await.unwrap().unwrap();
+        assert_eq!(store.count("messages").unwrap(), 2 * BATCH_ROWS as u64);
+        assert!(applied.transactions > 1, "{} changes in {} transaction", 2 * BATCH_ROWS, applied.transactions);
+        assert!(
+            before < live.seq && live.seq < applied.seq,
+            "the live write went in at seq {}, not between the leftovers' first and last, after {before} and \
+             before {}",
+            live.seq,
+            applied.seq
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_wal_stays_bounded_while_history_pours_in_and_live_writes_never_wait_for_it() {
         let home = tempfile::tempdir().unwrap();
         let (soft, hard) = (256, 512);
