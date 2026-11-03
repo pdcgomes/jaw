@@ -2,8 +2,10 @@
 //! keeps trying to start it again, or never answering, so a start is waiting for its hello; and
 //! however it was started, even with SIGTERM blocked, as jaw's terminal starts it; and `jawd demo`
 //! stops on one while its phases still run. Stopped while it starts, it takes its engine with it
-//! however late its runtime's threads run at the end. Whichever way a test ends, it leaves neither
-//! jawd nor an engine of its own running.
+//! however late its runtime's threads run at the end. However it stops, on SIGTERM or Ctrl-C, on a
+//! second one at once, or failing to start, its engine has gone by the time it has, ended in order
+//! when there's time. Whichever way a test ends, it leaves neither jawd nor an engine of its own
+//! running.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -11,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+
+use prost::Message as _;
+use wa_proto::jaw::engine as pb;
 
 /// How long jawd has to stop, as its own bound says.
 const BOUND: Duration = Duration::from_secs(3);
@@ -27,42 +32,90 @@ impl Drop for Jawd {
     }
 }
 
-/// An engine that never says hello and never reads what jawd writes to it: a sleep no other
-/// process runs, which first writes down its PID, so the test can tell whether it outlived jawd.
-/// Should it still be running when the test ends, however the test ends, it's killed.
-struct Silent {
+/// A fake jaw-engine, a shell script that first writes down its PID, so the test can tell whether
+/// it outlived jawd. Should it still be running when the test ends, however the test ends, it's
+/// killed.
+struct Fake {
     program: PathBuf,
     pid: PathBuf,
-    command: String,
+    /// What `ps` shows it running, which tells it from a process that has taken its PID since.
+    runs: String,
 }
 
-impl Silent {
-    fn new(home: &Path) -> Silent {
-        static MADE: AtomicU32 = AtomicU32::new(0);
-        let id = std::process::id();
-        let command = format!("sleep {}.{id}{}", 7_000 + id % 1_000, MADE.fetch_add(1, Ordering::Relaxed));
-        let program = home.join("silent-engine");
-        let pid = home.join("engine.pid");
-        std::fs::write(&program, format!("#!/bin/sh\necho $$ > '{}'\nexec {command}\n", pid.display())).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Silent { program, pid, command }
+impl Fake {
+    /// An engine that never says hello and never reads what jawd writes to it: a sleep no other
+    /// process runs.
+    fn silent(home: &Path) -> Fake {
+        let sleep = sleep();
+        Fake::new(home, &format!("exec {sleep}"), Some(sleep))
     }
 
-    /// Its PID while it runs: the one it wrote down, while that process still runs its sleep.
+    /// An engine that says hello, and then never answers or reads what jawd writes to it.
+    fn mute(home: &Path) -> Fake {
+        let sleep = sleep();
+        Fake::new(home, &format!("{}\nexec {sleep}", hello(home)), Some(sleep))
+    }
+
+    /// An engine that runs `then` in its shell.
+    fn shell(home: &Path, then: &str) -> Fake {
+        Fake::new(home, then, None)
+    }
+
+    fn new(home: &Path, then: &str, runs: Option<String>) -> Fake {
+        let program = home.join("fake-engine");
+        let pid = home.join("engine.pid");
+        std::fs::write(&program, format!("#!/bin/sh\necho $$ > '{}'\n{then}\n", pid.display())).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runs = runs.unwrap_or_else(|| program.display().to_string());
+        Fake { program, pid, runs }
+    }
+
+    /// Its PID while it runs: the one it wrote down, while that process still runs it.
     fn running(&self) -> Option<i32> {
         let pid: i32 = std::fs::read_to_string(&self.pid).ok()?.trim().parse().ok()?;
-        let ps = Command::new("ps").args(["-o", "command=", "-p", &pid.to_string()]).output().ok()?;
-        (String::from_utf8_lossy(&ps.stdout).trim() == self.command).then_some(pid)
+        let ps = Command::new("ps").args(["-ww", "-o", "command=", "-p", &pid.to_string()]).output().ok()?;
+        String::from_utf8_lossy(&ps.stdout).contains(&self.runs).then_some(pid)
+    }
+
+    /// Waits until it runs.
+    fn started(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.running().is_none() {
+            assert!(Instant::now() < deadline, "the engine never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
-impl Drop for Silent {
+impl Drop for Fake {
     fn drop(&mut self) {
         if let Some(pid) = self.running() {
-            // SAFETY: kill only sends a signal, to the engine this test made, still running its sleep.
+            // SAFETY: kill only sends a signal, to the engine this test made, still running it.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
+}
+
+/// A sleep no other process runs.
+fn sleep() -> String {
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    let id = std::process::id();
+    format!("sleep {}.{id}{}", 7_000 + id % 1_000, MADE.fetch_add(1, Ordering::Relaxed))
+}
+
+/// A line of shell that says the hello jawd takes from its engine.
+fn hello(home: &Path) -> String {
+    let hello = pb::Hello {
+        protocol: pb::Version::Current as u32,
+        program: "a fake jaw-engine".into(),
+        whatsmeow: wa_proto::whatsmeow().into(),
+    };
+    let data = pb::Frame { id: 0, body: Some(pb::frame::Body::Hello(hello)) }.encode_to_vec();
+    let mut frame = (data.len() as u32).to_be_bytes().to_vec();
+    frame.extend(data);
+    let path = home.join("hello");
+    std::fs::write(&path, frame).unwrap();
+    format!("cat '{}'", path.display())
 }
 
 /// jawd on `home` with `engine` as its jaw-engine, once it listens.
@@ -94,20 +147,34 @@ fn jawd_started(home: &Path, engine: &Path, starting: impl FnOnce(&mut Command))
 
 /// Sends SIGTERM, and says how jawd ended and how long it took.
 fn terminate(jawd: &mut Jawd) -> (ExitStatus, Duration) {
+    stop_with(jawd, libc::SIGTERM)
+}
+
+/// Sends `signal`, and says how jawd ended and how long it took.
+fn stop_with(jawd: &mut Jawd, signal: i32) -> (ExitStatus, Duration) {
     // SAFETY: kill only sends a signal to the jawd this test started.
-    unsafe { libc::kill(jawd.0.id() as i32, libc::SIGTERM) };
+    unsafe { libc::kill(jawd.0.id() as i32, signal) };
     let sent = Instant::now();
     loop {
         if let Some(status) = jawd.0.try_wait().unwrap() {
             return (status, sent.elapsed());
         }
-        assert!(sent.elapsed() < BOUND * 2, "jawd was still running {:?} after SIGTERM", sent.elapsed());
+        assert!(sent.elapsed() < BOUND * 2, "jawd was still running {:?} after signal {signal}", sent.elapsed());
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 fn log(home: &Path) -> String {
     std::fs::read_to_string(home.join("jawd.log")).unwrap()
+}
+
+/// Waits until jawd's log says `said`.
+fn says(home: &Path, said: &str) {
+    let ready = Instant::now() + Duration::from_secs(30);
+    while !log(home).contains(said) {
+        assert!(Instant::now() < ready, "jawd never said {said:?}:\n{}", log(home));
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Waits until jawd answers hello, which it does only once its start is over and it serves.
@@ -120,17 +187,29 @@ fn answering(home: &Path) {
     }
 }
 
+/// Waits until jawd says its engine is running, once the engine has said hello.
+fn engine_running(home: &Path) {
+    let socket = home.join("jaw.sock");
+    let ready = Instant::now() + Duration::from_secs(30);
+    loop {
+        let running = jaw_client::Connection::open(&socket, "stopping test", "0")
+            .and_then(|(mut connection, _)| connection.call("status", serde_json::Value::Null))
+            .is_ok_and(|status| status["engine"]["state"] == "running");
+        if running {
+            return;
+        }
+        assert!(Instant::now() < ready, "jawd's engine never ran:\n{}", log(home));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn jawd_whose_engine_is_missing_stops_on_sigterm_within_its_bound() {
     let home = tempfile::tempdir().unwrap();
     let mut jawd = jawd(home.path(), &home.path().join("no-such-engine"));
     // Started, however long that takes, and its supervisor waiting to try the engine again.
     answering(home.path());
-    let ready = Instant::now() + Duration::from_secs(30);
-    while !log(home.path()).contains("starting it again") {
-        assert!(Instant::now() < ready, "jawd never tried its engine again:\n{}", log(home.path()));
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    says(home.path(), "starting it again");
     let (status, took) = terminate(&mut jawd);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
@@ -138,45 +217,111 @@ fn jawd_whose_engine_is_missing_stops_on_sigterm_within_its_bound() {
     assert!(!home.path().join("jaw.sock").exists(), "the socket is removed");
 }
 
-#[test]
-fn jawd_whose_engine_never_answers_stops_on_sigterm_and_takes_its_engine_with_it() {
+/// jawd with an engine that never says hello, stopped with `signal` once the engine runs: it stops
+/// within its bound, and its engine has gone by the time it has.
+fn takes_its_silent_engine_with_it(signal: i32, said: &str) {
     let home = tempfile::tempdir().unwrap();
-    let engine = Silent::new(home.path());
+    let engine = Fake::silent(home.path());
     let mut jawd = jawd(home.path(), &engine.program);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while engine.running().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(engine.running().is_some(), "the engine started and is waiting to say hello");
-    let (status, took) = terminate(&mut jawd);
+    engine.started();
+    let (status, took) = stop_with(&mut jawd, signal);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
-    let gone = Instant::now() + Duration::from_secs(1);
-    while engine.running().is_some() && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(log.contains(said), "{log}");
     assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    assert!(log.contains("jaw-engine didn't exit once its standard input closed, so SIGTERM ended it"), "{log}");
+}
+
+#[test]
+fn jawd_whose_engine_never_answers_stops_on_sigterm_and_takes_its_engine_with_it() {
+    takes_its_silent_engine_with_it(libc::SIGTERM, "jawd: SIGTERM");
+}
+
+#[test]
+fn jawd_whose_engine_never_answers_stops_on_ctrl_c_and_takes_its_engine_with_it() {
+    takes_its_silent_engine_with_it(libc::SIGINT, "jawd: Ctrl-C");
 }
 
 #[test]
 fn jawd_stopped_while_it_starts_takes_its_engine_with_it_however_late_its_runtime_ends() {
     let home = tempfile::tempdir().unwrap();
-    let engine = Silent::new(home.path());
+    let engine = Fake::silent(home.path());
     // Its start held once the engine is started, so SIGTERM comes while it starts, and its
     // runtime's threads kept busy as it shuts down, as a Mac under load can keep them.
     let mut jawd = jawd_started(home.path(), &engine.program, |command| {
         command.args(["--hold-start", "--busy-at-exit", "1"]);
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while engine.running().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(engine.running().is_some(), "the engine started and is waiting to say hello");
+    engine.started();
     let (status, took) = terminate(&mut jawd);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
     assert!(log.contains("jawd: SIGTERM while starting, so it stops"), "{log}");
     assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+}
+
+#[test]
+fn jawd_ends_its_engine_in_order_and_waits_until_it_has_exited_before_it_does() {
+    let home = tempfile::tempdir().unwrap();
+    let said = home.path().join("said");
+    // It never says hello, and once its standard input closes, as jaw-engine exits then, it takes
+    // a moment to exit, saying so first.
+    let engine = Fake::shell(home.path(), &format!("cat > /dev/null\nsleep 0.1\necho ended > '{}'", said.display()));
+    let mut jawd = jawd(home.path(), &engine.program);
+    answering(home.path());
+    engine.started();
+    let (status, took) = terminate(&mut jawd);
+    let log = log(home.path());
+    assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
+    assert!(said.is_file(), "jawd exited before its engine had:\n{log}");
+    assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    assert!(log.contains("jawd: jaw-engine exited once its standard input closed (exit status: 0)"), "{log}");
+}
+
+#[test]
+fn a_second_sigterm_stops_jawd_at_once_and_its_engine_with_it() {
+    let home = tempfile::tempdir().unwrap();
+    // Its engine said hello, and never answers, so the stop waits for it to disconnect.
+    let engine = Fake::mute(home.path());
+    let mut jawd = jawd(home.path(), &engine.program);
+    engine_running(home.path());
+    // SAFETY: kill only sends a signal to the jawd this test started.
+    unsafe { libc::kill(jawd.0.id() as i32, libc::SIGTERM) };
+    says(home.path(), "jawd: SIGTERM, so it stops");
+    std::thread::sleep(Duration::from_millis(200));
+    let (status, took) = terminate(&mut jawd);
+    let log = log(home.path());
+    // Well before the stop in order would have ended, which waits for the engine to disconnect.
+    assert!(status.code() == Some(1) && took < Duration::from_secs(2), "{status} after {took:?}:\n{log}");
+    assert!(log.contains("jawd: SIGTERM again, so it stops at once"), "{log}");
+    assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    assert!(log.contains("jawd: jaw-engine was killed at once, with SIGKILL"), "{log}");
+}
+
+#[test]
+fn jawd_that_fails_to_start_takes_its_engine_with_it() {
+    let home = tempfile::tempdir().unwrap();
+    // Where media keeps its files, a file, so media's start fails, after the engine's has begun.
+    std::fs::write(home.path().join("media"), "").unwrap();
+    let engine = Fake::silent(home.path());
+    let mut jawd = jawd(home.path(), &engine.program);
+    let deadline = Instant::now() + BOUND * 2;
+    let status = loop {
+        if let Some(status) = jawd.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "jawd was still running:\n{}", log(home.path()));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let log = log(home.path());
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.lines().last().is_some_and(|last| last.starts_with("jawd: ")), "it says why last:\n{log}");
+    assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    if engine.pid.exists() {
+        assert!(
+            log.contains("jawd: jaw-engine didn't exit once its standard input closed, so SIGTERM ended it"),
+            "{log}"
+        );
+    }
 }
 
 #[test]
@@ -224,11 +369,7 @@ fn jawd_demo_stops_on_one_sigterm_while_its_phases_still_run() {
         .expect("jawd demo starts");
     let mut jawd = Jawd(child);
     // Its phases start once it says what jaw would show.
-    let ready = Instant::now() + Duration::from_secs(30);
-    while !log(home.path()).contains("jaw shows them") {
-        assert!(Instant::now() < ready, "jawd demo never served:\n{}", log(home.path()));
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    says(home.path(), "jaw shows them");
     let (status, took) = terminate(&mut jawd);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");

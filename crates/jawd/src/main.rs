@@ -25,7 +25,8 @@ mod work;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -37,7 +38,7 @@ use crate::engine::demo::DemoEngine;
 use crate::engine::failing::{Failing, Failure};
 use crate::engine::go::GoEngine;
 use crate::engine::supervisor::{Backoff, Supervisor};
-use crate::engine::{Engine, Incoming, pb};
+use crate::engine::{End, Engine, Incoming, pb};
 
 #[derive(Parser)]
 #[command(
@@ -515,48 +516,131 @@ fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, options: &Options) 
     #[cfg(target_os = "macos")]
     home::keep_out(home);
     let runtime = runtime()?;
-    let outcome = runtime.block_on(async {
+    let chosen = engine(kind, home, fail);
+    let ending = Ending::new(chosen.as_ref().ok().cloned());
+    stopped(runtime, &ending, options.busy_at_exit, async {
         let mut signals = Signals::new()?;
-        let socket = jaw_proto::local::socket(home);
-        let (lock, listener) = open(home, &socket)?;
-        let started = tokio::select! {
-            started = start_on(home, &socket, lock, engine(kind, home, fail), options) => started?,
-            signal = signals.next() => {
-                eprintln!("jawd: {signal} while starting, so it stops");
-                let _ = std::fs::remove_file(&socket);
-                return Ok(());
-            }
-        };
-        let served = tokio::select! {
-            served = sock::serve(started.state.clone(), listener) => served,
-            signal = signals.next() => {
-                eprintln!("jawd: {signal}, so it stops");
-                Ok(())
-            }
-        };
-        let began = Instant::now();
+        let served = serve(home, chosen, options, &ending, &mut signals).await;
         tokio::select! {
-            stopped = tokio::time::timeout(STOPPING, stop(started, &socket)) => match stopped {
-                Ok(()) => eprintln!("jawd: stopped in {} ms", began.elapsed().as_millis()),
-                Err(_) => eprintln!("jawd: didn't stop within {} s, so it stops now", STOPPING.as_secs()),
-            },
+            () = ending.end() => {}
             signal = signals.next() => {
                 eprintln!("jawd: {signal} again, so it stops at once");
+                ending.at_once().await;
                 std::process::exit(1);
             }
         }
         served
-    });
-    if let Some(busy) = options.busy_at_exit {
+    })
+}
+
+/// Runs `serving` on `runtime` and then, however it ended, done, failed or panicked, has the engine
+/// gone as `ending` says before the runtime goes; then goes on as `serving` ended.
+fn stopped(
+    runtime: tokio::runtime::Runtime,
+    ending: &Ending,
+    busy_at_exit: Option<Duration>,
+    serving: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(serving)));
+    runtime.block_on(ending.end());
+    if let Some(busy) = busy_at_exit {
         occupy(&runtime, busy);
     }
     // Whatever's still running was told to stop; what doesn't by now is abandoned.
     runtime.shutdown_timeout(Duration::from_millis(100));
-    outcome
+    outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// jawd from its start to the end of its stop, but for its engine's end, which `run` sees to
+/// whatever happens here.
+async fn serve(home: &Path, chosen: Chosen, options: &Options, ending: &Ending, signals: &mut Signals) -> Result<()> {
+    let socket = jaw_proto::local::socket(home);
+    let (lock, listener) = open(home, &socket)?;
+    let started = tokio::select! {
+        started = start_on(home, &socket, lock, chosen, options, &ending.supervisor) => started?,
+        signal = signals.next() => {
+            eprintln!("jawd: {signal} while starting, so it stops");
+            let _ = std::fs::remove_file(&socket);
+            return Ok(());
+        }
+    };
+    let served = tokio::select! {
+        served = sock::serve(started.state.clone(), listener) => served,
+        signal = signals.next() => {
+            eprintln!("jawd: {signal}, so it stops");
+            Ok(())
+        }
+    };
+    let began = ending.begin();
+    tokio::select! {
+        stopped = tokio::time::timeout_at((ending.by() - LAST_RESORT).into(), stop(started, &socket)) => match stopped {
+            Ok(()) => eprintln!("jawd: stopped in {} ms", began.elapsed().as_millis()),
+            Err(_) => eprintln!("jawd: didn't stop within {:?}, so it stops now", STOPPING - LAST_RESORT),
+        },
+        signal = signals.next() => {
+            eprintln!("jawd: {signal} again, so it stops at once");
+            ending.at_once().await;
+            std::process::exit(1);
+        }
+    }
+    served
 }
 
 /// How long jawd has to stop once asked; a second signal stops it at once.
 const STOPPING: Duration = Duration::from_secs(3);
+/// The end of STOPPING kept for killing the engine, should it still run once the rest of the stop
+/// is over or out of time.
+const LAST_RESORT: Duration = Duration::from_millis(250);
+
+/// What ends jawd's engine however jawd stops, and by when: its supervisor, once `start` has made
+/// it, which ends the engine in order, and the engine itself, for what's left of it at the last.
+struct Ending {
+    engine: Option<Arc<dyn Engine>>,
+    supervisor: OnceLock<Supervisor>,
+    began: OnceLock<Instant>,
+    ended: AtomicBool,
+}
+
+impl Ending {
+    fn new(engine: Option<Arc<dyn Engine>>) -> Ending {
+        Ending { engine, supervisor: Default::default(), began: Default::default(), ended: Default::default() }
+    }
+
+    /// When jawd began to stop, which is now if it hadn't yet.
+    fn begin(&self) -> Instant {
+        *self.began.get_or_init(Instant::now)
+    }
+
+    /// When jawd's stop must be over, its engine's end with it.
+    fn by(&self) -> Instant {
+        self.begin() + STOPPING
+    }
+
+    /// Ends the engine by the time the stop must be over, once however often it's asked: its
+    /// supervisor stops, which ends it in order and starts it no more, and whatever of it still
+    /// runs LAST_RESORT before then is killed.
+    async fn end(&self) {
+        if self.ended.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let by = self.by();
+        if let Some(supervisor) = self.supervisor.get() {
+            let _ = tokio::time::timeout_at((by - LAST_RESORT).into(), supervisor.stop()).await;
+        }
+        if let Some(engine) = &self.engine
+            && tokio::time::timeout_at(by.into(), engine.end(End::AtOnce)).await.is_err()
+        {
+            eprintln!("jawd: its engine was sent SIGKILL, and wasn't seen to exit by the end of the stop");
+        }
+    }
+
+    /// Kills what still runs of the engine, waiting a moment for it to go, for a stop that can't wait.
+    async fn at_once(&self) {
+        if let Some(engine) = &self.engine {
+            let _ = tokio::time::timeout(LAST_RESORT, engine.end(End::AtOnce)).await;
+        }
+    }
+}
 
 /// How jawd runs, as its command line says.
 #[derive(Clone, Debug, Default)]
@@ -621,15 +705,24 @@ async fn start_on(
     lock: std::fs::File,
     engine: Chosen,
     options: &Options,
+    supervised: &OnceLock<Supervisor>,
 ) -> Result<Started> {
-    let started = start(home, lock, engine, options).await;
+    let started = start(home, lock, engine, options, supervised).await;
     if started.is_err() {
         let _ = std::fs::remove_file(socket);
     }
     started
 }
 
-async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Options) -> Result<Started> {
+/// Starts jawd, keeping the engine's supervisor in `supervised` as soon as there is one, so it's
+/// stopped however the start ends.
+async fn start(
+    home: &Path,
+    lock: std::fs::File,
+    engine: Chosen,
+    options: &Options,
+    supervised: &OnceLock<Supervisor>,
+) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
@@ -642,6 +735,9 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     let typing = feed.typing().clone();
     let (events, incoming) = mpsc::channel(1024);
     let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
+    if let Ok(supervisor) = &supervisor {
+        let _ = supervised.set(supervisor.clone());
+    }
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
@@ -733,10 +829,10 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
 /// is answered for something that won't be done, and media settles its latest previews; then
-/// whatsmeow disconnects, the engine is ended
-/// and started no more, whatever its supervisor was waiting for, and anything it handed over that
-/// jawd hadn't acked comes again from WhatsApp; only then does jaw.db note a clean stop, and the
-/// store closes last, once jawd's tasks are dropped.
+/// whatsmeow disconnects, the engine is ended in order, whatever its supervisor was waiting for,
+/// has gone and is started no more, and anything it handed over that jawd hadn't acked comes again
+/// from WhatsApp; only then does jaw.db note a clean stop, and the store closes last, once jawd's
+/// tasks are dropped.
 async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
     state.stop();
     let _ = std::fs::remove_file(socket);
@@ -846,59 +942,69 @@ fn bench_link(kind: EngineKind, count: u32, size: u32, commit: bool) -> Result<(
     std::fs::create_dir_all(&scratch)?;
     let outcome = runtime()?.block_on(async {
         let engine = engine(kind, &scratch, None).map_err(|(_, why)| anyhow::anyhow!(why))?;
-        let store = if commit { Some(store::Store::open(&scratch)?) } else { None };
-        let (events, mut incoming) = mpsc::channel(1024);
-        let instance = engine.start(events).await?;
-        let keeping = store.clone();
-        tokio::spawn(async move {
-            while let Some(Incoming { event, ack }) = incoming.recv().await {
-                match (&keeping, event.kind) {
-                    (Some(store), Some(pb::event::Kind::Bench(bench))) => store.inbox("bench", 0, bench.payload, ack),
-                    _ => {
-                        if let Some(ack) = ack {
-                            ack.send();
-                        }
-                    }
-                }
-            }
-        });
-        let reply = instance.commands.call(pb::command::Kind::BenchRun(pb::BenchRun { count, size })).await?;
-        let pb::reply::Kind::BenchResult(result) = reply else { anyhow::bail!("the engine answered the bench with {reply:?}") };
-        let seconds = result.elapsed_us as f64 / 1e6;
-        println!(
-            "{} round trips in {seconds:.2} s, {} a second: p50 {} µs, p99 {} µs, max {} µs ({} engine, {size}-byte messages, {})",
-            result.count,
-            (result.count as f64 / seconds.max(1e-9)).round(),
-            result.p50_us,
-            result.p99_us,
-            result.max_us,
-            engine.kind(),
-            if commit { "each committed to jaw.db's inbox before its ack" } else { "acked as they arrived" },
-        );
-        if let Some(store) = &store {
-            let runs = work::Report::report(store).run.map_or((0, 0), |run| (run.p50_us, run.p99_us));
-            let flush = store::bench::flushes(&scratch, FLUSHES)?;
-            let bare = store::bench::unflushed(&scratch, size as usize, FLUSHES)?;
-            let at = |times: &[Duration], q: usize| times[(times.len() * q / 100).min(times.len() - 1)].as_micros() as u64;
-            let outside = result.p50_us.saturating_sub(runs.0);
-            println!(
-                "  the inbox's transactions p50 {} µs, p99 {} µs, their flush included; one like them without its flush p50 {} µs; the drive's flush alone, {FLUSHES} times 4 KiB written and synced as a commit syncs it: p50 {} µs, p99 {} µs",
-                runs.0,
-                runs.1,
-                at(&bare, 50),
-                at(&flush, 50),
-                at(&flush, 99),
-            );
-            println!(
-                "  so jawd's own work in a round trip is about {} µs at p50: {outside} µs outside the inbox's transaction, and {} µs of the transaction's own",
-                outside + at(&bare, 50),
-                at(&bare, 50),
-            );
-        }
-        Ok(())
+        let benched = bench_engine(engine.as_ref(), &scratch, count, size, commit).await;
+        // Gone before its folder is.
+        let _ = tokio::time::timeout(STOPPING, engine.end(End::InOrder)).await;
+        benched
     });
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
+}
+
+/// `bench_link`'s round trips through `engine`, on `scratch`.
+async fn bench_engine(engine: &dyn Engine, scratch: &Path, count: u32, size: u32, commit: bool) -> Result<()> {
+    let store = if commit { Some(store::Store::open(scratch)?) } else { None };
+    let (events, mut incoming) = mpsc::channel(1024);
+    let instance = engine.start(events).await?;
+    let keeping = store.clone();
+    tokio::spawn(async move {
+        while let Some(Incoming { event, ack }) = incoming.recv().await {
+            match (&keeping, event.kind) {
+                (Some(store), Some(pb::event::Kind::Bench(bench))) => store.inbox("bench", 0, bench.payload, ack),
+                _ => {
+                    if let Some(ack) = ack {
+                        ack.send();
+                    }
+                }
+            }
+        }
+    });
+    let reply = instance.commands.call(pb::command::Kind::BenchRun(pb::BenchRun { count, size })).await?;
+    let pb::reply::Kind::BenchResult(result) = reply else {
+        anyhow::bail!("the engine answered the bench with {reply:?}")
+    };
+    let seconds = result.elapsed_us as f64 / 1e6;
+    println!(
+        "{} round trips in {seconds:.2} s, {} a second: p50 {} µs, p99 {} µs, max {} µs ({} engine, {size}-byte messages, {})",
+        result.count,
+        (result.count as f64 / seconds.max(1e-9)).round(),
+        result.p50_us,
+        result.p99_us,
+        result.max_us,
+        engine.kind(),
+        if commit { "each committed to jaw.db's inbox before its ack" } else { "acked as they arrived" },
+    );
+    if let Some(store) = &store {
+        let runs = work::Report::report(store).run.map_or((0, 0), |run| (run.p50_us, run.p99_us));
+        let flush = store::bench::flushes(scratch, FLUSHES)?;
+        let bare = store::bench::unflushed(scratch, size as usize, FLUSHES)?;
+        let at = |times: &[Duration], q: usize| times[(times.len() * q / 100).min(times.len() - 1)].as_micros() as u64;
+        let outside = result.p50_us.saturating_sub(runs.0);
+        println!(
+            "  the inbox's transactions p50 {} µs, p99 {} µs, their flush included; one like them without its flush p50 {} µs; the drive's flush alone, {FLUSHES} times 4 KiB written and synced as a commit syncs it: p50 {} µs, p99 {} µs",
+            runs.0,
+            runs.1,
+            at(&bare, 50),
+            at(&flush, 50),
+            at(&flush, 99),
+        );
+        println!(
+            "  so jawd's own work in a round trip is about {} µs at p50: {outside} µs outside the inbox's transaction, and {} µs of the transaction's own",
+            outside + at(&bare, 50),
+            at(&bare, 50),
+        );
+    }
+    Ok(())
 }
 
 /// How many times the drive's flush, and a transaction without it, are timed alone.
@@ -989,6 +1095,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use crate::engine::go::fake;
     use crate::store::{Amend, Amendment, Change, Lane, Message};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -997,7 +1104,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let link = tokio::task::spawn_blocking(move || {
@@ -1034,7 +1143,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let polls = tokio::task::spawn_blocking(move || {
@@ -1114,7 +1225,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let places = tokio::task::spawn_blocking(move || {
@@ -1171,7 +1284,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let events = tokio::task::spawn_blocking(move || {
@@ -1236,7 +1351,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let cards = tokio::task::spawn_blocking(move || {
@@ -1295,7 +1412,9 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
         let options = Options { no_notify: true, ..Options::default() };
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options, &OnceLock::new())
+            .await
+            .unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let store = started.state.store().unwrap().clone();
         let chat = "120363012345678901@g.us";
@@ -1375,7 +1494,15 @@ mod tests {
         let (lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
         let options = Options { no_notify: true, ..Options::default() };
-        let failed = start_on(home.path(), &socket, lock, engine(EngineKind::Demo, home.path(), None), &options).await;
+        let failed = start_on(
+            home.path(),
+            &socket,
+            lock,
+            engine(EngineKind::Demo, home.path(), None),
+            &options,
+            &OnceLock::new(),
+        )
+        .await;
         assert!(failed.is_err(), "jaw.db isn't one");
         assert!(!socket.exists(), "the socket went with the start that failed");
     }
@@ -1388,5 +1515,53 @@ mod tests {
         assert!(refused.contains("another jawd is running"), "{refused}");
         drop(first);
         lock(home.path()).unwrap();
+    }
+
+    /// The fake engine in `home` supervised as jawd's start supervises its engine, once it runs.
+    async fn supervising(home: &Path, engine: &Arc<dyn Engine>, ending: &Ending) -> mpsc::Receiver<Incoming> {
+        let (events, incoming) = mpsc::channel(8);
+        let _ = ending.supervisor.set(Supervisor::spawn(engine.clone(), events, Backoff::default()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fake::running(home).is_none() {
+            assert!(Instant::now() < deadline, "the fake engine never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        incoming
+    }
+
+    #[test]
+    fn a_panic_that_ends_jawd_goes_on_only_once_its_engine_has_ended_in_order() {
+        let home = tempfile::tempdir().unwrap();
+        let said = home.path().join("said");
+        // It never says hello, and once its standard input closes it takes a moment to exit.
+        let then = format!("cat > /dev/null\nsleep 0.1\necho ended > '{}'", said.display());
+        let engine: Arc<dyn Engine> = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().into()));
+        let ending = Ending::new(Some(engine.clone()));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stopped(runtime().unwrap(), &ending, None, async {
+                let _incoming = supervising(home.path(), &engine, &ending).await;
+                panic!("as jawd might");
+            })
+        }));
+        assert!(panicked.is_err(), "the panic goes on");
+        assert!(said.is_file(), "its standard input was closed, and it exited on its own, before the runtime went");
+        assert_eq!(fake::running(home.path()), None);
+    }
+
+    #[test]
+    fn an_engine_still_running_when_the_stop_has_a_moment_left_is_killed_by_its_end() {
+        let home = tempfile::tempdir().unwrap();
+        let engine = fake::engine(home.path(), "trap '' TERM\nexec sleep 600");
+        let engine: Arc<dyn Engine> = Arc::new(GoEngine::new(engine, home.path().into()));
+        let ending = Ending::new(Some(engine.clone()));
+        let runtime = runtime().unwrap();
+        runtime.block_on(async {
+            let _incoming = supervising(home.path(), &engine, &ending).await;
+            // As if the rest of the stop had taken all of its bound but half a second.
+            let _ = ending.began.set(Instant::now() - (STOPPING - Duration::from_millis(500)));
+            ending.end().await;
+            assert_eq!(fake::running(home.path()), None, "killed by the end of the stop, ignoring SIGTERM as it does");
+        });
+        runtime.shutdown_timeout(Duration::from_millis(100));
     }
 }

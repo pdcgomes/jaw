@@ -112,6 +112,23 @@ pub trait Engine: Send + Sync + 'static {
     /// Starts an instance, which sends its events to `events` and resolves once it has said hello.
     /// `events` is bounded, so an engine waits when jawd falls behind.
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, anyhow::Result<Instance>>;
+
+    /// Ends every instance it started that's still running, as `how` says, waits until each has
+    /// gone, and starts none after. Only an engine in a process of its own has anything to end; one
+    /// in jawd's own process ends with its instance's tasks.
+    fn end(&self, _how: End) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// How `Engine::end` ends what's still running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum End {
+    /// As it stops by itself: jaw-engine's standard input is closed, which it exits on, and only
+    /// if it hasn't exited after a pause is it sent SIGTERM, and after another SIGKILL.
+    InOrder,
+    /// With SIGKILL, for a stop that can't wait.
+    AtOnce,
 }
 
 type Waiter = oneshot::Sender<Result<pb::reply::Kind, EngineError>>;

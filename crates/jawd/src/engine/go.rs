@@ -1,31 +1,61 @@
 //! `GoEngine`: jaw-engine, the Go program on whatsmeow, run as jawd's child on its standard input
-//! and output. Its standard error goes into jawd's.
+//! and output. Its standard error goes into jawd's. Each one started is kept until it has exited:
+//! ended in order, its standard input is closed, which it exits on, and should it not exit it's
+//! sent SIGTERM and then SIGKILL, each after a pause, and whoever ends it waits until it has gone.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, watch};
 
-use super::{Ack, BoxFuture, Commands, Engine, Incoming, Instance, Outgoing, PROTOCOL, Pending, frame, pb};
+use super::{Ack, BoxFuture, Commands, End, Engine, Incoming, Instance, Outgoing, PROTOCOL, Pending, frame, pb};
 
 /// The Go runtime's soft memory limit and garbage collection target for jaw-engine, unless jawd's
 /// own environment sets them: the engine has 80 MB steady and 200 MB during a full history sync,
 /// and the limit leaves room beside Go's heap for SQLite's memory, which Go doesn't count.
 const GO_MEMORY: [(&str, &str); 2] = [("GOMEMLIMIT", "160MiB"), ("GOGC", "50")];
 
+/// How long jaw-engine has to say hello once started.
+const HELLO: Duration = Duration::from_secs(10);
+/// How long jaw-engine has to exit once its standard input is closed, before it's sent SIGTERM: it
+/// takes a few milliseconds, a hundred or so on a loaded Mac.
+const QUITTING: Duration = Duration::from_secs(1);
+/// How long it has to exit after SIGTERM, before SIGKILL.
+const TERMINATING: Duration = Duration::from_millis(500);
+
 pub struct GoEngine {
     program: PathBuf,
     home: PathBuf,
     log: String,
+    running: Arc<Running>,
 }
 
 impl GoEngine {
     pub fn new(program: PathBuf, home: PathBuf) -> GoEngine {
-        GoEngine { program, home, log: "info".into() }
+        GoEngine { program, home, log: "info".into(), running: Arc::default() }
+    }
+
+    /// Ends every jaw-engine still running as `how` says, and starts none after; says how each
+    /// ended, once each has, and logs it, once however many ends waited for it.
+    async fn end_all(&self, how: End) -> Vec<String> {
+        let running = self.running.close(how);
+        let mut ended = Vec::with_capacity(running.len());
+        for process in running {
+            let logged = process.logged.clone();
+            let why = process.exited().await;
+            if !logged.swap(true, Ordering::Relaxed) {
+                eprintln!("jawd: {why}");
+            }
+            ended.push(why);
+        }
+        ended
     }
 
     /// jaw-engine's command line and environment, its standard streams jawd's to read and write.
@@ -78,11 +108,10 @@ impl Engine for GoEngine {
 
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {
         Box::pin(async move {
-            let mut child =
-                self.command().spawn().with_context(|| format!("can't start {}", self.program.display()))?;
-            let stdin = child.stdin.take().expect("a piped stdin");
-            let stdout = child.stdout.take().expect("a piped stdout");
-            let stderr = child.stderr.take().expect("a piped stderr");
+            let Started { stdin, stdout, stderr, process, mut told } = self
+                .running
+                .start(&mut self.command())
+                .with_context(|| format!("can't start {}", self.program.display()))?;
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -91,24 +120,220 @@ impl Engine for GoEngine {
             });
             let mut reader = BufReader::with_capacity(64 << 10, stdout);
             let mut writer = BufWriter::with_capacity(64 << 10, stdin);
-            let hello = tokio::time::timeout(Duration::from_secs(10), handshake(&mut reader, &mut writer))
-                .await
-                .context("jaw-engine didn't say hello within 10 seconds")??;
+            let greeted = tokio::select! {
+                hello = tokio::time::timeout(HELLO, handshake(&mut reader, &mut writer)) => hello
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("jaw-engine didn't say hello within {HELLO:?}"))),
+                _ = told.wait_for(Option::is_some) => Err(anyhow::anyhow!("jawd ended jaw-engine before it said hello")),
+            };
+            let hello = match greeted {
+                Ok(hello) => hello,
+                Err(e) => {
+                    // Gone before the supervisor can start another on the same session.db.
+                    drop(writer);
+                    process.tell(End::InOrder);
+                    let ended = process.exited().await;
+                    bail!("{e:#}; {ended}");
+                }
+            };
             let (tx, rx) = mpsc::unbounded_channel();
             let commands = Commands { tx };
             let pending = Pending::default();
-            tokio::spawn(write(writer, rx, pending.clone()));
+            tokio::spawn(write(writer, rx, pending.clone(), told));
             let reading = tokio::spawn(read(reader, events, commands.clone(), pending));
             let exited: BoxFuture<'static, String> = Box::pin(async move {
-                let status = child.wait().await;
+                let why = process.exited().await;
                 let _ = reading.await;
-                match status {
-                    Ok(status) => format!("jaw-engine exited ({status})"),
-                    Err(e) => format!("can't wait for jaw-engine: {e}"),
-                }
+                why
             });
             Ok(Instance { hello, commands, exited })
         })
+    }
+
+    fn end(&self, how: End) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.end_all(how).await;
+        })
+    }
+}
+
+/// The jaw-engines a `GoEngine` started that haven't exited yet, and whether it may start another.
+#[derive(Default)]
+struct Running(Mutex<Processes>);
+
+#[derive(Default)]
+struct Processes {
+    /// jawd has ended its engine, so none is started again.
+    ended: bool,
+    next: u64,
+    live: HashMap<u64, Process>,
+}
+
+/// One jaw-engine started: what tells it how to end, why it exited, once it has, and whether an
+/// end has logged that.
+#[derive(Clone)]
+struct Process {
+    pid: u32,
+    told: Arc<watch::Sender<Option<End>>>,
+    exited: watch::Receiver<Option<String>>,
+    logged: Arc<AtomicBool>,
+}
+
+/// A jaw-engine just started: its standard streams, and what it's told of how to end.
+struct Started {
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    process: Process,
+    told: watch::Receiver<Option<End>>,
+}
+
+impl Running {
+    /// Starts `command` unless jawd has ended its engine, and keeps it, on a task of its own, until
+    /// it has exited. It starts under the lock `close` takes, so a jaw-engine is either refused or
+    /// among those `close` returns.
+    fn start(self: &Arc<Running>, command: &mut Command) -> Result<Started> {
+        let mut processes = self.0.lock().expect("jaw-engine's processes");
+        if processes.ended {
+            bail!("jawd has ended its engine, so it starts no other");
+        }
+        let mut child = command.spawn()?;
+        let pid = child.id().expect("a child just started");
+        let stdin = child.stdin.take().expect("a piped stdin");
+        let stdout = child.stdout.take().expect("a piped stdout");
+        let stderr = child.stderr.take().expect("a piped stderr");
+        let (told, telling) = watch::channel(None);
+        let (said, exited) = watch::channel(None);
+        let process = Process { pid, told: Arc::new(told), exited, logged: Arc::default() };
+        let key = processes.next;
+        processes.next += 1;
+        processes.live.insert(key, process.clone());
+        tokio::spawn(keep(child, telling.clone(), said, Arc::downgrade(self), key));
+        Ok(Started { stdin, stdout, stderr, process, told: telling })
+    }
+
+    /// Starts no more, tells each still running to end as `how` says, and says which they are.
+    /// Ending them at once, it also sends each SIGKILL itself, so they're killed even should their
+    /// keepers' tasks not run again before jawd exits.
+    fn close(&self, how: End) -> Vec<Process> {
+        let mut processes = self.0.lock().expect("jaw-engine's processes");
+        processes.ended = true;
+        for process in processes.live.values() {
+            process.tell(how);
+            if how == End::AtOnce {
+                // SAFETY: kill only sends a signal, to the group of a jaw-engine its keeper hasn't
+                // forgotten yet. The keeper forgets it under this lock straight after waiting for
+                // it, and the system gives a freed ID to another process only once it has gone
+                // round all the others, so the ID is still the engine's.
+                unsafe { libc::kill(-(process.pid as i32), libc::SIGKILL) };
+            }
+        }
+        processes.live.values().cloned().collect()
+    }
+
+    fn forget(&self, key: u64) {
+        self.0.lock().expect("jaw-engine's processes").live.remove(&key);
+    }
+}
+
+impl Process {
+    /// Has it end as `how` says, unless it's been told to end sooner.
+    fn tell(&self, how: End) {
+        self.told.send_if_modified(|told| {
+            let sooner = told.is_none_or(|told| told < how);
+            if sooner {
+                *told = Some(how);
+            }
+            sooner
+        });
+    }
+
+    /// Why it exited, once it has.
+    async fn exited(mut self) -> String {
+        match self.exited.wait_for(Option::is_some).await {
+            Ok(why) => why.clone().unwrap_or_default(),
+            Err(_) => "jawd's runtime ended before jaw-engine did".into(),
+        }
+    }
+}
+
+/// Waits for jaw-engine to exit, ending it as `told` comes to say, or once nobody is left to say;
+/// then it's no longer running, and `said` says why it exited.
+async fn keep(
+    mut child: Child,
+    mut told: watch::Receiver<Option<End>>,
+    said: watch::Sender<Option<String>>,
+    running: Weak<Running>,
+    key: u64,
+) {
+    let why = ended(&mut child, &mut told).await;
+    if let Some(running) = running.upgrade() {
+        running.forget(key);
+    }
+    said.send_replace(Some(why));
+}
+
+/// How jaw-engine ended: by itself, or as it was told. In order, whoever writes to its standard
+/// input closes it once it's told, and it's sent SIGTERM if it hasn't exited after QUITTING, and
+/// SIGKILL if it hasn't after TERMINATING more; at once, SIGKILL.
+async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>) -> String {
+    // What it was told comes first, so an engine killed as it's told to end isn't said to have
+    // exited by itself.
+    let how = tokio::select! {
+        biased;
+        how = told.wait_for(Option::is_some) => how.ok().and_then(|how| *how).unwrap_or(End::InOrder),
+        status = child.wait() => return exited("jaw-engine exited", status),
+    };
+    if how == End::InOrder {
+        if let Some(status) = within(child, told, QUITTING).await {
+            return exited("jaw-engine exited once its standard input closed", status);
+        }
+        if !at_once(told) {
+            signal(child, libc::SIGTERM);
+            if let Some(status) = within(child, told, TERMINATING).await {
+                return exited("jaw-engine didn't exit once its standard input closed, so SIGTERM ended it", status);
+            }
+            if !at_once(told) {
+                signal(child, libc::SIGKILL);
+                return exited("jaw-engine didn't exit on SIGTERM either, so SIGKILL ended it", child.wait().await);
+            }
+        }
+    }
+    signal(child, libc::SIGKILL);
+    exited("jaw-engine was killed at once, with SIGKILL", child.wait().await)
+}
+
+/// Its exit, should it come within `pause`, and before it's told to end at once.
+async fn within(
+    child: &mut Child,
+    told: &mut watch::Receiver<Option<End>>,
+    pause: Duration,
+) -> Option<std::io::Result<ExitStatus>> {
+    tokio::select! {
+        biased;
+        _ = told.wait_for(|told| *told == Some(End::AtOnce)) => None,
+        status = child.wait() => Some(status),
+        () = tokio::time::sleep(pause) => None,
+    }
+}
+
+fn at_once(told: &watch::Receiver<Option<End>>) -> bool {
+    *told.borrow() == Some(End::AtOnce)
+}
+
+/// Sends `signal` to jaw-engine's process group, its own since it started, and so to anything it
+/// started too.
+fn signal(child: &Child, signal: i32) {
+    if let Some(pid) = child.id() {
+        // SAFETY: kill only sends a signal, to the group of a child not yet waited for, which keeps
+        // its ID from being taken by another process.
+        unsafe { libc::kill(-(pid as i32), signal) };
+    }
+}
+
+fn exited(how: &str, status: std::io::Result<ExitStatus>) -> String {
+    match status {
+        Ok(status) => format!("{how} ({status})"),
+        Err(e) => format!("{how}, but jawd can't wait for it: {e}"),
     }
 }
 
@@ -142,8 +367,21 @@ async fn handshake(reader: &mut BufReader<ChildStdout>, writer: &mut BufWriter<C
 }
 
 /// Writes jawd's commands and acks to the engine, a burst at a time. When every Commands and Ack
-/// has gone, it closes the engine's standard input, which tells the engine to exit.
-async fn write(mut writer: BufWriter<ChildStdin>, mut outgoing: mpsc::UnboundedReceiver<Outgoing>, pending: Pending) {
+/// has gone, or the engine is told to end, it closes the engine's standard input, which tells the
+/// engine to exit.
+async fn write(
+    writer: BufWriter<ChildStdin>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    pending: Pending,
+    mut told: watch::Receiver<Option<End>>,
+) {
+    tokio::select! {
+        () = pass(writer, outgoing, pending) => {}
+        _ = told.wait_for(Option::is_some) => {}
+    }
+}
+
+async fn pass(mut writer: BufWriter<ChildStdin>, mut outgoing: mpsc::UnboundedReceiver<Outgoing>, pending: Pending) {
     let mut next_id = 1u64;
     while let Some(first) = outgoing.recv().await {
         let mut item = Some(first);
@@ -207,6 +445,7 @@ async fn read(
 mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
+    use std::time::Instant;
 
     use super::*;
 
@@ -277,5 +516,192 @@ mod tests {
         let why = instance.exited.await;
         assert!(why.contains("exited"), "{why}");
         assert_eq!(acking.await.unwrap(), 2_000);
+    }
+
+    /// `engine` started on a fake that never says hello, once it runs.
+    async fn starting(engine: &Arc<GoEngine>, home: &Path) -> tokio::task::JoinHandle<Result<Instance>> {
+        let (tx, rx) = mpsc::channel(8);
+        let engine = engine.clone();
+        let starting = tokio::spawn(async move {
+            let _rx = rx;
+            engine.start(tx).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fake::running(home).is_none() {
+            assert!(Instant::now() < deadline, "the fake engine never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        starting
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ended_in_order_an_engine_has_its_standard_input_closed_and_is_waited_for_until_it_exits() {
+        let home = tempfile::tempdir().unwrap();
+        let said = home.path().join("said");
+        // It reads what jawd writes until its standard input closes, then takes its time to exit.
+        let then =
+            format!("{}\ncat > /dev/null\nsleep 0.1\necho ended > '{}'", fake::hello(home.path()), said.display());
+        let engine = GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf());
+        let (tx, _rx) = mpsc::channel(8);
+        let instance = engine.start(tx).await.unwrap();
+        assert_eq!(instance.hello.program, "a fake jaw-engine");
+        let ended = engine.end_all(End::InOrder).await;
+        assert_eq!(ended, ["jaw-engine exited once its standard input closed (exit status: 0)"]);
+        assert!(said.is_file(), "it had exited by then");
+        assert_eq!(fake::running(home.path()), None);
+        assert_eq!(instance.exited.await, ended[0]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_that_doesnt_exit_once_its_standard_input_closes_is_sent_sigterm_then_sigkill_after_their_pauses()
+    {
+        for (then, how, after) in [
+            (
+                "exec sleep 600",
+                "didn't exit once its standard input closed, so SIGTERM ended it (signal: 15 (SIGTERM))",
+                QUITTING,
+            ),
+            (
+                "trap '' TERM\nexec sleep 600",
+                "didn't exit on SIGTERM either, so SIGKILL ended it (signal: 9 (SIGKILL))",
+                QUITTING + TERMINATING,
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let engine = Arc::new(GoEngine::new(fake::engine(home.path(), then), home.path().to_path_buf()));
+            let starting = starting(&engine, home.path()).await;
+            let took = Instant::now();
+            let ending = engine.end_all(End::InOrder);
+            let ended = tokio::time::timeout(QUITTING + TERMINATING + Duration::from_secs(10), ending)
+                .await
+                .expect("it never ended");
+            let took = took.elapsed();
+            assert_eq!(ended, [format!("jaw-engine {how}")]);
+            assert!(took >= after, "{then}: ended after {took:?}");
+            assert_eq!(fake::running(home.path()), None, "{then}");
+            let given_up = starting.await.unwrap().err().map(|e| format!("{e:#}"));
+            assert!(
+                given_up.as_ref().is_some_and(|e| e.contains("before it said hello") && e.ends_with(how)),
+                "{given_up:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_ended_takes_what_it_started_with_it() {
+        let home = tempfile::tempdir().unwrap();
+        let started = home.path().join("started.pid");
+        // It waits for a sleep of its own, so exits only once that does, or on SIGTERM.
+        let then = format!("sleep 600 &\necho $! > '{}'\nwait", started.display());
+        let engine = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf()));
+        let _starting = starting(&engine, home.path()).await;
+        while !std::fs::read_to_string(&started).is_ok_and(|pid| pid.ends_with('\n')) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let sleep: i32 = std::fs::read_to_string(&started).unwrap().trim().parse().unwrap();
+        let ended = engine.end_all(End::InOrder).await;
+        assert!(ended.len() == 1 && ended[0].contains("so SIGTERM ended it"), "{ended:?}");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // SAFETY: a signal of 0 is sent to nobody; kill only says whether the process exists.
+        while unsafe { libc::kill(sleep, 0) } == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // SAFETY: as above, and then SIGKILL, to the sleep this test's engine started, should it outlive the engine.
+        let outlived = unsafe { libc::kill(sleep, 0) == 0 && libc::kill(sleep, libc::SIGKILL) == 0 };
+        assert!(!outlived, "what the engine started outlived it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ended_at_once_an_engine_is_killed_with_no_pause_even_while_it_is_ended_in_order() {
+        let home = tempfile::tempdir().unwrap();
+        let engine = Arc::new(GoEngine::new(
+            fake::engine(home.path(), "trap '' TERM\nexec sleep 600"),
+            home.path().to_path_buf(),
+        ));
+        let _starting = starting(&engine, home.path()).await;
+        let in_order = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.end_all(End::InOrder).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let ended = engine.end_all(End::AtOnce).await;
+        assert!(ended.len() == 1 && ended[0].starts_with("jaw-engine was killed at once, with SIGKILL"), "{ended:?}");
+        assert_eq!(in_order.await.unwrap(), ended, "and so it ended for the end in order too");
+        assert_eq!(fake::running(home.path()), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn once_ended_it_starts_no_other_engine() {
+        let home = tempfile::tempdir().unwrap();
+        let engine = GoEngine::new(fake::engine(home.path(), "exec sleep 600"), home.path().to_path_buf());
+        assert_eq!(engine.end_all(End::InOrder).await, Vec::<String>::new(), "none was running");
+        let (tx, _rx) = mpsc::channel(8);
+        let refused = engine.start(tx).await.err().map(|e| format!("{e:#}"));
+        assert!(refused.as_ref().is_some_and(|e| e.contains("so it starts no other")), "{refused:?}");
+        assert!(!home.path().join("engine.pid").exists(), "nothing was started");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_whose_engine_wont_do_has_it_gone_before_it_says_so() {
+        let home = tempfile::tempdir().unwrap();
+        let ack = pb::Frame { id: 0, body: Some(pb::frame::Body::Ack(pb::Ack { seq: 1 })) };
+        let then = format!("{}\nexec sleep 600", fake::frame(home.path(), "ack", &ack));
+        let engine = GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf());
+        let (tx, _rx) = mpsc::channel(8);
+        let refused = engine.start(tx).await.err().map(|e| format!("{e:#}"));
+        assert!(
+            refused
+                .as_ref()
+                .is_some_and(|e| e.contains("first frame wasn't a hello") && e.contains("so SIGTERM ended it")),
+            "{refused:?}"
+        );
+        assert_eq!(fake::running(home.path()), None, "gone before the start said it failed");
+    }
+}
+
+/// Fake jaw-engines for tests: shell scripts that write down their PID and then do as they're told.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use prost::Message as _;
+
+    use super::{PROTOCOL, pb};
+
+    /// A jaw-engine in `home` that writes its PID to engine.pid there, then runs `then`.
+    pub(crate) fn engine(home: &Path, then: &str) -> PathBuf {
+        let program = home.join("fake-engine");
+        let pid = home.join("engine.pid");
+        std::fs::write(&program, format!("#!/bin/sh\necho $$ > '{}'\n{then}\n", pid.display())).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    /// A line of shell that sends `frame` to jawd, kept in `home` as `name`.
+    pub(crate) fn frame(home: &Path, name: &str, frame: &pb::Frame) -> String {
+        let data = frame.encode_to_vec();
+        let mut bytes = (data.len() as u32).to_be_bytes().to_vec();
+        bytes.extend(data);
+        let path = home.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        format!("cat '{}'", path.display())
+    }
+
+    /// A line of shell that says a hello jawd takes.
+    pub(crate) fn hello(home: &Path) -> String {
+        let hello = pb::Hello {
+            protocol: PROTOCOL,
+            program: "a fake jaw-engine".into(),
+            whatsmeow: wa_proto::whatsmeow().into(),
+        };
+        frame(home, "hello", &pb::Frame { id: 0, body: Some(pb::frame::Body::Hello(hello)) })
+    }
+
+    /// The PID the fake engine in `home` wrote down, while a process has it.
+    pub(crate) fn running(home: &Path) -> Option<i32> {
+        let pid: i32 = std::fs::read_to_string(home.join("engine.pid")).ok()?.trim().parse().ok()?;
+        // SAFETY: a signal of 0 is sent to nobody; kill only says whether the process exists.
+        (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
     }
 }

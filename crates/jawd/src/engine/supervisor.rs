@@ -2,7 +2,8 @@
 //! stops (back to the first once it has run a minute), and says how it is for `status`. Once sync
 //! follows the engines' events, each engine after a stop waits for sync to have taken the stop in
 //! too, so nothing it sends comes before. Told to stop, it does at once, whatever it's waiting for,
-//! and starts the engine no more. It holds the turn jaw's own app-state patches and its full
+//! ends the engine in order and waits until it has gone, and starts it no more; so it does too once
+//! jawd stops listening to its events. It holds the turn jaw's own app-state patches and its full
 //! fetches of app state take with the engine (`AppStateTurn`).
 
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 
-use super::{Commands, Engine, EngineError, Incoming, pb};
+use super::{Commands, End, Engine, EngineError, Incoming, pb};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineStatus {
@@ -106,8 +107,8 @@ impl Supervisor {
     }
 
     /// Ends the engine and starts it no more, and waits until it has: a start under way is given
-    /// up, a pause before the next is cut short, and an engine running is ended as jawd exiting
-    /// would end it.
+    /// up, a pause before the next is cut short, and whatever of the engine still runs is ended in
+    /// order (`Engine::end`) and has gone before this returns.
     pub async fn stop(&self) {
         self.stop.send_replace(true);
         let mut status = self.status.clone();
@@ -176,8 +177,9 @@ async fn run(
     mut stopping: watch::Receiver<bool>,
     mut taken: watch::Receiver<Option<u32>>,
 ) {
-    supervise(engine, events, backoff, &status, &current, &mut stopping, &mut taken).await;
+    supervise(engine.as_ref(), events, backoff, &status, &current, &mut stopping, &mut taken).await;
     current.send_replace(None);
+    engine.end(End::InOrder).await;
     status.send_modify(|s| s.state = State::Stopped);
 }
 
@@ -190,7 +192,7 @@ async fn told(stopping: &mut watch::Receiver<bool>) {
 
 /// Runs the engine until jawd stops listening to `events` or says to stop.
 async fn supervise(
-    engine: Arc<dyn Engine>,
+    engine: &dyn Engine,
     events: mpsc::Sender<Incoming>,
     backoff: Backoff,
     status: &watch::Sender<EngineStatus>,
@@ -259,7 +261,7 @@ async fn supervise(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::*;
     use crate::engine::demo::DemoEngine;
@@ -361,6 +363,42 @@ mod tests {
         assert!(matches!(refused, EngineError::Unavailable(_)), "{refused:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!((engine.tries.load(Ordering::Relaxed), supervisor.status().restarts), (1, 0));
+    }
+
+    /// The demo engine, but taking a while to end, as one in a process of its own can.
+    struct Slow {
+        demo: DemoEngine,
+        ended: AtomicBool,
+    }
+
+    impl Engine for Slow {
+        fn kind(&self) -> &'static str {
+            "slow"
+        }
+
+        fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, anyhow::Result<Instance>> {
+            self.demo.start(events)
+        }
+
+        fn end(&self, how: End) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                assert_eq!(how, End::InOrder);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                self.ended.store(true, Ordering::Relaxed);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn told_to_stop_it_says_it_has_once_its_engine_has_ended_in_order() {
+        let engine = Arc::new(Slow { demo: DemoEngine::with(Vec::new()), ended: AtomicBool::new(false) });
+        let (tx, _rx) = mpsc::channel(8);
+        let supervisor = Supervisor::spawn(engine.clone(), tx, quick());
+        let mut status = supervisor.status.clone();
+        status.wait_for(|s| s.state == State::Running).await.unwrap();
+        supervisor.stop().await;
+        assert!(engine.ended.load(Ordering::Relaxed), "stopped before its engine had ended");
+        assert_eq!(supervisor.status().state, State::Stopped);
     }
 
     #[tokio::test]

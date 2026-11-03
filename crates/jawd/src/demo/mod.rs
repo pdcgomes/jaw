@@ -15,7 +15,7 @@ pub(crate) mod usage;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -235,7 +235,7 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
     let socket = jaw_proto::local::socket(&folder);
     let mut signals = crate::Signals::new()?;
     let (lock, listener) = crate::open(&folder, &socket)?;
-    let started = crate::start_on(&folder, &socket, lock, Ok(engine), &plan.options).await?;
+    let started = crate::start_on(&folder, &socket, lock, Ok(engine), &plan.options, &OnceLock::new()).await?;
     tokio::spawn(crate::sock::serve(started.state.clone(), listener));
     let store = started.state.store().context("the demo's jawd has no store")?.clone();
     println!(
