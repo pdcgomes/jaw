@@ -26,7 +26,7 @@ use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, 
 use crate::work::Priority;
 
 /// Inbox rows read and converted at once.
-const READ: usize = 256;
+pub(super) const READ: usize = 256;
 /// Changes in one live transaction.
 const LIVE_CHANGES: usize = 64;
 /// History rows read and converted at once.
