@@ -1211,7 +1211,12 @@ async fn an_erased_messages_links_leave_both_contentless_indexes_and_no_page_the
 /// While erasures' words wait in a contentless index for its whole merge, which comes ten minutes
 /// after the last one began, a merge step taking them out before it zeroes the pages it frees too:
 /// FTS5 rewrites a level once a tenth of its entries are deleted, as sixty of three hundred links,
-/// erased together, make it.
+/// erased together, make it. FTS5 keeps a term on a leaf as what follows the part it shares with
+/// the term before it, so each erased word begins with two letters no other term has, and what
+/// follows its first letter, which FTS5 always keeps, is what's looked for: every one is checked.
+/// That finds what pages freed under FAST before the erasures kept, too, among them pages used
+/// again since by b-trees that never hold a message's words, which keep some of it in what they
+/// don't use (the design's caveat), so those are left out as free ones are.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_pages_it_frees() {
     let home = tempfile::tempdir().unwrap();
@@ -1222,7 +1227,10 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
     let first = n_of(&store, "first").await.unwrap();
     assert_eq!(apply(&store, vec![Change::Expire { n: first, at: LATER + 1 }]).await.changed, 1);
     settled(&store).await;
-    let goes = |batch: i64, k: i64| (k % 5 == 0).then(|| format!("numbat{batch}x{k}"));
+    let goes = |batch: i64, k: i64| {
+        let i = (batch * 10 + k / 5) as u8;
+        (k % 5 == 0).then(|| format!("{}{}numbat{batch}x{k}", char::from(b'a' + i / 26), char::from(b'a' + i % 26)))
+    };
     for batch in 0..6i64 {
         let links = (0..50i64).map(|k| {
             let site = goes(batch, k).unwrap_or_else(|| format!("site{batch}x{k}"));
@@ -1233,12 +1241,18 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
         store.indexed().await.unwrap();
     }
     store.truncate().await.unwrap();
-    let words: Vec<String> = (0..6i64).flat_map(|batch| (0..50i64).filter_map(move |k| goes(batch, k))).collect();
+    let words: Vec<String> = (0..6i64)
+        .flat_map(|batch| (0..50i64).filter_map(move |k| goes(batch, k).map(|word| word[1..].to_string())))
+        .collect();
+    let mut each = words.clone();
+    each.sort();
+    each.dedup();
+    assert_eq!(each.len(), 60, "sixty words, each its own");
     let before: Vec<Vec<usize>> = words
         .iter()
         .map(|word| {
             let pages = pages_holding(home.path(), word.as_bytes());
-            pages.into_iter().filter(|(_, owner)| owner.is_none()).map(|(page, _)| page).collect()
+            pages.into_iter().filter(|(_, owner)| !holds_words(owner.as_deref())).map(|(page, _)| page).collect()
         })
         .collect();
     let due: Vec<i64> = query(&store, |db| {
@@ -1255,8 +1269,29 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
     assert!(merge_noted(&store).await.is_some(), "their whole merges wait for their ten minutes");
     assert!(wal_emptied(&store).await);
     for (word, before) in words.iter().zip(&before) {
-        gone_but_for(home.path(), word, before, "taken out by a merge before its whole merge");
+        let left: Vec<_> = pages_holding(home.path(), word.as_bytes())
+            .into_iter()
+            .filter(|(page, _)| !before.contains(page))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{word}: left in these pages, by their b-tree, none holding it before but its own: {left:?}"
+        );
+        let wal = std::fs::read(home.path().join("jaw.db-wal")).unwrap_or_default();
+        assert!(!holds(&wal, word.as_bytes()), "{word}: left in the WAL");
+        let blocks: Vec<_> = index_blocks(home.path(), word).into_iter().filter(|(_, blocks)| *blocks > 0).collect();
+        assert!(blocks.is_empty(), "{word}: left in {blocks:?}");
     }
+}
+
+/// Whether b-tree `owner` is one that holds what a message says while it's there: its row, its
+/// links' and the indexes on either, and search's indexes.
+fn holds_words(owner: Option<&str>) -> bool {
+    owner.is_some_and(|name| {
+        ["messages", "links", "library_fts", "sqlite_autoindex_messages", "sqlite_autoindex_links"]
+            .iter()
+            .any(|table| name == *table || name.starts_with(&format!("{table}_")))
+    })
 }
 
 /// An edit of a message with a time to go takes what it said first out of messages_fts's segments
