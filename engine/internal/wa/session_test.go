@@ -3,14 +3,18 @@ package wa
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	"golang.org/x/sys/unix"
 
 	"github.com/pdcgomes/jaw/engine/internal/link"
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
@@ -45,6 +49,29 @@ func TestEveryConnectionToTheSessionIsSyncedAndCheckpointsReachTheDisk(t *testin
 				t.Errorf("connection %d: %s is %s, not %s", n, p.name, got, p.value)
 			}
 		}
+	}
+}
+
+func TestTheSessionLockLastsUntilTheProcessExitsAndRefusesAnother(t *testing.T) {
+	home := t.TempDir()
+	if err := LockSession(home); err != nil {
+		t.Fatal(err)
+	}
+	other, err := os.OpenFile(filepath.Join(home, "session.lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	for range 5 {
+		// Nothing but LockSession keeps the lock's file, which the collector would close.
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+		if err := unix.Flock(int(other.Fd()), unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+			t.Fatalf("another could take session.lock: %v", err)
+		}
+	}
+	if err := LockSession(home); err == nil || !strings.Contains(err.Error(), "another jaw-engine is running on "+home) {
+		t.Fatalf("a second lock on the folder: %v", err)
 	}
 }
 

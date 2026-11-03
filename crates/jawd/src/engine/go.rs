@@ -1,7 +1,9 @@
 //! `GoEngine`: jaw-engine, the Go program on whatsmeow, run as jawd's child on its standard input
-//! and output. Its standard error goes into jawd's. Each one started is kept until it has exited:
-//! ended in order, its standard input is closed, which it exits on, and should it not exit it's
-//! sent SIGTERM and then SIGKILL, each after a pause, and whoever ends it waits until it has gone.
+//! and output. Its standard error goes into jawd's, and a start that fails says the last line of
+//! it, which says why: another jaw-engine holding session.lock, say. Each one started is kept until
+//! it has exited: ended in order, its standard input is closed, which it exits on, and should it
+//! not exit it's sent SIGTERM and then SIGKILL, each after a pause, and whoever ends it waits until
+//! it has gone.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,6 +31,9 @@ const HELLO: Duration = Duration::from_secs(10);
 const QUITTING: Duration = Duration::from_secs(1);
 /// How long it has to exit after SIGTERM, before SIGKILL.
 const TERMINATING: Duration = Duration::from_millis(500);
+/// How long a start that failed waits, once jaw-engine has exited, for the end of what it said: a
+/// moment, unless another process holds its standard error open.
+const LAST_WORDS: Duration = Duration::from_millis(500);
 
 pub struct GoEngine {
     program: PathBuf,
@@ -112,12 +117,7 @@ impl Engine for GoEngine {
                 .running
                 .start(&mut self.command())
                 .with_context(|| format!("can't start {}", self.program.display()))?;
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("engine: {line}");
-                }
-            });
+            let speaking = tokio::spawn(speak(stderr));
             let mut reader = BufReader::with_capacity(64 << 10, stdout);
             let mut writer = BufWriter::with_capacity(64 << 10, stdin);
             let greeted = tokio::select! {
@@ -132,7 +132,11 @@ impl Engine for GoEngine {
                     drop(writer);
                     process.tell(End::InOrder);
                     let ended = process.exited().await;
-                    bail!("{e:#}; {ended}");
+                    // One that can't start says why as it goes, as one refused session.lock does.
+                    match tokio::time::timeout(LAST_WORDS, speaking).await.ok().and_then(Result::ok).flatten() {
+                        Some(said) => bail!("{e:#}; it said last {said:?}; {ended}"),
+                        None => bail!("{e:#}; {ended}"),
+                    }
                 }
             };
             let (tx, rx) = mpsc::unbounded_channel();
@@ -337,6 +341,20 @@ fn exited(how: &str, status: std::io::Result<ExitStatus>) -> String {
     }
 }
 
+/// Copies what jaw-engine says on its standard error into jawd's, line by line, until it closes,
+/// and says its last line.
+async fn speak(stderr: ChildStderr) -> Option<String> {
+    let mut lines = BufReader::new(stderr).lines();
+    let mut last = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        eprintln!("engine: {line}");
+        if !line.trim().is_empty() {
+            last = Some(line);
+        }
+    }
+    last
+}
+
 /// Reads the engine's hello, checks it, and answers with jawd's.
 async fn handshake(reader: &mut BufReader<ChildStdout>, writer: &mut BufWriter<ChildStdin>) -> Result<pb::Hello> {
     let first = frame::read(reader).await?.context("jaw-engine closed the link before saying hello")?;
@@ -448,6 +466,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::engine::supervisor::{Backoff, State, Supervisor};
 
     /// The engine `make engine` builds. Without it the test says so and passes, except in CI,
     /// where `make test` builds it first.
@@ -516,6 +535,84 @@ mod tests {
         let why = instance.exited.await;
         assert!(why.contains("exited"), "{why}");
         assert_eq!(acking.await.unwrap(), 2_000);
+    }
+
+    /// The engine `make engine` builds, started on `home`, once its session is open: it says it's
+    /// unlinked then, as it is on a folder of its own.
+    async fn serving(program: &Path, home: &Path) -> (GoEngine, Instance, mpsc::Receiver<Incoming>) {
+        let engine = GoEngine::new(program.to_path_buf(), home.to_path_buf());
+        let (tx, mut rx) = mpsc::channel(64);
+        let instance = engine.start(tx).await.unwrap();
+        let unlinked = rx.recv().await.unwrap();
+        assert!(matches!(unlinked.event.kind, Some(pb::event::Kind::Connection(_))), "{:?}", unlinked.event);
+        (engine, instance, rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_engine_on_its_folder_is_refused_as_a_start_that_failed_and_the_first_runs_on_untouched() {
+        let Some(program) = built() else { return };
+        let home = tempfile::tempdir().unwrap();
+        let (first, instance, _events) = serving(&program, home.path()).await;
+        let second = GoEngine::new(program, home.path().to_path_buf());
+        let (tx, _rx) = mpsc::channel(8);
+        let refused = second.start(tx).await.err().map(|e| format!("{e:#}"));
+        let why = format!("another jaw-engine is running on {}", home.path().display());
+        assert!(
+            refused.as_ref().is_some_and(|e| e.contains("before saying hello")
+                && e.contains(&why)
+                && e.ends_with("(exit status: 1)")),
+            "{refused:?}"
+        );
+        let pong = instance.commands.call(pb::command::Kind::Ping(pb::Ping {})).await;
+        assert!(matches!(pong, Ok(pb::reply::Kind::Pong(_))), "the first answers as before: {pong:?}");
+        let ended = first.end_all(End::InOrder).await;
+        assert_eq!(ended, ["jaw-engine exited once its standard input closed (exit status: 0)"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_refused_while_another_has_its_folder_starts_once_that_one_has_gone() {
+        let Some(program) = built() else { return };
+        let home = tempfile::tempdir().unwrap();
+        let (first, _instance, _events) = serving(&program, home.path()).await;
+        let (events, _incoming) = mpsc::channel(64);
+        let pausing =
+            Backoff { first: Duration::from_millis(100), most: Duration::from_millis(400), ..Backoff::default() };
+        let engine = Arc::new(GoEngine::new(program, home.path().to_path_buf()));
+        let supervisor = Supervisor::spawn(engine, events, pausing);
+        let mut status = supervisor.watch();
+        let refused = tokio::time::timeout(Duration::from_secs(20), status.wait_for(|s| s.restarts >= 1)).await;
+        let refused = refused.expect("it was never refused").unwrap().clone();
+        assert!(
+            refused.runs == 0
+                && refused.last_exit.as_ref().is_some_and(|why| why.contains("another jaw-engine is running on")),
+            "{refused:?}"
+        );
+        first.end_all(End::InOrder).await;
+        let running =
+            tokio::time::timeout(Duration::from_secs(20), status.wait_for(|s| s.state == State::Running)).await;
+        assert!(
+            running.is_ok_and(|running| running.is_ok()),
+            "it starts once the first has gone: {:?}",
+            supervisor.status()
+        );
+        supervisor.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lock_left_by_an_engine_that_died_is_free_again() {
+        let Some(program) = built() else { return };
+        let home = tempfile::tempdir().unwrap();
+        let (first, instance, _events) = serving(&program, home.path()).await;
+        let pid = first.running.0.lock().unwrap().live.values().next().unwrap().pid;
+        // SAFETY: SIGKILL to the engine this test started, which its keeper hasn't seen exit.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let why = instance.exited.await;
+        assert!(why.contains("signal: 9 (SIGKILL)"), "{why}");
+        assert!(home.path().join("session.lock").is_file(), "the file stays, and only its lock went");
+        let (second, instance, _events) = serving(&program, home.path()).await;
+        let pong = instance.commands.call(pb::command::Kind::Ping(pb::Ping {})).await;
+        assert!(matches!(pong, Ok(pb::reply::Kind::Pong(_))), "{pong:?}");
+        second.end_all(End::InOrder).await;
     }
 
     /// `engine` started on a fake that never says hello, once it runs.

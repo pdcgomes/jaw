@@ -1,6 +1,8 @@
 // jaw-engine speaks WhatsApp for jawd, through whatsmeow. jawd starts it and talks to it on its
 // standard input and output, so it isn't meant to be run by hand; its logs go to standard error.
-// It exits once jawd closes its standard input, or once jawd has gone, however jawd went.
+// It exits once jawd closes its standard input, or once jawd has gone, however jawd went. It holds
+// session.lock in its folder for as long as it runs, and exits at once, before it says hello,
+// should another process hold it.
 package main
 
 import (
@@ -36,6 +38,10 @@ func main() {
 	wa.Configure(versionParts(version))
 	log := wa.NewLogger("engine", *level)
 	exitWithJawd(jawd, log)
+	if err := wa.LockSession(*home); err != nil {
+		log.Errorf("%v", err)
+		os.Exit(1)
+	}
 	program := "jaw-engine " + version
 	if err := wa.Run(context.Background(), link.New(os.Stdin, os.Stdout), *home, program, whatsmeowVersion(), log); err != nil {
 		log.Errorf("%v", err)

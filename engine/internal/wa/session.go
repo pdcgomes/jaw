@@ -4,15 +4,51 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"golang.org/x/sys/unix"
 )
+
+// sessionLocks are the session.locks this process has taken, kept from the garbage collector,
+// which would close them, so each lasts until the process exits.
+var sessionLocks struct {
+	sync.Mutex
+	held []*os.File
+}
+
+// LockSession takes session.lock in home, an exclusive flock, before session.db is opened, and
+// holds it until the process exits, however it exits, so no two engines ever have one session.db
+// open, whoever started them. It fails at once if another process holds it.
+func LockSession(home string) error {
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(home, "session.lock")
+	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("can't open %s: %w", path, err)
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return fmt.Errorf("another jaw-engine is running on %s: it holds session.lock, so this one leaves session.db alone", home)
+		}
+		return fmt.Errorf("can't lock %s: %w", path, err)
+	}
+	sessionLocks.Lock()
+	sessionLocks.held = append(sessionLocks.held, lock)
+	sessionLocks.Unlock()
+	return nil
+}
 
 // sessionDriver is mattn's driver with what its DSN can't set: on macOS a checkpoint whose syncs
 // stop at the drive's cache can leave session.db malformed after a power cut, and a WAL that

@@ -53,10 +53,10 @@ func (e *Engine) cli() *whatsmeow.Client {
 	return e.client.Load()
 }
 
-// Run speaks to jawd on l until jawd closes it: hello first, then the session in home/session.db.
-// A session.db from a newer whatsmeow, which this one can't read, is said as WhatsApp saying jaw
-// is outdated, and the engine answers what it can until jawd closes the link, since starting it
-// again wouldn't read it either.
+// Run speaks to jawd on l until jawd closes it: hello first, then the session in home/session.db,
+// whose session.lock the caller holds (LockSession). A session.db from a newer whatsmeow, which
+// this one can't read, is said as WhatsApp saying jaw is outdated, and the engine answers what it
+// can until jawd closes the link, since starting it again wouldn't read it either.
 func Run(ctx context.Context, l *link.Link, home, program, whatsmeowVersion string, log waLog.Logger) error {
 	e := newEngine(ctx, l, log)
 	if err := e.hello(program, whatsmeowVersion); err != nil {
