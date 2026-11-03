@@ -630,6 +630,61 @@ mod tests {
         assert_eq!(fake::running(home.path()), None);
     }
 
+    /// Whether `pid` has exited, whether or not it has been waited for.
+    fn gone(pid: i32) -> bool {
+        // SAFETY: a signal of 0 is sent to nobody; kill only says whether the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        let ps = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim_start().starts_with('Z')
+    }
+
+    #[test]
+    fn ended_at_once_an_engine_is_killed_with_what_it_started_though_its_keeper_never_runs_again() {
+        let home = tempfile::tempdir().unwrap();
+        let started = home.path().join("started.pid");
+        // It ignores its standard input closing and SIGTERM, and waits for a sleep of its own.
+        let then = format!("trap '' TERM\nsleep 600 &\necho $! > '{}'\nwait", started.display());
+        let engine = Arc::new(GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf()));
+        // A runtime of this thread's own runs its tasks only while this thread waits on it.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (fake, sleep) = runtime.block_on(async {
+            let _starting = starting(&engine, home.path()).await;
+            while !std::fs::read_to_string(&started).is_ok_and(|pid| pid.ends_with('\n')) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let sleep: i32 = std::fs::read_to_string(&started).unwrap().trim().parse().unwrap();
+            (fake::running(home.path()).unwrap(), sleep)
+        });
+        engine.running.close(End::AtOnce);
+        // Its keeper never runs again, as a runtime about to go may never run it.
+        drop(runtime);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !(gone(fake) && gone(sleep)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: SIGKILL to the sleep this test's engine started, should it outlive the engine.
+        let outlived = !gone(sleep) && unsafe { libc::kill(sleep, libc::SIGKILL) } == 0;
+        assert!(!outlived, "what the engine started outlived it");
+        assert!(gone(fake), "the engine outlived its end");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_instance_ends_once_its_engine_has_exited_not_once_its_standard_output_closes() {
+        let home = tempfile::tempdir().unwrap();
+        let said = home.path().join("said");
+        // Once it has said hello it closes its standard output, and exits only a moment later.
+        let then = format!("{}\nexec >&-\nsleep 0.3\necho exited > '{}'", fake::hello(home.path()), said.display());
+        let engine = GoEngine::new(fake::engine(home.path(), &then), home.path().to_path_buf());
+        let (tx, _rx) = mpsc::channel(8);
+        let instance = engine.start(tx).await.unwrap();
+        let why = instance.exited.await;
+        assert!(said.is_file(), "its end came before it had exited: {why}");
+        assert_eq!(why, "jaw-engine exited (exit status: 0)");
+        assert_eq!(fake::running(home.path()), None);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn once_ended_it_starts_no_other_engine() {
         let home = tempfile::tempdir().unwrap();

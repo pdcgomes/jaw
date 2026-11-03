@@ -281,6 +281,31 @@ fn jawd_stopped_while_it_starts_takes_its_engine_with_it_however_late_its_runtim
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
     assert!(log.contains("jawd: SIGTERM while starting, so it stops"), "{log}");
     assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    assert!(log.contains("jawd: jaw-engine didn't exit once its standard input closed, so SIGTERM ended it"), "{log}");
+}
+
+#[test]
+fn a_second_sigterm_while_jawd_ends_its_engine_in_order_kills_it_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = Fake::stubborn(home.path());
+    let mut jawd = jawd_started(home.path(), &engine.program, |command| {
+        command.arg("--hold-start");
+    });
+    engine.started();
+    // SAFETY: kill only sends a signal to the jawd this test started.
+    unsafe { libc::kill(jawd.0.id() as i32, libc::SIGTERM) };
+    let first = Instant::now();
+    // Stopped while it starts, it ends its engine in order, whose first pause is a second long.
+    says(home.path(), "jawd: SIGTERM while starting, so it stops");
+    std::thread::sleep(Duration::from_millis(100));
+    let (status, _) = terminate(&mut jawd);
+    let took = first.elapsed();
+    let log = log(home.path());
+    // Before the end in order's two pauses, a second and half a second, would have killed it.
+    assert!(status.code() == Some(1) && took < Duration::from_millis(1500), "{status} after {took:?}:\n{log}");
+    assert!(log.contains("jawd: SIGTERM again, so it stops at once"), "{log}");
+    assert!(engine.running().is_none(), "the engine outlived jawd:\n{log}");
+    assert!(log.contains("jawd: jaw-engine was killed at once, with SIGKILL"), "{log}");
 }
 
 #[test]
