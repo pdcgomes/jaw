@@ -6,6 +6,7 @@
 //! it has gone.
 
 use std::collections::HashMap;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -303,7 +304,12 @@ async fn ended(child: &mut Child, told: &mut watch::Receiver<Option<End>>) -> St
         }
     }
     signal(child, libc::SIGKILL);
-    exited("jaw-engine was killed at once, with SIGKILL", child.wait().await)
+    let status = child.wait().await;
+    // What it was told came first, but it may have exited by itself just then: its status says.
+    if status.as_ref().is_ok_and(|status| status.signal() != Some(libc::SIGKILL)) {
+        return exited("jaw-engine exited by itself just as it was to be killed at once", status);
+    }
+    exited("jaw-engine was killed at once, with SIGKILL", status)
 }
 
 /// Its exit, should it come within `pause`, and before it's told to end at once.
@@ -765,6 +771,19 @@ mod tests {
         let outlived = !gone(sleep) && unsafe { libc::kill(sleep, libc::SIGKILL) } == 0;
         assert!(!outlived, "what the engine started outlived it");
         assert!(gone(fake), "the engine outlived its end");
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_exits_by_itself_just_as_it_is_to_be_killed_at_once_is_said_to_have() {
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).process_group(0).spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        // Exited, and not yet waited for, as its keeper finds it when it's told first.
+        while !gone(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (_told, mut telling) = watch::channel(Some(End::AtOnce));
+        let why = ended(&mut child, &mut telling).await;
+        assert_eq!(why, "jaw-engine exited by itself just as it was to be killed at once (exit status: 0)");
     }
 
     #[tokio::test(flavor = "multi_thread")]
