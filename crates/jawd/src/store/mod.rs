@@ -3860,6 +3860,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn jawd_status_counts_the_rows_left_in_the_inbox_waiting_for_the_writer_among_its_background_work() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
+        // The writer's prune at its start is done, so the lock below holds up the leftovers.
+        store.apply(Lane::Live, Vec::new()).await.unwrap();
+        // The pools as jawd serving gives them to status, the writer's first.
+        let pools: Vec<Arc<dyn Report>> = vec![Arc::new(store.clone())];
+        let (pushes, _) = tokio::sync::broadcast::channel(1);
+        let state = crate::state::State::new(
+            home.path(),
+            Err(("demo", "not started".into())),
+            pools,
+            Arc::default(),
+            Some(store.clone()),
+            pushes,
+        )
+        .unwrap();
+        let waiting = || {
+            let status = state.status();
+            status.pools.iter().find(|pool| pool.name == "writer").map(|writer| writer.queued_background)
+        };
+        let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // The writer takes one, which the lock holds up, and the other two wait on their queue.
+        let chat = "351910000001@s.whatsapp.net";
+        let batches: Vec<_> = (0..3)
+            .map(|n| {
+                let store = store.clone();
+                let left = messages([text(chat, &format!("l{n}"), n, "left from before")]);
+                tokio::spawn(async move { store.apply_leftovers(left).await })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while waiting() != Some(2) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("status counts the two batches of rows left in the inbox waiting for the writer");
+        holder.execute_batch("COMMIT").unwrap();
+        for batch in batches {
+            batch.await.unwrap().unwrap();
+        }
+        assert_eq!(waiting(), Some(0), "and none once they're in");
+        assert_eq!(store.count("messages").unwrap(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_wal_stays_bounded_while_history_pours_in_and_live_writes_never_wait_for_it() {
         let home = tempfile::tempdir().unwrap();
         let (soft, hard) = (256, 512);
