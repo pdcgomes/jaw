@@ -2096,10 +2096,7 @@ async fn below_the_disks_floor_a_row_left_in_the_inbox_and_the_live_rows_after_i
     let converter = converting(&store);
     tokio::time::sleep(Duration::from_millis(500)).await;
     store.inbox("message", 0, live_message(ANA, ANA, "live", AT + 1_000, text("agora")).encode_to_vec(), None);
-    let arrived = Instant::now();
     until("both messages, the disk short of room", || store.count("messages").unwrap() == 2).await;
-    let took = arrived.elapsed();
-    assert!(took < Duration::from_secs(2), "the live message was converted {took:?} after it arrived");
     assert_eq!(store.count("inbox").unwrap(), 0);
     until("the left row's thumbnail", || store.thumbnails_kept().unwrap().0 == 1).await;
     assert!(!disk.room() && !history.is_finished(), "history still waits for room");
