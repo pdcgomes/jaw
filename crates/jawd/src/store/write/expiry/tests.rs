@@ -1483,6 +1483,136 @@ async fn a_whole_merge_after_the_wal_an_erasure_left_was_emptied_has_it_emptied_
     gone_but_for(home.path(), "wombatlater", &before, "its link's words");
 }
 
+/// Whether a merge of `index`'s segments is under way, as FTS5's structure record (its row 10)
+/// says: a level some of whose segments are the inputs of a merge not done yet.
+fn merging_in(db: &Connection, index: &str) -> bool {
+    let record: Vec<u8> =
+        db.query_row(&format!("SELECT block FROM {index}_data WHERE id = 10"), [], |r| r.get(0)).unwrap();
+    // Its cookie, then, in a contentless_delete index's, the mark of the record's second version,
+    // whose segments each say their origins and tombstones too.
+    let second = record[4..8] == [0xff, 0x00, 0x00, 0x01];
+    let mut at = if second { 8 } else { 4 };
+    let mut varint = || {
+        let mut value = 0u64;
+        for k in 0..9 {
+            let byte = record[at];
+            at += 1;
+            if k == 8 {
+                return (value << 8) | u64::from(byte);
+            }
+            value = (value << 7) | u64::from(byte & 0x7f);
+            if byte < 0x80 {
+                break;
+            }
+        }
+        value
+    };
+    let (levels, segments, _writes) = (varint(), varint(), varint());
+    let (mut merging, mut counted) = (false, 0);
+    for _ in 0..levels {
+        let (inputs, held) = (varint(), varint());
+        merging |= inputs > 0;
+        counted += held;
+        for _ in 0..held * if second { 8 } else { 3 } {
+            varint();
+        }
+    }
+    assert_eq!((counted, at), (segments, record.len()), "{index}'s structure record reads as FTS5 writes it");
+    merging
+}
+
+/// An erasure that comes while a contentless index is merged whole, after the erasure the merge
+/// began for, may leave its words in the segment the merge is writing, so the merge's end keeps its
+/// note, in sync_state and in the writer, and the next whole merge takes them out; and a kill
+/// between the two leaves that to do. links_fts's pages are made small here, as FTS5 lets them be,
+/// so its whole merge takes many of the writer's steps, as a large index's does: holding jaw.db's
+/// write lock while it's under way keeps the writer between two of them while the second erasure
+/// is sent. A first erasure's whole merge goes at once, so the one watched begins seconds after
+/// the erasure it's for, watched from before its first step, however loaded the machine is. The
+/// second's link's word sorts before the others', so the merge's first step has written it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erasure_while_a_whole_merge_runs_is_kept_noted_for_the_next_and_a_kill_between_them_keeps_it() {
+    let home = tempfile::tempdir().unwrap();
+    let limits = crate::store::Limits { whole_merge_every: Duration::from_secs(4), ..crate::store::LIMITS };
+    let store = Store::open_with(home.path(), limits).unwrap();
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("INSERT INTO links_fts (links_fts, rank) VALUES ('pgsz', 32)", []).unwrap();
+    let trail = |id: String, k: i64| {
+        let path: Vec<String> = (0..8).map(|j| format!("trail{k}x{j}")).collect();
+        let url = format!("https://site{k}.example/{}", path.join("/"));
+        let spans = serde_json::json!([{ "t": "text", "s": "see " }, { "t": "link", "s": url, "url": url }]);
+        let message = message(ANA, &id, AT + 1000 + k, &format!("see {url}"), None);
+        Change::Message(Message { spans: Some(spans.to_string()), ..message })
+    };
+    for batch in 0..8i64 {
+        let mut links: Vec<Change> = (0..100).map(|k| trail(format!("t{batch}{k:02}"), batch * 100 + k)).collect();
+        if batch == 1 {
+            links.insert(50, Change::Message(linked("zero", "wombatzero", 0)));
+            links.insert(51, Change::Message(linked("first", "quokkafirst", 1)));
+            links.insert(52, Change::Message(linked("second", "bilbysecond", 2)));
+        }
+        apply(&store, links).await;
+        store.indexed().await.unwrap();
+    }
+    assert!(index_blocks(home.path(), "bilbysecond")[1].1 > 0, "links_fts holds the second's link");
+    let zero = n_of(&store, "zero").await.unwrap();
+    assert_eq!(apply(&store, vec![Change::Expire { n: zero, at: LATER }]).await.changed, 1);
+    settled(&store).await;
+    let before = free_holding(&store, home.path(), b"bilbysecond").await;
+    let (first, second) = (n_of(&store, "first").await.unwrap(), n_of(&store, "second").await.unwrap());
+    assert_eq!(apply(&store, vec![Change::Expire { n: first, at: LATER + 1 }]).await.changed, 1);
+    let noted_first = store.remembered(LINKS_ERASED).unwrap();
+    assert!(noted_first.is_some(), "the first erasure notes links_fts's whole merge");
+    // The write lock taken between two of the whole merge's steps, once it's under way.
+    let watching = tokio::task::spawn_blocking(move || {
+        for _ in 0..100_000 {
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            if merging_in(&db, "links_fts") {
+                return Some(db);
+            }
+            db.execute_batch("ROLLBACK").unwrap();
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        None
+    });
+    let watched = watching.await.unwrap();
+    let db = watched.expect("links_fts's whole merge is seen under way, with more than its first step to go");
+    let erasing = tokio::spawn({
+        let store = store.clone();
+        async move { store.apply(Lane::Live, vec![Change::Expire { n: second, at: LATER + 2 }]).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(erasing.await.unwrap().changed, 1);
+    let noted_second = store.remembered(LINKS_ERASED).unwrap();
+    assert!(noted_second.is_some() && noted_second != noted_first, "the second erasure notes it again");
+    // The first whole merges done, as the writer has nothing more to merge.
+    store.indexed().await.unwrap();
+    assert!(!merging_in(&db, "links_fts"), "the first whole merge of links_fts is done");
+    assert_eq!(store.remembered(LINKS_ERASED).unwrap(), noted_second, "its end keeps the second erasure's note");
+    assert!(index_blocks(home.path(), "bilbysecond")[1].1 > 0, "and the segment it wrote, the second's word");
+    let copy = killed(home.path());
+    assert!(merged(&store).await, "the writer's next whole merge, a few seconds after the first began");
+    settled(&store).await;
+    gone_but_for(home.path(), "bilbysecond", &before, "an erasure during a whole merge, after the next");
+    let found: i64 = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*) FROM links_fts WHERE links_fts MATCH 'example'", [], |r| r.get(0))?)
+    })
+    .await;
+    assert_eq!(found, 800, "the others are still found");
+    // Killed between the two whole merges, jawd started again does the second from the note.
+    let note = |home: &Path| {
+        let db = Connection::open(home.join("jaw.db")).unwrap();
+        db.query_row("SELECT value FROM sync_state WHERE key = ?1", [LINKS_ERASED], |r| r.get(0)).optional().unwrap()
+    };
+    assert_eq!(note(copy.path()), noted_second, "a kill between the two keeps the second erasure's note");
+    assert!(index_blocks(copy.path(), "bilbysecond")[1].1 > 0);
+    let again = Store::open(copy.path()).unwrap();
+    settled(&again).await;
+    gone_but_for(copy.path(), "bilbysecond", &[], "an erasure during a whole merge, killed before the next");
+}
+
 /// The kinds backfill making a row it couldn't show one to open once, which an edit had given
 /// words, takes those words out as an erasure takes them: a photo sent to be opened once says only
 /// what it is. Among forty other messages in the index's segments.
