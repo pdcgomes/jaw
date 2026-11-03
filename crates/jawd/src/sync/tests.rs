@@ -305,7 +305,7 @@ async fn an_inbox_row_whose_conversion_panics_is_kept_in_quarantine_once_and_the
     let (said, plainly) = ("3EB0PANICSINBOX", "3EB0PANICSPLAINLYINBOX");
     let kept = {
         let store = Store::open(home.path()).unwrap();
-        // From before the converter started, so the background lane takes them.
+        // From before the converter started, so they go on the leftovers' own queue.
         for (id, at) in [("m1", AT), (said, AT + 1_000), ("m3", AT + 2_000)] {
             store.inbox("message", 0, event(ANA, id, at), None);
         }
