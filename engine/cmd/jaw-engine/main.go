@@ -1,5 +1,6 @@
 // jaw-engine speaks WhatsApp for jawd, through whatsmeow. jawd starts it and talks to it on its
 // standard input and output, so it isn't meant to be run by hand; its logs go to standard error.
+// It exits once jawd closes its standard input, or once jawd has gone, however jawd went.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 var version = "unknown"
 
 func main() {
+	jawd := os.Getppid()
 	showVersion := flag.Bool("version", false, "print jaw-engine's version and whatsmeow's")
 	home := flag.String("home", "", "jaw's folder, where whatsmeow's session.db lives")
 	level := flag.String("log", "info", "the lowest level logged: debug, info, warn or error")
@@ -33,6 +35,7 @@ func main() {
 	}
 	wa.Configure(versionParts(version))
 	log := wa.NewLogger("engine", *level)
+	exitWithJawd(jawd, log)
 	program := "jaw-engine " + version
 	if err := wa.Run(context.Background(), link.New(os.Stdin, os.Stdout), *home, program, whatsmeowVersion(), log); err != nil {
 		log.Errorf("%v", err)
