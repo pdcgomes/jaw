@@ -340,6 +340,16 @@ fn insist(command: impl Fn() -> Result<(), crate::Error>) {
     }
 }
 
+/// Waits until the audio thread has taken every command, so all but the last are handled.
+fn taken(voice: &Voice) {
+    let commands = voice.commands.as_ref().expect("the audio thread is running");
+    let deadline = Instant::now() + PATIENCE;
+    while !commands.is_empty() {
+        assert!(Instant::now() < deadline, "the audio thread never took its commands");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn a_recordings_end_is_held_for_a_caller_that_falls_behind_and_never_dropped() {
     let dir = tempfile::tempdir().unwrap();
@@ -354,7 +364,9 @@ fn a_recordings_end_is_held_for_a_caller_that_falls_behind_and_never_dropped() {
     insist(|| voice.stop_recording());
     insist(|| voice.record(&second, crate::RECORDING_LIMIT));
     insist(|| voice.play("last", fixture("missing.ogg"), Duration::ZERO, Speed::Normal));
-    std::thread::sleep(Duration::from_millis(300));
+    // Nothing is read until the thread has met them all, however long load makes the end's syncs:
+    // an end that finds room isn't held.
+    taken(&voice);
     assert!(voice.stats().dropped_events > 0);
 
     let refused = |e: &Event| matches!(e, Event::RecordingRefused { error } if error.to_string().contains("hasn't been read yet"));
