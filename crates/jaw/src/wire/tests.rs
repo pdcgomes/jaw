@@ -66,6 +66,9 @@ struct Kept {
     seq: u64,
     /// Messages whose deletion for everyone is on its way, which jawd won't vote in or star.
     deleting: Vec<String>,
+    /// Messages whose files neither WhatsApp's server nor the phone has any more, which jawd can't
+    /// download to save.
+    gone: Vec<String>,
 }
 
 /// A chat window's rows: the fixture's, each as an action last changed it, then the rest kept.
@@ -202,6 +205,22 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
                 kept.acted.insert(key, json!({}));
             }
             json!({})
+        }
+        "media.save" if kept.gone.iter().any(|g| params["message"] == g.as_str()) => {
+            let why = "jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
+            return error(code::NOT_ALLOWED, why, Value::Null);
+        }
+        // Where jawd would copy it, which it answers with; nothing is written.
+        "media.save" => {
+            let to = params["to"].as_str().unwrap_or_default();
+            if !(to.starts_with('/') || to.starts_with("~/")) {
+                let why = "media.save's `to` is a whole path, or one starting ~/";
+                return error(code::INVALID_PARAMS, why, json!({ "param": "to" }));
+            }
+            let home = std::env::var("HOME").unwrap_or_default();
+            let whole = to.strip_prefix('~').map_or_else(|| to.to_string(), |rest| format!("{home}{rest}"));
+            let named = format!("{}.jpg", params["message"].as_str().unwrap_or_default());
+            json!({ "path": if whole.ends_with('/') { format!("{whole}{named}") } else { whole } })
         }
         "message.info" => json!({
             "message": params["message"],
@@ -1640,6 +1659,66 @@ fn a_vote_jawd_turns_down_says_jawds_reason_and_the_next_goes_by_the_poll_as_jaw
     run::press_live(&mut v, &rx, "\n2").unwrap();
     assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
     assert_eq!(votes(&jawd)[1], json!(["Tasca do Chico"]), "not taken back, as the vote turned down would have it");
+}
+
+/// Ana's photo, newest in her chat, which jawd has.
+const PHOTO: &str = "3EB0B7C8D9E0F1A2";
+
+/// A scripted jawd whose Ana's chat ends with her photo, and if `gone`, one jawd can't download.
+fn with_photo(gone: bool) -> Scripted {
+    let jawd = scripted();
+    let mut row = fixture("messages.watch.result")["result"]["rows"][0].clone();
+    (row["id"], row["sort"], row["at"]) =
+        (json!(PHOTO), json!("1792145190123~000000000126"), json!(1_792_145_190_123_i64));
+    (row["kind"], row["spans"], row["reactions"]) = (json!("image"), json!([]), json!([]));
+    let media =
+        json!({ "w": 4032, "h": 3024, "mime": "image/jpeg", "state": "local", "path": "media/files/9d6c20c8.jpg" });
+    row["media"] = media;
+    let mut kept = jawd.kept.lock().unwrap();
+    kept.rows.push(row);
+    if gone {
+        kept.gone.push(PHOTO.into());
+    }
+    drop(kept);
+    jawd
+}
+
+#[test]
+fn a_save_into_a_folder_asks_where_from_downloads_and_says_where_jawd_put_it() {
+    let jawd = with_photo(false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>s").unwrap();
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ save ") && screen.contains("› ~/Downloads/"), "asks where, from Downloads:\n{screen}");
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    let screen = until(&mut v, &rx, "saved to Downloads as");
+    assert!(screen.contains(&format!("saved to Downloads as {PHOTO}.jpg")), "where jawd put it:\n{screen}");
+    assert_eq!(jawd.asked("media.save"), [json!({ "message": PHOTO, "to": "~/Downloads/", "chat": ANA })]);
+}
+
+#[test]
+fn a_save_into_a_named_file_goes_to_the_path_typed_and_says_where() {
+    let jawd = with_photo(false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>s<c-u>~/Documents/o lago.jpg\n").unwrap();
+    let screen = until(&mut v, &rx, "saved to ~/Documents as o lago.jpg");
+    assert!(screen.contains("saved to ~/Documents as o lago.jpg") && !screen.contains("╭ save "), "{screen}");
+    let asked = jawd.asked("media.save");
+    assert_eq!(asked, [json!({ "message": PHOTO, "to": "~/Documents/o lago.jpg", "chat": ANA })]);
+}
+
+#[test]
+fn a_save_jawd_turns_down_says_jawds_reason_and_a_path_jawd_wouldnt_take_is_said_before_asking() {
+    let jawd = with_photo(true);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>s<c-u>Downloads\n").unwrap();
+    let screen = frame(&mut v);
+    assert!(screen.contains("a path from / or ~/") && screen.contains("╭ save "), "still asking:\n{screen}");
+    assert!(jawd.asked("media.save").is_empty(), "{:?}", jawd.asked("media.save"));
+    run::press_live(&mut v, &rx, "<c-u>~/Downloads/\n").unwrap();
+    let screen = until(&mut v, &rx, "not saved");
+    let why = "not saved: jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
+    assert!(screen.contains(why), "in the footer:\n{screen}");
 }
 
 /// The demo engine's message in its group, from a member jawd has no name for.

@@ -388,7 +388,7 @@ impl View {
             KeyCode::Char(c @ '1'..='6') => self.react_quick(&m, c as usize - '1' as usize),
             KeyCode::Char('f') => self.palette_forward(&m),
             KeyCode::Char('i') => self.info(&m),
-            KeyCode::Char('s') => self.say("saving files comes later"),
+            KeyCode::Char('s') => self.palette_save(&m),
             KeyCode::Char('m') => self.file_this(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),
             KeyCode::Char(_) | KeyCode::Backspace if !ctrl && !alt => {

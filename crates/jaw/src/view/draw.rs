@@ -360,17 +360,23 @@ impl View {
                 } else {
                     "open"
                 };
-                vec![
+                let mut hints = vec![
                     ("r", "reply", true),
                     ("e", "edit", editable),
                     ("d", "delete", true),
                     ("+", "react", true),
                     ("f", "forward", true),
+                ];
+                if m.is_some_and(super::save::has_file) {
+                    hints.push(("s", "save", true));
+                }
+                hints.extend([
                     ("y", "copy", true),
                     ("⏎", opens, true),
                     ("i", "info", true),
                     ("esc", "back to typing", true),
-                ]
+                ]);
+                hints
             }
             Focus::Typing if self.editing.is_some() => vec![("⏎", "saves", true), ("esc", "stops editing", true)],
             Focus::Typing if self.attaching.is_some() => self.attaching_hints(),
@@ -1279,7 +1285,7 @@ impl View {
             pair(("alt-d", "cut the next word", true), Some(("+  1-6", "react", true))),
             pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward", true))),
             pair(("@", "a name, in a group", true), Some(("i", "info", true))),
-            pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s", "save", false))),
+            pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s", "save its file", true))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
             pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
         ];

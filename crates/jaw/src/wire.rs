@@ -85,6 +85,8 @@ enum Asked {
     Settings,
     /// A message's receipts, for the sheet waiting for them.
     Info(String),
+    /// A message's file being saved, which jawd answers once it's copied, with where.
+    Save,
     /// A chat's members, for completing `@` names; refused, the interface uses who it's seen.
     Members(String),
     /// The folder tree's window.
@@ -428,6 +430,13 @@ impl Wire {
             }
             Asked::Settings => Some(Update::SettingsRefused(failure.to_string())),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
+            Asked::Save => Some(Update::Notice(match failure {
+                Failure::Lost => {
+                    "jawd went away before saying where it saved it, so look for it before saving again".into()
+                }
+                Failure::Jawd(e) if e.code == code::UNKNOWN_METHOD => why_not(failure, "saving files"),
+                other => format!("not saved: {other}"),
+            })),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Folders | Asked::Roster(_) => None,
             Asked::Library(_) => Some(Update::LibraryRefused(why_not(failure, "the library"))),
@@ -526,6 +535,12 @@ impl Wire {
                     (Asked::Info(message), Ok(result)) => {
                         let info = serde_json::from_value::<MessageInfo>(result).map_err(|e| e.to_string());
                         out.push(Update::Info { message, info });
+                    }
+                    (Asked::Save, Ok(result)) => {
+                        out.push(match serde_json::from_value::<jaw_proto::media::Saved>(result) {
+                            Ok(saved) => Update::Saved(saved.path),
+                            Err(_) => Update::Notice("jawd saved it, but jaw couldn't read where".into()),
+                        })
                     }
                     (Asked::Members(chat), Ok(result)) => {
                         let members = serde_json::from_value(result["members"].clone()).unwrap_or_default();
@@ -936,6 +951,10 @@ impl Jawd for Wire {
 
     fn media_cancel(&mut self, chat: &str, message: &str) {
         self.ask("media.cancel", json!({ "message": message, "chat": chat }), Asked::Did("stopping it"));
+    }
+
+    fn save(&mut self, chat: &str, message: &str, to: &str) {
+        self.ask("media.save", json!({ "message": message, "to": to, "chat": chat }), Asked::Save);
     }
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {

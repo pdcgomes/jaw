@@ -1102,6 +1102,12 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_media_cancel(&message));
     }
 
+    /// The made-up account's files are drawn, never downloaded, so there's nothing to copy, and
+    /// it writes nowhere.
+    fn save(&mut self, _chat: &str, _message: &str, _to: &str) {
+        self.defer(|a| a.send(Update::Notice("not saved: the made-up account's files aren't real".into())));
+    }
+
     fn start_chat(&mut self, person: &str) {
         let person = person.to_string();
         self.defer(move |a| a.on_start_chat(&person));

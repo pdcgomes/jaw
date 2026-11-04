@@ -1192,6 +1192,8 @@ pub enum Update {
     Recorded(Recorded),
     /// How far a file on its way has got.
     Job(Job),
+    /// jawd saved a message's file, as asked, to this path.
+    Saved(String),
     /// jawd turned down something asked of voice, and why.
     VoiceRefused(String),
     /// The folder tree: rows changed or gone, or with `whole` every row; and the favourite slots
@@ -1411,6 +1413,9 @@ pub trait Jawd {
     fn send_media(&mut self, chat: &str, files: &[String], caption: &str, hd: bool, key: &str, reply: Option<&str>);
     /// Stops a file of yours on its way, which fails until it's retried.
     fn media_cancel(&mut self, chat: &str, message: &str);
+    /// Saves a message's file to `to`, a folder or a file's path, whole or from `~/`, downloading
+    /// it first if it isn't here; where it went comes as `Update::Saved`, and why not as a notice.
+    fn save(&mut self, chat: &str, message: &str, to: &str);
     /// Mutes a chat until then, `i64::MAX` for ever, or unmutes it with `None`.
     fn mute(&mut self, chat: &str, until: Option<i64>);
     fn archive(&mut self, chat: &str, archived: bool);

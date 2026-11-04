@@ -138,6 +138,10 @@ pub enum Mode {
     Vote {
         message: String,
     },
+    /// Where to save a message's file: what's typed is a folder or a file's path.
+    Save {
+        message: String,
+    },
     /// Filing a chat or a person: the folders ticked, those it was in, and a folder being made to
     /// tick once jawd has made it.
     File {
@@ -671,6 +675,9 @@ impl View {
                 on("This message's info", "i", 'i'),
                 on("Copy this message", "y", 'y'),
             ]);
+            if super::save::has_file(m) {
+                all.push(on("Save this message's file", "s", 's'));
+            }
         }
         all.push(Action::new("New folder", "at the top of the tree", Does::NewFolder(None)));
         if let Some(f) = self.folder(&self.folder).filter(|f| f.yours()) {
@@ -797,6 +804,7 @@ impl View {
         }
         match &p.mode {
             Mode::Vote { message } => return self.vote_items(message),
+            Mode::Save { message } => return self.save_items(message),
             Mode::File { name, ticked, .. } => {
                 let mut items = vec![Item::Heading("file into", fmt::fit(name, 48))];
                 for (id, depth) in self.your_folders() {
@@ -1025,6 +1033,12 @@ impl View {
             }
             (Mode::Vote { .. }, KeyCode::Char(_)) if !ctrl && !alt => return,
             (Mode::Vote { .. }, KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace) => return,
+            (Mode::Save { .. }, KeyCode::Tab) => {
+                self.save_tab();
+                return;
+            }
+            (Mode::Save { .. }, KeyCode::BackTab) => return,
+            (Mode::Save { .. }, KeyCode::Backspace) if p.query.is_empty() => return,
             (Mode::File { .. }, KeyCode::Char(' ')) => {
                 let at = p.selected;
                 if let Some((id, _)) = self.your_folders().get(at).cloned() {
@@ -1204,6 +1218,7 @@ impl View {
     pub fn palette_act(&mut self) {
         match self.palette.as_ref().map(|p| &p.mode) {
             Some(Mode::Attach { .. }) => return self.attach_act(),
+            Some(Mode::Save { .. }) => return self.save_go(),
             Some(Mode::Forward { .. }) => return self.forward_go(),
             Some(Mode::Contact { .. }) => return self.contact_go(),
             Some(Mode::File { .. }) => return self.file_go(),
@@ -1605,6 +1620,7 @@ impl View {
                 (" vote ", " ⏎ or its number adds it or takes it off · esc closes ")
             }
             Mode::Vote { .. } => (" vote ", " ⏎ or its number votes · again takes it back · esc closes "),
+            Mode::Save { .. } => (" save ", " tab completes a folder · ⏎ saves it there · esc closes "),
             Mode::Contact { .. } => (" contact ", " ↑↓ moves · ⏎ sends their card · esc closes "),
             Mode::Card { .. } => (" card ", " ↑↓ moves · ⏎ starts a chat · esc closes "),
             Mode::Attach { .. } => (" attach ", " tab completes a folder or picks a file · ⏎ attaches · esc closes "),
@@ -1657,6 +1673,8 @@ impl View {
                 "a chat to forward to"
             } else if let Mode::Attach { .. } = p.mode {
                 "a file's path, from / or ~/"
+            } else if let Mode::Save { .. } = p.mode {
+                "a folder, or a file's path, from / or ~/"
             } else if p.scope.is_some() {
                 "words said in this chat"
             } else {
@@ -1672,7 +1690,7 @@ impl View {
         let right = match (&p.failed, p.answered) {
             (Some(_), _) => String::new(),
             (None, false) => "finding… ".into(),
-            (None, true) if text.is_empty() => String::new(),
+            (None, true) if text.is_empty() || matches!(p.mode, Mode::Save { .. }) => String::new(),
             (None, true) => format!("{} found ", count(found)),
         };
         let mut line = fit_spans(query, iw.saturating_sub(right.chars().count()));

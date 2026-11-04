@@ -12,6 +12,7 @@ mod library;
 mod palette;
 mod panes;
 mod quick_look;
+mod save;
 mod settings;
 mod sidebar;
 mod status_line;
@@ -701,6 +702,7 @@ impl View {
             Update::Playback(p) => self.on_playback(p),
             Update::Recorded(r) => self.on_recorded(r),
             Update::Job(job) => self.on_job(job),
+            Update::Saved(path) => self.say(save::said_saved(&path)),
             Update::VoiceRefused(why) => self.voice_refused(why),
             Update::Members { chat, members } => self.on_members(chat, members),
             Update::Folders { upsert, remove, whole, favourites } => {

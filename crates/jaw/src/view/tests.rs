@@ -213,7 +213,7 @@ fn single_keys_act_on_the_selected_message_and_others_type() {
     press(&mut v, &rx, "<up>y");
     assert_eq!(v.take_effects(), [Effect::Copy("vens jantar sexta? a tua mãe pergunta".into())]);
     press(&mut v, &rx, "s");
-    assert!(frame(&mut v).contains("saving files comes later"), "a key for later says so");
+    assert!(frame(&mut v).contains("there's no file to save in this one"), "a key that can't act says why");
     press(&mut v, &rx, "<up>\n");
     assert!(frame(&mut v).contains("there's nothing to open in this one"));
     press(&mut v, &rx, "ok");
@@ -1868,6 +1868,35 @@ fn on_a_selected_poll_one_to_six_still_react_and_the_palette_votes_in_it() {
     assert!(frame(&mut v).contains("Vote in this poll"));
     press(&mut v, &rx, "\n1");
     assert!(shown_poll(&v).unwrap().poll.unwrap().options[0].mine, "{}", frame(&mut v));
+}
+
+#[test]
+fn s_asks_where_to_save_a_file_from_downloads_tab_completes_a_folder_and_the_made_up_account_saves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Fotos")).unwrap();
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "<up>s");
+        assert!(frame(&mut v).contains("there's no file to save in this one"), "at {width}");
+        let photo = v.messages.as_ref().unwrap().rows().find(|m| m.kind == Kind::Image).cloned().unwrap();
+        v.focus = Focus::Message(photo.id.clone());
+        assert!(v.hints().contains(&("s", "save", true)), "{:?}", v.hints());
+        press(&mut v, &rx, "s");
+        let screen = frame(&mut v);
+        assert!(screen.contains("╭ save ") && screen.contains("› ~/Downloads/"), "at {width}:\n{screen}");
+        assert!(screen.contains("tab completes a folder · ⏎ saves it there") && !screen.contains("found"), "{screen}");
+        press(&mut v, &rx, &format!("<c-u>{}/fo<tab>", dir.path().display()));
+        let typed = v.palette.as_ref().map(|p| p.query.text().to_string()).unwrap_or_default();
+        assert!(typed.ends_with("/Fotos/"), "{typed}");
+        press(&mut v, &rx, "\n");
+        let screen = frame(&mut v);
+        assert!(screen.contains("not saved: the made-up account's files aren't real"), "{screen}");
+        press(&mut v, &rx, "<c-k>save");
+        assert!(frame(&mut v).contains("Save this message's file"));
+        press(&mut v, &rx, "\n");
+        assert!(frame(&mut v).contains("╭ save "), "the palette's entry asks where too");
+        press(&mut v, &rx, "<esc>");
+    }
 }
 
 #[test]
