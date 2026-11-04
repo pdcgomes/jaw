@@ -18,6 +18,7 @@ use super::{OUTGOING, UPLOADS};
 use crate::engine::demo::{self, DemoEngine, Picture, Replies, World};
 use crate::engine::supervisor::{Backoff, Supervisor};
 use crate::send::{Makers, Sending, Timing};
+use crate::store::expiry::tests::{bytes_gone_but_for, free_holding, settled, several_of_each, still_found};
 use crate::store::{Amend, Amendment, Chat, Lane, read};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
@@ -538,6 +539,74 @@ async fn an_album_of_yours_sent_with_a_timer_goes_at_its_time_once_whatsapp_has_
             answered_from + day,
             answered_by + day,
         );
+    }
+}
+
+/// A captioned document of yours goes by the timer it went with, counted from when WhatsApp has it,
+/// as a text does (round three's D1), though that timer goes inside the wrapper a captioned
+/// document is sent in (round four's T9): one sent while its chat had no timer, the timer set to a
+/// day before WhatsApp answers, has no time to go, so the timer erases nothing of it a day after;
+/// one sent with a day's timer, the timer turned off before the answer, goes a day after it, and
+/// erased then, its caption is in no page but those free before and not in the WAL. Among thirty
+/// captioned photos and thirty messages with links.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_captioned_document_of_yours_goes_by_the_timer_it_went_with_not_the_one_its_chat_has_once_the_server_has_it()
+{
+    let day = 86_400_000;
+    for (went_with, set_before_answer) in [(0u32, 86_400u32), (86_400, 0)] {
+        let home = tempfile::tempdir().unwrap();
+        let picked = tempfile::tempdir().unwrap();
+        let rig = Rig::on(home.path(), world()).await;
+        let timer = Chat { id: ANA.into(), ephemeral: Some(went_with), ephemeral_at: Some(1_000), ..Chat::default() };
+        let mut changes = several_of_each();
+        changes.push(Change::Chat(timer));
+        rig.store.apply(Lane::Live, changes).await.unwrap();
+        rig.store.indexed().await.unwrap();
+        let plans = picked.path().join("plans.pdf");
+        std::fs::write(&plans, b"%PDF-1.7\n% the plans for Sunday\n").unwrap();
+        rig.world.gate(true);
+        let files = json!([{ "path": plans, "caption": "the quokkaplans for Sunday" }]);
+        let answer = rig.call("send.media", json!({ "chat": ANA, "files": files })).await.unwrap();
+        let id = answer["messages"][0].as_str().unwrap().to_string();
+        rig.call("chat.disappearing", json!({ "chat": ANA, "seconds": set_before_answer })).await.unwrap();
+        let answered_from = now_ms();
+        rig.world.gate(false);
+        rig.until(&id, "sent", sent).await;
+        let answered_by = now_ms();
+        let [went] = rig.sent(&id).try_into().unwrap();
+        let document = went.document_with_caption_message.and_then(|wrapper| wrapper.message);
+        let document = document.and_then(|inner| inner.document_message).expect("it goes inside its wrapper");
+        let carried = document.context_info.as_ref().and_then(|info| info.expiration);
+        assert_eq!(carried.unwrap_or(0), went_with, "it went with the timer its chat had when it was sent");
+        let looked_up = id.clone();
+        let (n, expires_at): (i64, Option<i64>) = rig
+            .query(move |db| {
+                Ok(db.query_row("SELECT n, expires_at FROM messages WHERE id = ?1", [&looked_up], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?)
+            })
+            .await;
+        if went_with == 0 {
+            assert_eq!(expires_at, None, "it went without a timer, so it stays, whatever its chat's is now");
+            let timer = Change::Expire { n, at: answered_by + day };
+            let erased = rig.store.apply(Lane::Background, vec![timer]).await.unwrap();
+            assert_eq!(erased.changed, 0, "a day after WhatsApp had it, the timer has nothing of it to erase");
+            assert_eq!(rig.row(&id).await["kind"], "document", "and it's still there");
+            continue;
+        }
+        let at = expires_at.expect("it goes, though its chat's timer is off now");
+        assert!(
+            (answered_from + day..=answered_by + day).contains(&at),
+            "it goes a day after WhatsApp had it: {at} not in {}..={}",
+            answered_from + day,
+            answered_by + day,
+        );
+        let before = free_holding(&rig.store, &rig.home, b"quokkaplans").await;
+        let erased = rig.store.apply(Lane::Background, vec![Change::Expire { n, at }]).await.unwrap();
+        assert_eq!(erased.changed, 1, "at its time it's erased");
+        settled(&rig.store).await;
+        bytes_gone_but_for(&rig.home, b"quokkaplans", &before, "its caption, once it's erased");
+        still_found(&rig.store, "once it's erased").await;
     }
 }
 

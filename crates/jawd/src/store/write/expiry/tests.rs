@@ -1897,18 +1897,49 @@ async fn the_voices_backfill_reading_a_disappearing_voice_note_again_leaves_noth
 /// time to go once it gets there, is taken as an erasure takes it, whatever takes it away first
 /// (round three's I7): deleted for you, or revoked. Its words and its link's leave every index's
 /// segments and no page freed since keeps them; the outbox row that still sends it holds them until
-/// WhatsApp has it, and then goes as an erasure does too. Among thirty captioned photos and thirty
-/// messages with links.
+/// WhatsApp has it, and then goes as an erasure does too. So does a captioned document of yours,
+/// whose timer goes inside the wrapper it's sent in (round four's T9). Among thirty captioned photos
+/// and thirty messages with links.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_of_yours_waiting_to_go_with_a_timer_deleted_or_revoked_leaves_nothing_of_what_it_said() {
-    let goes_as = e2e::Message {
+    let timer = || Some(Box::new(e2e::ContextInfo { expiration: Some(86_400), ..Default::default() }));
+    let text = e2e::Message {
         extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
             text: Some("see https://gnuwaiting.example".into()),
-            context_info: Some(Box::new(e2e::ContextInfo { expiration: Some(86_400), ..Default::default() })),
+            context_info: timer(),
             ..Default::default()
         })),
         ..Default::default()
     };
+    let document = e2e::Message {
+        document_with_caption_message: Some(Box::new(e2e::FutureProofMessage {
+            message: Some(Box::new(e2e::Message {
+                document_message: Some(Box::new(e2e::DocumentMessage {
+                    file_name: Some("plans.pdf".into()),
+                    caption: Some("the quokkawaiting plans".into()),
+                    context_info: timer(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+        })),
+        ..Default::default()
+    };
+    // As the converter keeps a captioned document: its caption, then its name.
+    let document_row =
+        Message { kind: "document", ..message(ANA, "mine", AT + 90, "the quokkawaiting plans\nplans.pdf", None) };
+    let all = ["messages_fts", "links_fts", "library_fts"];
+    let messages = [
+        ("a text", "text", "gnuwaiting", text, linked("mine", "gnuwaiting", 90), &all[..]),
+        (
+            "a captioned document",
+            "document",
+            "quokkawaiting",
+            document,
+            document_row,
+            &["messages_fts", "library_fts"][..],
+        ),
+    ];
     let gone = |what: Amendment| {
         Change::Amend(Amend {
             chat: ANA.into(),
@@ -1920,51 +1951,48 @@ async fn a_message_of_yours_waiting_to_go_with_a_timer_deleted_or_revoked_leaves
             raw: None,
         })
     };
-    let cases = [
-        ("a deletion for you", Change::DeleteMessage { chat: ANA.into(), id: "mine".into() }),
-        ("a revoke", gone(Amendment::Revoke)),
-    ];
-    for (what, change) in cases {
-        let home = tempfile::tempdir().unwrap();
-        let store = Store::open(home.path()).unwrap();
-        let mine = Message {
-            sender: None,
-            mine: true,
-            status: Some("pending"),
-            expires_at: None,
-            ..linked("mine", "gnuwaiting", 90)
-        };
-        let step = Step::Enqueue {
-            message: Box::new(mine),
-            kind: "text",
-            raw: goes_as.encode_to_vec(),
-            key: None,
-            written: Written::default(),
-        };
-        let mut changes = several_of_each();
-        changes.push(Change::Outbox(step));
-        apply(&store, changes).await;
-        store.indexed().await.unwrap();
-        let blocks = index_blocks(home.path(), "gnuwaiting");
-        assert!(blocks.iter().all(|(_, held)| *held > 0), "{what}: its words are in every index: {blocks:?}");
-        let before = free_holding(&store, home.path(), b"gnuwaiting").await;
-        assert_eq!(apply(&store, vec![change]).await.changed, 1, "{what}");
-        settled(&store).await;
-        let blocks: Vec<_> =
-            index_blocks(home.path(), "gnuwaiting").into_iter().filter(|(_, held)| *held > 0).collect();
-        assert!(blocks.is_empty(), "{what}: its words are left in {blocks:?}");
-        let left: Vec<_> = pages_holding(home.path(), b"gnuwaiting")
-            .into_iter()
-            .filter(|(page, owner)| owner.as_deref() != Some("outbox") && !before.contains(page))
-            .collect();
-        assert!(left.is_empty(), "{what}: left but in the outbox row that sends it: {left:?}");
-        still_found(&store, what).await;
-        let outbox: i64 =
-            query(&store, |db| Ok(db.query_row("SELECT n FROM outbox WHERE id = 'mine'", [], |r| r.get(0))?)).await;
-        apply(&store, vec![Change::Outbox(Step::Sent { outbox })]).await;
-        settled(&store).await;
-        assert_eq!(store.count("outbox").unwrap(), 0, "{what}: WhatsApp has it");
-        gone_but_for(home.path(), "gnuwaiting", &before, &format!("{what}, once WhatsApp has it"));
+    for (sent, kind, word, goes_as, row, indexes) in messages {
+        let cases = [
+            ("a deletion for you", Change::DeleteMessage { chat: ANA.into(), id: "mine".into() }),
+            ("a revoke", gone(Amendment::Revoke)),
+        ];
+        for (way, change) in cases {
+            let what = format!("{sent}, {way}");
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let mine = Message { sender: None, mine: true, status: Some("pending"), expires_at: None, ..row.clone() };
+            let step = Step::Enqueue {
+                message: Box::new(mine),
+                kind,
+                raw: goes_as.encode_to_vec(),
+                key: None,
+                written: Written::default(),
+            };
+            let mut changes = several_of_each();
+            changes.push(Change::Outbox(step));
+            apply(&store, changes).await;
+            store.indexed().await.unwrap();
+            let blocks = index_blocks(home.path(), word);
+            let held: Vec<_> = blocks.iter().filter(|(_, held)| *held > 0).map(|(index, _)| *index).collect();
+            assert_eq!(held, indexes, "{what}: its words are in the indexes that hold its kind's: {blocks:?}");
+            let before = free_holding(&store, home.path(), word.as_bytes()).await;
+            assert_eq!(apply(&store, vec![change]).await.changed, 1, "{what}");
+            settled(&store).await;
+            let blocks: Vec<_> = index_blocks(home.path(), word).into_iter().filter(|(_, held)| *held > 0).collect();
+            assert!(blocks.is_empty(), "{what}: its words are left in {blocks:?}");
+            let left: Vec<_> = pages_holding(home.path(), word.as_bytes())
+                .into_iter()
+                .filter(|(page, owner)| owner.as_deref() != Some("outbox") && !before.contains(page))
+                .collect();
+            assert!(left.is_empty(), "{what}: left but in the outbox row that sends it: {left:?}");
+            still_found(&store, "the others").await;
+            let outbox: i64 =
+                query(&store, |db| Ok(db.query_row("SELECT n FROM outbox WHERE id = 'mine'", [], |r| r.get(0))?)).await;
+            apply(&store, vec![Change::Outbox(Step::Sent { outbox })]).await;
+            settled(&store).await;
+            assert_eq!(store.count("outbox").unwrap(), 0, "{what}: WhatsApp has it");
+            gone_but_for(home.path(), word, &before, &format!("{what}, once WhatsApp has it"));
+        }
     }
 }
 
