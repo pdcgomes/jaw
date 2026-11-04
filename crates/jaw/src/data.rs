@@ -287,6 +287,8 @@ pub struct Message {
     pub edited: bool,
     #[serde(default)]
     pub deleted: bool,
+    #[serde(default)]
+    pub starred: bool,
     /// One line for a kind the interface doesn't draw yet, such as "▣ photo".
     #[serde(default)]
     pub summary: Option<String>,
@@ -1379,6 +1381,8 @@ pub trait Jawd {
     /// Votes in poll `message` for `options`, by name, or with none takes your vote back, under
     /// `key`, made for this vote alone, which `Update::Acted` names when jawd answers for it.
     fn vote(&mut self, chat: &str, message: &str, options: &[String], key: &str);
+    /// Stars a message, or takes its star off; its row comes back with it.
+    fn star(&mut self, chat: &str, message: &str, starred: bool);
     /// Asks for the receipts of a message in `chat`; they come as `Update::Info`.
     fn message_info(&mut self, chat: &str, message: &str);
     /// Asks for a chat's members; they come as `Update::Members`.

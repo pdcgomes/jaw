@@ -569,6 +569,7 @@ impl Account {
             status,
             edited: false,
             deleted: false,
+            starred: false,
             summary: None,
             system: None,
             media: None,
@@ -1004,6 +1005,11 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_vote(&message, &options, &key));
     }
 
+    fn star(&mut self, _chat: &str, message: &str, starred: bool) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_star(&message, starred));
+    }
+
     fn message_info(&mut self, _chat: &str, message: &str) {
         let message = message.to_string();
         self.defer(move |a| a.on_message_info(&message));
@@ -1275,6 +1281,7 @@ impl Writing {
             status: from.is_none().then_some(Tick::Read),
             edited: false,
             deleted: false,
+            starred: false,
             summary: None,
             system: None,
             media: None,

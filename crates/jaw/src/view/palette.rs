@@ -669,6 +669,9 @@ impl View {
             if self.not_editable(m).is_none() {
                 all.push(on("Edit this message", "e", 'e'));
             }
+            if let Some(star) = super::actions::starring(m) {
+                all.push(on(if star { "Star this message" } else { "Unstar this message" }, "*", '*'));
+            }
             all.extend([
                 on("Delete this message", "d", 'd'),
                 on("Forward this message", "f", 'f'),
@@ -792,7 +795,8 @@ impl View {
                 Some(a)
             })
             .collect();
-        found.sort_by_key(|a| std::cmp::Reverse(a.score));
+        // Among equals the selected message's own come first: "star" means it before Start a chat.
+        found.sort_by_key(|a| (std::cmp::Reverse(a.score), !matches!(a.does, Does::OnMessage(..) | Does::Votes(_))));
         found
     }
 

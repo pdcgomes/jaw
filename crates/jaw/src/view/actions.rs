@@ -1,10 +1,10 @@
 //! M2's message actions from the selected message: r replies, e edits, d deletes, + and 1 to 6
-//! react, f forwards, i shows the info, and Enter opens a link or a file, starts a chat with
-//! whoever a contact card shares, or opens a poll's options to vote with (`vote`). Each asks jawd
-//! and shows what jawd pushes back (an edited row, a deleted one, the reactions, a vote), never a
-//! guess of its own. @ in a group's box completes its
-//! members, and what's taken goes as a real mention. A card of yours is made from a person's name
-//! and number, as a vCard 3.0.
+//! react, * stars, f forwards, i shows the info, s saves its file (`save`), and Enter opens a link
+//! or a file, starts a chat with whoever a contact card shares, or opens a poll's options to vote
+//! with (`vote`). Each asks jawd and shows what jawd pushes back (an edited row, a deleted one, the
+//! reactions, a star, a vote), never a guess of its own. @ in a group's box completes its members,
+//! and what's taken goes as a real mention. A card of yours is made from a person's name and
+//! number, as a vCard 3.0.
 
 use super::{Focus, Overlay, View};
 use crate::data::{Kind, Member, Message, MessageInfo, SpanKind};
@@ -85,6 +85,12 @@ pub fn card_numbers(m: &Message) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// What * does to a message: stars it (true), takes its star off (false), or nothing, for a line
+/// about the chat or a deleted message without a star.
+pub fn starring(m: &Message) -> Option<bool> {
+    (!matches!(m.kind, Kind::System | Kind::Call) && (!m.deleted || m.starred)).then_some(!m.starred)
 }
 
 /// A message's text, or what it is, on one line.
@@ -182,6 +188,22 @@ impl View {
         let bare = |e: &str| e.replace('\u{fe0f}', "");
         let mine = m.reactions.iter().any(|r| r.mine && bare(&r.emoji) == bare(emoji));
         self.jawd.react(&chat, &m.id, if mine { "" } else { emoji });
+    }
+
+    /// *: the message starred, or its star taken off, which its row shows once jawd has it. A line
+    /// about the chat can't be starred, nor a deleted message, though a star can always come off.
+    pub(super) fn star(&mut self, m: &Message) {
+        if matches!(m.kind, Kind::System | Kind::Call) {
+            self.say("a line about the chat can't be starred");
+            return;
+        }
+        if m.deleted && !m.starred {
+            self.say("a deleted message can't be starred");
+            return;
+        }
+        let Some(chat) = self.open.clone() else { return };
+        self.jawd.star(&chat, &m.id, !m.starred);
+        self.say(if m.starred { "unstarred" } else { "starred" });
     }
 
     /// i: the sheet of who has it and who's read it, asked of jawd.

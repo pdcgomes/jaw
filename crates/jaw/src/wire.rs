@@ -862,6 +862,11 @@ impl Jawd for Wire {
         self.act("poll.vote", chat, json!({ "message": message, "options": options, "key": key }), "voting", None);
     }
 
+    fn star(&mut self, chat: &str, message: &str, starred: bool) {
+        let what = if starred { "starring" } else { "taking a star off" };
+        self.ask("star", json!({ "message": message, "starred": starred, "chat": chat }), Asked::Did(what));
+    }
+
     fn message_info(&mut self, chat: &str, message: &str) {
         self.ask("message.info", json!({ "message": message, "chat": chat }), Asked::Info(message.to_string()));
     }

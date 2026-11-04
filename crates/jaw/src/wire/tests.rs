@@ -206,6 +206,14 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             }
             json!({})
         }
+        "star" if params["starred"] == true && kept.deleting.iter().any(|d| params["message"] == d.as_str()) => {
+            return error(code::NOT_ALLOWED, "it's being deleted for everyone, so it can't be starred", Value::Null);
+        }
+        "star" => {
+            let starred = params["starred"].clone();
+            push = changed(&mut kept, &params["message"], |row| row["starred"] = starred);
+            json!({})
+        }
         "media.save" if kept.gone.iter().any(|g| params["message"] == g.as_str()) => {
             let why = "jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
             return error(code::NOT_ALLOWED, why, Value::Null);
@@ -1659,6 +1667,31 @@ fn a_vote_jawd_turns_down_says_jawds_reason_and_the_next_goes_by_the_poll_as_jaw
     run::press_live(&mut v, &rx, "\n2").unwrap();
     assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
     assert_eq!(votes(&jawd)[1], json!(["Tasca do Chico"]), "not taken back, as the vote turned down would have it");
+}
+
+#[test]
+fn a_star_and_an_unstar_go_with_the_message_and_its_chat_and_the_chat_shows_the_star_once_jawd_has_it() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up><up>*").unwrap();
+    let screen = until(&mut v, &rx, "★");
+    assert!(said(&screen, "from Sunday?").contains("from Sunday?  ★"), "after the message, as edited is:\n{screen}");
+    run::press_live(&mut v, &rx, "*").unwrap();
+    assert!(until_true(&mut v, &rx, |v| !frame(v).contains('★')), "{}", frame(&mut v));
+    let starred = |on: bool| json!({ "message": HERS, "starred": on, "chat": ANA });
+    assert_eq!(jawd.asked("star"), [starred(true), starred(false)], "each with its chat, and no key");
+}
+
+#[test]
+fn a_star_jawd_turns_down_says_jawds_reason_and_shows_none() {
+    let jawd = scripted();
+    jawd.kept.lock().unwrap().deleting.push(VOICE.into());
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>*").unwrap();
+    let screen = until(&mut v, &rx, "can't be starred");
+    assert!(screen.contains("it's being deleted for everyone, so it can't be starred"), "in the footer:\n{screen}");
+    assert!(!screen.contains('★'), "{screen}");
+    assert_eq!(jawd.asked("star"), [json!({ "message": VOICE, "starred": true, "chat": ANA })]);
 }
 
 /// Ana's photo, newest in her chat, which jawd has.

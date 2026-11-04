@@ -136,7 +136,7 @@ The Mac draws someone typing as WhatsApp does (0de10c7): a bubble after the newe
 
 ### 3.2 Chat actions and stars
 
-Both interfaces already send `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread`; jawd's side is being built on `chat-actions` (P8). There's nothing for the Mac to build for the four: the Chat menu sends them, and so do `mac-menus`' right-click menus. Once jawd's step lands, each is tried end to end on `jawd demo` (three pins at most, archiving unpinning, muting for ever as -1, marking read sending receipts), and Star comes into a message's menu (`mac-menus` task 7). Starring isn't the terminal's yet; that's for its builders to decide.
+Both interfaces already send `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread`; jawd's side is being built on `chat-actions` (P8). There's nothing for the Mac to build for the four: the Chat menu sends them, and so do `mac-menus`' right-click menus. Once jawd's step lands, each is tried end to end on `jawd demo` (three pins at most, archiving unpinning, muting for ever as -1, marking read sending receipts), and Star comes into a message's menu (`mac-menus` task 7). The terminal stars with * since `terminal-actions` (4 November), "starred" with ★ after the message, so `star` is this step's row in the list until task 7 lands.
 
 ### 3.3 Links and polls
 

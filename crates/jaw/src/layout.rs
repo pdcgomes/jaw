@@ -563,8 +563,12 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     }
     let room = if m.reply.is_some() { text_w } else { first_w };
     segments.extend(body(m, shape, room, ctx));
-    if m.edited && !m.deleted {
-        segments.push(("  edited".into(), Style::new().fg(t.comment)));
+    let marks: Vec<&str> = [(m.starred, "★"), (m.edited && !m.deleted, "edited")]
+        .into_iter()
+        .filter_map(|(on, said)| on.then_some(said))
+        .collect();
+    if !marks.is_empty() {
+        segments.push((format!("  {}", marks.join(" ")), Style::new().fg(t.comment)));
     }
     let mut wrapped = wrap(&segments, first_w, text_w);
     let folded = !shape.unfolded && wrapped.len() > FOLD;
@@ -671,6 +675,7 @@ mod tests {
             status: None,
             edited: false,
             deleted: false,
+            starred: false,
             summary: None,
             system: None,
             media: None,
@@ -803,6 +808,19 @@ mod tests {
         assert_eq!(fmt::width(&lines[0]), 60);
         assert_eq!(lines[1], "      eu levo o vinho  edited");
         assert_eq!(lines[2], "       ❤ 2");
+    }
+
+    #[test]
+    fn a_star_follows_the_message_before_edited_and_stays_on_one_deleted_whose_star_can_come_off() {
+        let mut m = theirs("eu levo o vinho");
+        m.starred = true;
+        let line = &lay(&m, 60)[0];
+        assert!(line.starts_with("Ana   eu levo o vinho  ★ ") && line.ends_with("  13:58"), "{line}");
+        assert_eq!(fmt::width(line), 60);
+        m.edited = true;
+        assert!(lay(&m, 60)[0].starts_with("Ana   eu levo o vinho  ★ edited  "), "{:?}", lay(&m, 60));
+        m.deleted = true;
+        assert!(lay(&m, 60)[0].starts_with("Ana   ⊘ This message was deleted  ★  "), "{:?}", lay(&m, 60));
     }
 
     #[test]

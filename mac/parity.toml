@@ -15,6 +15,7 @@
 "voice.stop" = "2.7"
 "voice.send" = "2.7"
 "voice.cancel" = "2.7"
+"star" = "3.2"
 "settings.set" = "3.5"
 
 [pushes]

@@ -79,6 +79,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         status: None,
         edited: false,
         deleted: false,
+        starred: false,
         summary: None,
         system: None,
         media: None,
@@ -257,7 +258,7 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     let screen = frame(&mut v);
     assert!(screen.contains("╭ keys ─") && screen.contains("any key closes"), "{screen}");
     let save = screen.lines().find(|l| l.contains("attach files")).unwrap();
-    assert!(save.contains("s          save"), "{screen}");
+    assert!(save.contains("s  *       save its file, star it"), "{screen}");
     assert!(screen.contains("⏎          open, play, unfold, vote"), "{screen}");
     assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
     press(&mut v, &rx, "?");
@@ -1868,6 +1869,44 @@ fn on_a_selected_poll_one_to_six_still_react_and_the_palette_votes_in_it() {
     assert!(frame(&mut v).contains("Vote in this poll"));
     press(&mut v, &rx, "\n1");
     assert!(shown_poll(&v).unwrap().poll.unwrap().options[0].mine, "{}", frame(&mut v));
+}
+
+#[test]
+fn star_stars_the_selected_message_which_then_shows_it_and_again_takes_it_off() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "<up>");
+        assert!(v.hints().contains(&("*", "star", true)), "{:?}", v.hints());
+        press(&mut v, &rx, "*");
+        let screen = frame(&mut v);
+        assert!(line_with(&screen, "a tua mãe pergunta").contains("pergunta  ★"), "at {width}:\n{screen}");
+        assert!(newest(&v).starred && v.hints().contains(&("*", "unstar", true)), "{:?}", v.hints());
+        press(&mut v, &rx, "*");
+        let screen = frame(&mut v);
+        assert!(!screen.contains('★') && !newest(&v).starred, "at {width}:\n{screen}");
+        press(&mut v, &rx, "<c-k>star");
+        assert!(frame(&mut v).contains("Star this message"));
+        press(&mut v, &rx, "\n");
+        assert!(newest(&v).starred, "the palette stars it too");
+    }
+}
+
+#[test]
+fn a_line_about_the_chat_and_a_deleted_message_cant_be_starred_and_say_why() {
+    let (mut v, rx) = view(140, 40);
+    let open = v.open.clone().unwrap();
+    let mut line = theirs("line", "9999999999999~1", NOW, "");
+    (line.kind, line.from, line.system) = (Kind::System, None, Some("Ana changed her number".into()));
+    let mut gone = theirs("gone", "9999999999999~2", NOW, "");
+    gone.deleted = true;
+    arrive(&mut v, &open, vec![line, gone]);
+    v.focus = Focus::Message("line".into());
+    assert!(v.hints().contains(&("*", "star", false)), "{:?}", v.hints());
+    press(&mut v, &rx, "*");
+    assert!(frame(&mut v).contains("a line about the chat can't be starred"));
+    v.focus = Focus::Message("gone".into());
+    press(&mut v, &rx, "*");
+    assert!(frame(&mut v).contains("a deleted message can't be starred"));
 }
 
 #[test]

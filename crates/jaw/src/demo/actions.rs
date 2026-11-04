@@ -1,7 +1,8 @@
 //! The made-up account's answers to M2's message actions, as jawd would push them: a reply's
 //! quote and its mentions in the row it sends, one reaction of yours per message, edits for 15
 //! minutes and deletes for everyone for 60 hours, forwards as new messages of yours, contact cards
-//! of yours, votes counted as jawd counts them, each recipient's receipts, and a chat's members.
+//! of yours, votes counted as jawd counts them, stars, each recipient's receipts, and a chat's
+//! members.
 
 use super::{Account, Later, ME, markup};
 use crate::data::{
@@ -375,6 +376,24 @@ impl Account {
         }
         self.changed(t, i);
         self.send(Update::Acted { key: key.to_string(), said: None });
+    }
+
+    /// A star put on a message or taken off, as jawd does, but on a line about the chat or a
+    /// deleted message, which it refuses in its words.
+    pub(super) fn on_star(&mut self, message: &str, starred: bool) {
+        let Some((t, i)) = self.locate(message) else { return };
+        let m = &self.threads[t].messages[i];
+        let why = match m.kind {
+            Kind::System | Kind::Call => Some("a line about the chat can't be starred"),
+            _ if m.deleted && starred => Some("a deleted message can't be starred"),
+            _ => None,
+        };
+        if let Some(why) = why {
+            self.send(Update::Notice(why.into()));
+            return;
+        }
+        self.threads[t].messages[i].starred = starred;
+        self.changed(t, i);
     }
 
     pub(super) fn on_message_info(&mut self, message: &str) {

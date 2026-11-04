@@ -385,6 +385,7 @@ impl View {
             KeyCode::Char('e') => self.edit(&m),
             KeyCode::Char('d') => self.palette_delete(&m),
             KeyCode::Char('+') => self.palette_react(&m),
+            KeyCode::Char('*') => self.star(&m),
             KeyCode::Char(c @ '1'..='6') => self.react_quick(&m, c as usize - '1' as usize),
             KeyCode::Char('f') => self.palette_forward(&m),
             KeyCode::Char('i') => self.info(&m),
