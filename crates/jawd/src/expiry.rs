@@ -243,9 +243,12 @@ async fn wait(
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
     use rusqlite::OptionalExtension;
+    use wa_proto::wa_web_protobufs_e2e as e2e;
 
     use super::*;
+    use crate::store::outbox::{Step, Written};
     use crate::store::{Lane, Message};
 
     const ANA: &str = "351910000002@s.whatsapp.net";
@@ -305,6 +308,52 @@ mod tests {
         let status = expiry.status(&store);
         assert_eq!((status.expiring, status.erased), (1, 1));
         assert!(status.next.is_some_and(|next| next > now_ms() + 50_000), "{status:?}");
+    }
+
+    /// A message of yours that goes with a timer is given its time to go once WhatsApp has it,
+    /// which wakes the timer as any sooner time committed does, so it goes then with nothing else
+    /// committed (round four's T8): waiting for a later message, the timer would sleep on to that.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_of_yours_given_its_time_once_whatsapp_has_it_wakes_the_timer_and_goes_at_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        store.apply(Lane::Live, vec![Change::Message(message("later", now_ms() + 3_600_000))]).await.unwrap();
+        // It goes a second after WhatsApp has it, as the timer it goes with says.
+        let goes_as = e2e::Message {
+            extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+                text: Some("gone a second after it went".into()),
+                context_info: Some(Box::new(e2e::ContextInfo { expiration: Some(1), ..Default::default() })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mine =
+            Message { sender: None, mine: true, status: Some("pending"), expires_at: None, ..message("mine", 0) };
+        let enqueue = Step::Enqueue {
+            message: Box::new(mine),
+            kind: "text",
+            raw: goes_as.encode_to_vec(),
+            key: None,
+            written: Written::default(),
+        };
+        store.apply(Lane::Live, vec![Change::Outbox(enqueue)]).await.unwrap();
+        let expiry = start(store.clone());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let outbox: i64 = store
+            .reads()
+            .query(Priority::Interactive, |db| Ok(db.query_row("SELECT n FROM outbox", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        let answered = now_ms();
+        store.apply(Lane::Live, vec![Change::Outbox(Step::Sent { outbox })]).await.unwrap();
+        assert!(gone(&store, "mine", Duration::from_secs(10)).await, "the timer slept on to the later one");
+        assert!(now_ms() >= answered + 1_000, "it went no sooner than a second after WhatsApp had it");
+        assert!(there(&store, "later").await);
+        let until = Instant::now() + Duration::from_secs(5);
+        while expiry.status(&store).erased < 1 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(expiry.status(&store).erased, 1, "the timer erased it");
     }
 
     #[tokio::test(flavor = "multi_thread")]
