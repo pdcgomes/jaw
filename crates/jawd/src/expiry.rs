@@ -1,6 +1,7 @@
 //! The timer for disappearing messages: one task waits for the soonest `expires_at` jaw.db holds and,
-//! at it, has the writer erase what's due, a batch at a time, in the background lane's short
-//! transactions (`store::expiry`); at start it erases what came due while jawd wasn't running. An
+//! at it, has the writer erase what's due, a batch at a time, in background work's short
+//! transactions (`store::expiry`), on the queue the inbox's leftovers take, which never waits for
+//! the disk; at start it erases what came due while jawd wasn't running. An
 //! erasure acknowledges nothing, so its commit isn't synced: one a power cut loses is still due, and
 //! goes at the next start, and media's cleaner makes a synced commit of its own before it deletes a
 //! file, which makes the erasures before it durable first. The writer wakes it
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use jaw_proto::disappearing::DisappearingStatus;
 
-use crate::store::{Change, Lane, Store, expiry};
+use crate::store::{Change, Store, expiry};
 use crate::work::Priority;
 
 /// How soon after a commit woke the timer another may, so a flood's commits wake it once a second at
@@ -90,11 +91,12 @@ pub struct Batch {
     pub failed: Vec<i64>,
 }
 
-/// Erases the messages due by `now`, soonest first, but for those in `skip`: a batch's worth, in the
-/// background lane's transactions, each a few milliseconds at most with its commit and ending early
-/// once a live write or an inbox row waits, so no erasure holds them back for more than one. Each
-/// commits at NORMAL: a kill or a power cut leaves the erasures of the transactions before it, and
-/// the rest still due.
+/// Erases the messages due by `now`, soonest first, but for those in `skip`: a batch's worth, in
+/// background work's transactions, each a few milliseconds at most with its commit and ending early
+/// once a live write or an inbox row waits, so no erasure holds them back for more than one. They
+/// go as the inbox's leftovers do, ahead of other background work and never waiting for the disk,
+/// so a message doesn't outlive its time while the disk is short of room. Each commits at NORMAL: a
+/// kill or a power cut leaves the erasures of the transactions before it, and the rest still due.
 pub async fn erase_due(store: &Store, now: i64, skip: &[i64]) -> Result<Batch> {
     let skipping = skip.to_vec();
     let due: Vec<i64> = store
@@ -110,7 +112,7 @@ pub async fn erase_due(store: &Store, now: i64, skip: &[i64]) -> Result<Batch> {
     if due.is_empty() {
         return Ok(Batch::default());
     }
-    let applied = store.apply(Lane::Background, due.iter().map(|&n| Change::Expire { n, at: now }).collect()).await?;
+    let applied = store.apply_leftovers(due.iter().map(|&n| Change::Expire { n, at: now }).collect()).await?;
     let failed = if applied.quarantined > 0 {
         let looked = due.clone();
         store

@@ -228,6 +228,9 @@ struct Stats {
     /// Live writes made in an inbox group's commit, and such commits made again without them.
     shared: u64,
     shared_failed: u64,
+    /// How often the writer has taken an idle step, for tests of an idle writer.
+    #[cfg(test)]
+    idle_steps: u64,
 }
 
 /// The WAL as the writer and the checkpointer last saw it, for each other and for `status`.
@@ -331,8 +334,8 @@ enum Background {
     },
 }
 
-/// The conversion of rows left in the inbox when jawd started: background work that never waits
-/// for the disk, as the inbox doesn't, nor behind background work that does.
+/// The conversion of rows left in the inbox when jawd started, or the timer's erasures: background
+/// work that never waits for the disk, as the inbox doesn't, nor behind background work that does.
 struct Leftovers {
     changes: Vec<Change>,
     done: Done,
@@ -760,8 +763,8 @@ impl Store {
         let (realtime, realtime_rx) = unbounded();
         let (live, live_rx) = unbounded();
         let (background, background_rx) = bounded(16);
-        // The converter's batch and its thumbnails', one each.
-        let (leftovers, leftovers_rx) = bounded(2);
+        // The converter's batch, its thumbnails' and the timer's erasures, one each.
+        let (leftovers, leftovers_rx) = bounded(3);
         let (kick, kicks) = bounded(1);
         let (seq, committed) = watch::channel(stamps.last());
         let (copies, copies_taken) = watch::channel(0);
@@ -938,10 +941,11 @@ impl Store {
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// Makes the changes of rows left in the inbox when jawd started as background work does, in
-    /// short transactions behind inbox rows and live writes, but never waiting for the disk, as the
-    /// inbox doesn't: the converter reads the live rows behind them in the same loop. They go ahead
-    /// of other background work, and while it waits for the disk.
+    /// Makes the changes of rows left in the inbox when jawd started, or the timer's erasures, as
+    /// background work does, in short transactions behind inbox rows and live writes, but never
+    /// waiting for the disk, as the inbox doesn't: the converter reads the live rows behind the rows
+    /// left in the same loop, and a message whose time has come stays in jaw.db until it's erased.
+    /// They go ahead of other background work, and while it waits for the disk.
     pub async fn apply_leftovers(&self, changes: Vec<Change>) -> Result<Applied> {
         let (done, applied) = oneshot::channel();
         let leftovers = self.leftovers.clone();
@@ -1347,8 +1351,8 @@ impl Pace {
 }
 
 impl Writer {
-    /// Inbox first, then live changes, then the inbox's leftovers and other background work in
-    /// short transactions.
+    /// Inbox first, then live changes, then the inbox's leftovers and the timer's erasures, and
+    /// other background work, in short transactions.
     fn run(mut self, background: Receiver<Background>) {
         self.db.wal_hook(Some(note_frames));
         self.prune();
@@ -1390,10 +1394,12 @@ impl Writer {
         }
     }
 
-    /// How long the writer may wait for work before an indexing step is due.
+    /// How long the writer may wait for work before an indexing step is due: never before a step
+    /// waiting for the disk, or to be tried again, may go.
     fn idle_for(&self) -> Duration {
         if !self.backlog && !self.unmerged {
             let due = [self.whole_merge_due(), self.wal_empty_due()].into_iter().flatten().min();
+            let due = due.map(|due| self.index_due().map_or(due, |after| due.max(after)));
             return due.map_or(Duration::from_secs(3600), |due| {
                 due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE)
             });
@@ -1410,9 +1416,15 @@ impl Writer {
     }
 
     /// Merges FTS5's segments or indexes some of fts_backlog, if the WAL has room; while it hasn't,
-    /// indexing waits for the checkpointer as background batches do. A step that fails is tried
+    /// indexing waits for the checkpointer as background batches do. While the disk is short of
+    /// room, only what an erasure leaves to do goes, a whole merge due or under way and emptying the
+    /// WAL, so nothing it took out stays in jaw.db or its WAL meanwhile. A step that fails is tried
     /// again later, waiting longer each time.
     fn index_step(&mut self) {
+        #[cfg(test)]
+        {
+            self.stats.lock().expect("the writer's stats").idle_steps += 1;
+        }
         if self.index_due().is_some_and(|due| Instant::now() < due) {
             return;
         }
@@ -1421,16 +1433,20 @@ impl Writer {
             return;
         }
         self.unhold();
-        if !self.disk.room() {
+        let whole = self.whole_merge_due().is_some_and(|due| due <= Instant::now())
+            || self.wholes.iter().any(|whole| whole.merging.is_some());
+        let empty = self.wal_empty_due().is_some_and(|due| due <= Instant::now());
+        let held = !whole && (self.unmerged || self.backlog) && !self.disk.room();
+        if held && !empty {
             self.index_after = Some(Instant::now() + disk::POLL);
             return;
         }
         // Merging first keeps FTS5's levels short of a merge it would do all at once.
-        let step = if self.unmerged || self.whole_merge_due().is_some_and(|due| due <= Instant::now()) {
+        let step = if whole || (self.unmerged && !held) {
             self.merge()
-        } else if self.backlog {
+        } else if self.backlog && !held {
             self.index()
-        } else if self.wal_empty_due().is_some_and(|due| due <= Instant::now()) {
+        } else if empty {
             self.empty_wal()
         } else {
             Ok(())
@@ -1880,8 +1896,9 @@ impl Writer {
         self.unhold();
     }
 
-    /// Waits until the disk has room for a background transaction, taking inbox and live writes and
-    /// the inbox's leftovers meanwhile, so the watchdog never holds one up.
+    /// Waits until the disk has room for a background transaction, taking inbox and live writes,
+    /// the inbox's leftovers and the timer's erasures meanwhile, so the watchdog never holds one up,
+    /// and the idle steps that do what an erasure leaves to do.
     fn wait_for_disk(&mut self) {
         if self.disk.room() {
             return;
@@ -1889,6 +1906,7 @@ impl Writer {
         let began = Instant::now();
         let (realtime, live, leftovers) = (self.realtime.clone(), self.live.clone(), self.leftovers.clone());
         while !self.disk.room() {
+            let idle = self.idle_for().min(disk::POLL);
             select_biased! {
                 recv(realtime) -> row => match row {
                     Ok(row) => self.take_inbox(row),
@@ -1902,14 +1920,14 @@ impl Writer {
                     Ok(left) => self.take_leftovers(left),
                     Err(_) => break,
                 },
-                default(disk::POLL) => {}
+                default(idle) => self.index_step(),
             }
         }
         self.disk.waited(began.elapsed());
     }
 
-    /// Converts rows left in the inbox when jawd started, as background work that doesn't wait for
-    /// the disk.
+    /// Converts rows left in the inbox when jawd started, or erases what the timer found due, as
+    /// background work that doesn't wait for the disk.
     fn take_leftovers(&mut self, Leftovers { changes, done }: Leftovers) {
         let applied = self.background_changes(&changes, true);
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
@@ -2231,7 +2249,7 @@ impl Writer {
     }
 
     /// Makes background `changes` in short transactions, each waiting for the WAL's room, and for
-    /// the disk's unless they're the inbox's `leftovers`.
+    /// the disk's unless they came on the `leftovers`' queue: the inbox's, or the timer's erasures.
     fn background_changes(&mut self, changes: &[Change], leftovers: bool) -> Result<Applied> {
         let started = Instant::now();
         let mut applied = Applied::default();

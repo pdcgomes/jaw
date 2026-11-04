@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension};
 use wa_proto::wa_common::MessageKey;
@@ -7,13 +8,14 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::*;
+use crate::disk::{self, Disk};
 use crate::store::contacts::CONTACTS;
 use crate::store::kinds::KINDS;
 use crate::store::outbox::{Step, Written};
 use crate::store::write::links::{EVENTS, PLACES, VOICES};
 use crate::store::write::{Packed, now_ms};
 use crate::store::{
-    Amend, Amendment, Applied, Change, Chat, Lane, Message, Person, Store, index_against_text, read, schema,
+    Amend, Amendment, Applied, Change, Chat, Lane, Message, Person, Store, index_against_text, read, schema, vfs,
 };
 use crate::work::Priority;
 
@@ -2380,6 +2382,122 @@ pub(crate) async fn still_found(store: &Store, what: &'static str) {
     })
     .await;
     assert_eq!(found, (30, 30, 60), "{what}: the others are still found in messages_fts, links_fts and library_fts");
+}
+
+const GB: u64 = 1_000_000_000;
+
+/// Waits up to fifteen seconds for message `id` to be erased, saying whether it was.
+async fn erased(store: &Store, id: &'static str) -> bool {
+    for _ in 0..750 {
+        if n_of(store, id).await.is_none() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The idle steps the writer takes while `window` passes, and how many the watchdog's looks at
+/// the disk, one each disk::POLL, would make of the time that took.
+async fn idle_steps_in(store: &Store, window: Duration) -> (u64, u64) {
+    let steps = || store.stats.lock().unwrap().idle_steps;
+    let (before, began) = (steps(), Instant::now());
+    tokio::time::sleep(window).await;
+    (steps() - before, began.elapsed().as_millis() as u64 / disk::POLL.as_millis() as u64)
+}
+
+/// Below the disk's floor, with the timer running, what disappears goes at its time and what it
+/// leaves to do goes with it, while other background work waits for the disk: a message with a
+/// link and a captioned photo, among thirty of each that stay, are erased at their time, their
+/// words taken out of every index's segments, links' and the library's merged whole, and the WAL
+/// emptied, as is a disappearing message with a link deleted for you in the live lane, while a
+/// history message applied before them waits until the disk has room. Idle below the floor, the
+/// writer takes a step no more often than the watchdog looks at the disk again. And with nothing
+/// left to index, a full jaw.db (the VFS's hook) refusing the WAL's emptying has the writer wait to
+/// try again rather than take a step every millisecond, and the WAL is emptied once jaw.db has room,
+/// the disk still short of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn below_the_disks_floor_what_disappears_goes_at_its_time_and_what_it_leaves_to_do_goes_with_it() {
+    let home = tempfile::tempdir().unwrap();
+    let (disk, fake) = Disk::faked(home.path(), disk::Config::default(), 10 * GB, 100 * GB);
+    // The deletion's whole merges come two seconds after the timer's began, not ten minutes.
+    let limits = crate::store::Limits { whole_merge_every: Duration::from_secs(2), ..crate::store::LIMITS };
+    let store = Store::open_on(home.path(), limits, disk.clone()).unwrap();
+    vfs::noted::fill(&home.path().join("jaw.db"), fake.free.clone());
+    // Due once the disk is short of room, however long the rest takes: the timer starts after that.
+    let soon = now_ms() + 3_000;
+    let mut changes = several_of_each();
+    changes.push(Change::Message(Message { expires_at: Some(soon), ..linked("link", "quokkagoes", 90) }));
+    let photo = captioned("photo", "zebragoes on the dune");
+    changes.push(Change::Message(Message { at: AT + 91, expires_at: Some(soon), ..photo }));
+    changes.push(Change::Message(linked("gone", "numbatgone", 92)));
+    changes.push(Change::Message(message(ANA, "full", AT + 93, "yakfulldisk words", Some(LATER))));
+    apply(&store, changes).await;
+    store.indexed().await.unwrap();
+    for word in ["quokkagoes", "numbatgone"] {
+        let blocks = index_blocks(home.path(), word);
+        assert!(blocks[1].1 > 0 && blocks[2].1 > 0, "both contentless indexes hold {word}: {blocks:?}");
+    }
+    assert!(index_blocks(home.path(), "zebragoes")[2].1 > 0, "the library holds the caption");
+    let words = ["quokkagoes", "zebragoes", "numbatgone"];
+    let mut before = Vec::new();
+    for word in words {
+        before.push(free_holding(&store, home.path(), word.as_bytes()).await);
+    }
+
+    fake.free.store(GB, Ordering::Relaxed);
+    assert!(!disk.room(), "1 GB free of 100 GB is below the floor");
+    let history = {
+        let store = store.clone();
+        let old = Message { live: false, ..message(RUI, "history", AT - 1_000, "an old message", None) };
+        tokio::spawn(async move { store.apply(Lane::Background, vec![Change::Message(old)]).await })
+    };
+    tokio::time::sleep(disk::POLL * 2).await;
+    assert!(!history.is_finished(), "background work waits for room");
+    let _timer = crate::expiry::start(store.clone());
+    for id in ["link", "photo"] {
+        assert!(erased(&store, id).await, "{id} is erased at its time while the disk is short of room");
+        assert!(tombstoned(&store, id).await, "{id} leaves its tombstone");
+    }
+    let gone = apply(&store, vec![Change::DeleteMessage { chat: ANA.into(), id: "gone".into() }]).await;
+    assert_eq!(gone.changed, 1, "a disappearing message is deleted for you in the live lane");
+    assert!(merged(&store).await, "the whole merges the erasures leave are done while the disk is short of room");
+    assert!(wal_emptied(&store).await, "and the WAL they leave is emptied");
+    for (word, before) in words.into_iter().zip(&before) {
+        gone_but_for(home.path(), word, before, "below the floor");
+    }
+    assert!(!history.is_finished(), "the history message still waits for room");
+    assert_eq!(n_of(&store, "history").await, None, "and isn't written");
+    let (steps, most) = idle_steps_in(&store, Duration::from_secs(1)).await;
+    assert!(
+        steps <= most + 2,
+        "idle below the floor, the writer took {steps} steps where the watchdog looks {most} times"
+    );
+
+    fake.free.store(10 * GB, Ordering::Relaxed);
+    let history = tokio::time::timeout(Duration::from_secs(10), history).await;
+    history.expect("the history message goes in once the disk has room").unwrap().unwrap();
+    assert!(n_of(&store, "history").await.is_some());
+    store.indexed().await.unwrap();
+    still_found(&store, "below the floor").await;
+
+    // Deleted for you with room, so its commit is indexed after and nothing is left to index; then
+    // the disk is full, jaw.db refusing writes, before the WAL it leaves is emptied a second later.
+    let full_before = free_holding(&store, home.path(), b"yakfulldisk").await;
+    let full = apply(&store, vec![Change::DeleteMessage { chat: ANA.into(), id: "full".into() }]).await;
+    assert_eq!(full.changed, 1);
+    store.indexed().await.unwrap();
+    fake.free.store(0, Ordering::Relaxed);
+    let (steps, most) = idle_steps_in(&store, Duration::from_secs(3)).await;
+    assert!(wal_noted(&store).await.is_some(), "the WAL is still to empty while jaw.db is full");
+    // Each time a step tried it and failed, waiting longer each time, is one step more.
+    assert!(
+        steps <= most + 12,
+        "while jaw.db is full, the writer took {steps} steps where the watchdog looks {most} times"
+    );
+    fake.free.store(GB, Ordering::Relaxed);
+    assert!(wal_emptied(&store).await, "the WAL is emptied once jaw.db has room, the disk still short of it");
+    gone_but_for(home.path(), "yakfulldisk", &full_before, "deleted for you as jaw.db filled");
 }
 
 fn opened(chat: &str, id: &str) -> Change {
