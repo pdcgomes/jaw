@@ -1213,9 +1213,10 @@ async fn an_erased_messages_links_leave_both_contentless_indexes_and_no_page_the
 /// erased together, make it. FTS5 keeps a term on a leaf as what follows the part it shares with
 /// the term before it, so each erased word begins with two letters no other term has, and what
 /// follows its first letter, which FTS5 always keeps, is what's looked for: every one is checked.
-/// That finds what pages freed under FAST before the erasures kept, too, among them pages used
-/// again since by b-trees that never hold a message's words, which keep some of it in what they
-/// don't use (the design's caveat), so those are left out as free ones are.
+/// A page written before the erasures can keep part of what it held in what it doesn't use (the
+/// design's caveat), whichever b-tree has it, so jaw.db is vacuumed with every page it frees zeroed
+/// before them and only pages free then are left out: what holds an erased word after them, the
+/// erasures or their merges left.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_pages_it_frees() {
     let home = tempfile::tempdir().unwrap();
@@ -1240,6 +1241,12 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
         store.indexed().await.unwrap();
     }
     store.truncate().await.unwrap();
+    // Every page made again from what's there now, so none keeps what it held before.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(30)).unwrap();
+    db.execute_batch("PRAGMA secure_delete = ON; VACUUM").unwrap();
+    drop(db);
+    store.truncate().await.unwrap();
     let words: Vec<String> = (0..6i64)
         .flat_map(|batch| (0..50i64).filter_map(move |k| goes(batch, k).map(|word| word[1..].to_string())))
         .collect();
@@ -1251,7 +1258,7 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
         .iter()
         .map(|word| {
             let pages = pages_holding(home.path(), word.as_bytes());
-            pages.into_iter().filter(|(_, owner)| !holds_words(owner.as_deref())).map(|(page, _)| page).collect()
+            pages.into_iter().filter(|(_, owner)| owner.is_none()).map(|(page, _)| page).collect()
         })
         .collect();
     let due: Vec<i64> = query(&store, |db| {
@@ -1281,16 +1288,6 @@ async fn a_merge_taking_erasures_words_out_before_their_whole_merge_zeroes_the_p
         let blocks: Vec<_> = index_blocks(home.path(), word).into_iter().filter(|(_, blocks)| *blocks > 0).collect();
         assert!(blocks.is_empty(), "{word}: left in {blocks:?}");
     }
-}
-
-/// Whether b-tree `owner` is one that holds what a message says while it's there: its row, its
-/// links' and the indexes on either, and search's indexes.
-fn holds_words(owner: Option<&str>) -> bool {
-    owner.is_some_and(|name| {
-        ["messages", "links", "library_fts", "sqlite_autoindex_messages", "sqlite_autoindex_links"]
-            .iter()
-            .any(|table| name == *table || name.starts_with(&format!("{table}_")))
-    })
 }
 
 /// An edit of a message with a time to go takes what it said first out of messages_fts's segments
