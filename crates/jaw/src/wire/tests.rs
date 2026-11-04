@@ -1679,6 +1679,37 @@ fn a_vote_jawd_turns_down_says_jawds_reason_and_the_next_goes_by_the_poll_as_jaw
     assert_eq!(votes(&jawd)[1], json!(["Tasca do Chico"]), "not taken back, as the vote turned down would have it");
 }
 
+/// Presses keys one straight after another, applying nothing jawd sends between them, as keys
+/// pressed before jawd's rows come back are.
+fn press_quick(v: &mut View, spec: &str) {
+    for k in run::keys(spec).unwrap() {
+        v.on_input(Input::Key(k));
+    }
+}
+
+#[test]
+fn a_second_choice_before_the_polls_row_shows_the_first_asks_for_both_in_a_poll_of_several() {
+    let jawd = polled(2, false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n").unwrap();
+    press_quick(&mut v, "31");
+    assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
+    assert_eq!(votes(&jawd), [json!(["Pizza"]), json!(["Ramen", "Pizza"])], "the second builds on the first");
+    run::press_live(&mut v, &rx, "<esc>").unwrap();
+    let screen = until(&mut v, &rx, "■ Ramen");
+    assert!(said(&screen, "Pizza").contains("■ Pizza") && screen.contains("1 voted · choose up to 2"), "{screen}");
+}
+
+#[test]
+fn the_same_option_again_before_the_polls_row_shows_it_asks_for_none_in_a_poll_of_one() {
+    let jawd = polled(1, false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n").unwrap();
+    press_quick(&mut v, "2\n2");
+    assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
+    assert_eq!(votes(&jawd), [json!(["Tasca do Chico"]), json!([])], "the same again takes the vote asked back");
+}
+
 #[test]
 fn a_star_and_an_unstar_go_with_the_message_and_its_chat_and_the_chat_shows_the_star_once_jawd_has_it() {
     let jawd = scripted();
