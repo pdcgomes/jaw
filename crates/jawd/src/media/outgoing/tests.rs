@@ -179,6 +179,25 @@ impl Rig {
         names
     }
 
+    /// The files in jaw's folder, wherever they are in it, that are `file`.
+    fn copies_of(&self, file: &[u8]) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut folders = vec![self.home.clone()];
+        while let Some(folder) = folders.pop() {
+            // The cleaner may have removed it since it was listed.
+            let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if std::fs::read(&path).is_ok_and(|bytes| bytes == file) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
     /// What the demo's WhatsApp was sent as message `id`, each time it was sent.
     fn sent(&self, id: &str) -> Vec<e2e::Message> {
         self.world
@@ -2028,20 +2047,30 @@ async fn an_erased_photo_of_yours_whose_hd_copy_is_on_its_way_leaves_no_copy_row
         ))
     };
     assert_eq!(rig.query(left).await, (1, 1, 0), "its HD copy, and the copy's row, wait to go");
-    assert_eq!(rig.files("media/outgoing").len(), 1, "with jaw's copy of your file, which it's made from");
+    let original = std::fs::read(&path).unwrap();
+    let sd = std::fs::read(rig.home.join(rig.row(&id).await["media"]["path"].as_str().unwrap())).unwrap();
     let erased = rig.store.apply(Lane::Background, vec![Change::Expire { n, at: expires_at }]).await.unwrap();
     assert_eq!(erased.changed, 1, "the photo is erased");
     // Withdrawn by the erasure itself, while its upload is still held, not once the sender finds it
     // has no message, after the upload.
     assert_eq!(rig.query(left).await, (0, 0, 0), "the erasure withdraws the HD copy and the copy's row");
     rig.world.gate_uploads(false);
-    for _ in 0..300 {
-        if rig.files("media/outgoing").is_empty() {
-            break;
+    // Nothing of your photo is left anywhere in jaw's folder: neither jaw's copy of your file, which
+    // the HD copy is made from and is, nor the SD copy that went.
+    let cleaned = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            rig.until_the_cleaner_has_passed().await;
+            if rig.copies_of(&original).is_empty() && rig.copies_of(&sd).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(rig.files("media/outgoing").is_empty(), "jaw's copy of your file went: {:?}", rig.files("media/outgoing"));
+    });
+    assert!(
+        cleaned.await.is_ok(),
+        "a copy of your photo is left in jaw's folder: {:?}",
+        [rig.copies_of(&original), rig.copies_of(&sd)].concat()
+    );
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(rig.query(left).await, (0, 0, 0), "no HD copy, copy's row or failed send is left");
     let retried = rig.call("send.retry", json!({ "message": id })).await.unwrap_err();
