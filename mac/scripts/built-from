@@ -6,37 +6,62 @@
 # tag counts only on origin/main, since every worktree shares the tags, and origin/main only where
 # origin is the project's own repository, as Cargo.toml names it, since a clone of a local checkout
 # has that checkout's main for it; "changed" is a tree with uncommitted changes to what jawd and
-# jaw-engine are built from, Cargo's, rustup's and go's settings beside them and the Makefile
-# included, which the app's own sources, the docs and the READMEs aren't; and a tree outside git says
-# branch. So that neither git's settings nor a name in the repository steers it to main, it reads
-# origin/main by its whole ref, which a branch or tag called origin/main can't stand in for; counts
-# as a change every untracked file but those the repository's own .gitignore files leave out,
-# whatever status.showUntrackedFiles or an ignore file of your own says, and every file git is told
-# to assume unchanged or skip; reads the checkout from its top, whatever folder of it it's given; and
-# stops when git can't read the tree, so make mac records nothing. It only reads: git takes none of
-# its optional locks.
+# jaw-engine are built from, Cargo's, rustup's and go's settings beside them, the makefiles and what
+# gives the version included, which the app's own sources, the docs and the READMEs aren't; and a
+# tree outside git says branch. It reads origin/main by its whole ref, which a branch or tag called
+# origin/main can't stand in for; counts as a change every untracked file but a .DS_Store, whatever
+# an ignore file or status.showUntrackedFiles says, since Cargo runs a new build.rs and go compiles a
+# new .go file however git is told to ignore it, and every file git is told to assume unchanged or
+# skip; reads the checkout that holds the folder it's given, from its top, whatever GIT_DIR and
+# GIT_WORK_TREE say, and refuses a folder whose work tree, as core.worktree can set it, doesn't
+# hold it; takes no replace refs or grafts, which make one commit stand for another; and stops when
+# git can't read the tree, so make mac records nothing. Given a file as well, it says changed when
+# anything jawd is built from was written since that file was, so make mac sees a change made and
+# undone while it built. What it can't see: a change a filter of git's hides, and a file made at the
+# checkout's top and removed again since the file given. It only reads: git takes none of its
+# optional locks.
 #
-#   mac/scripts/built-from [<checkout>]        # this script's own checkout by default
+#   mac/scripts/built-from [<checkout> [<since>]]   # this script's own checkout by default
 set -eu
-export GIT_OPTIONAL_LOCKS=0
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+# /var/empty is root's and always empty, so git finds no grafts there.
+export GIT_OPTIONAL_LOCKS=0 GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/var/empty/grafts
 host=github.com
 name=pdcgomes/jaw
-inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work Makefile"
+inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work"
+inputs="$inputs Makefile GNUmakefile makefile scripts/version VERSION"
+since=${2:-}
 cd "${1:-$(dirname "$0")/../..}"
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
     printf 'branch\na tree outside git, which says nothing of where it came from\n'
     exit 0
 fi
+here=$(pwd -P)
 top=$(git rev-parse --show-toplevel)
 cd "$top"
+case "$here/" in
+"$(pwd -P)/"*) ;;
+*) echo "built-from: git's work tree for $here is $top, which doesn't hold it" >&2; exit 1 ;;
+esac
 commit=$(git rev-parse --short HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
 changes=$(git status --porcelain --untracked-files=no -- $inputs)
-untracked=$(git ls-files --others --exclude-per-directory=.gitignore -- $inputs)
+others=$(git ls-files --others -- $inputs)
+untracked=$(printf '%s\n' "$others" | sed '/\/\.DS_Store$/d')
 tracked=$(git ls-files -v -- $inputs)
 unwatched=$(printf '%s\n' "$tracked" | sed -n '/^[^H]/p')
+written=
+if [ -n "$since" ]; then
+    for input in $inputs; do
+        if [ -e "$input" ] || [ -L "$input" ]; then
+            found=$(find "$input" ! -name .DS_Store -newer "$since")
+            written="$written$found"
+        fi
+    done
+fi
 origin=$(git remote get-url origin 2> /dev/null) || origin=
 case ${origin%.git} in
 "https://$host/$name" | "git@$host:$name" | "ssh://git@$host/$name") ours=true ;;
@@ -47,6 +72,8 @@ if [ -n "$changes$untracked" ]; then
     printf 'changed\n%s, with uncommitted changes to what jawd is built from\n' "$place"
 elif [ -n "$unwatched" ]; then
     printf 'changed\n%s, with files jawd is built from whose changes git is told to ignore\n' "$place"
+elif [ -n "$written" ]; then
+    printf 'changed\n%s, with what jawd is built from written since %s\n' "$place" "$since"
 elif ! $ours; then
     printf "branch\n%s, in a checkout whose origin isn't %s\n" "$place" "$host/$name"
 elif [ -z "$main" ] || ! git merge-base --is-ancestor HEAD "$main" 2> /dev/null; then

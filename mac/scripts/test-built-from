@@ -3,8 +3,9 @@
 # ok: or FAIL: for each and exiting 1 if any failed. They're made in one folder of their own, removed
 # on every way out, with GIT_CEILING_DIRECTORIES there and git's own locations unset, so no git command
 # here reaches this checkout's repository or changes a ref or tag outside them; git's global and
-# system settings are left out, so yours don't change the answers. Their origin is the repository
-# Cargo.toml names, so built-from has to know it by the same name.
+# system settings and a template folder of your own are left out, so yours neither change the answers
+# nor run hooks on its commits. Their origin is the repository Cargo.toml names, so built-from has to
+# know it by the same name.
 #
 #   mac/scripts/test-built-from
 set -eu
@@ -19,7 +20,8 @@ trap 'cd /; rm -rf "$scratch"' EXIT
 trap 'exit 1' HUP INT TERM
 scratch="$(cd "$scratch" && pwd -P)"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_OPTIONAL_LOCKS
+    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_OPTIONAL_LOCKS \
+    GIT_TEMPLATE_DIR GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_GRAFT_FILE
 export GIT_CEILING_DIRECTORIES="$scratch" GIT_CONFIG_NOSYSTEM=1 HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home"
 export GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@localhost GIT_COMMITTER_NAME=check GIT_COMMITTER_EMAIL=check@localhost
 mkdir -p "$HOME" "$scratch/tools/mac/scripts"
@@ -33,19 +35,20 @@ fail() {
     failed=1
 }
 
-# says <case> <from> <at> [<folder>]: built-from prints those two lines for the folder, this one by default
+# says <case> <from> <at> [<folder> [<since>]]: built-from prints those two lines for the folder, this
+# one by default, given that file as well when one is named
 says() {
     want="$(printf '%s\n%s' "$2" "$3")"
-    if got="$("$built_from" "${4:-$PWD}" 2>&1)" && [ "$got" = "$want" ]; then
+    if got="$("$built_from" "${4:-$PWD}" ${5:+"$5"} 2>&1)" && [ "$got" = "$want" ]; then
         echo "ok: $1"
     else
         fail "$1" "$(printf 'wanted:\n%s\ngot:\n%s' "$want" "$got")"
     fi
 }
 
-# refuses <case> [<folder>]: built-from fails, printing nothing for make mac to record
+# refuses <case> [<folder> [<since>]]: built-from fails, printing nothing for make mac to record
 refuses() {
-    if got="$("$built_from" "${2:-$PWD}" 2> /dev/null)"; then
+    if got="$("$built_from" "${2:-$PWD}" ${3:+"$3"} 2> /dev/null)"; then
         fail "$1" "$(printf 'it succeeded:\n%s' "$got")"
     elif [ -n "$got" ]; then
         fail "$1" "$(printf 'it failed, after printing:\n%s' "$got")"
@@ -65,7 +68,7 @@ inside() {
 base="$scratch/base"
 git init -q -b main "$base"
 inside "$base"
-mkdir -p crates engine proto protocol mac/scripts docs
+mkdir -p crates engine proto protocol mac/scripts docs scripts
 printf '.DS_Store\ntarget/\n' > .gitignore
 echo '[workspace]' > Cargo.toml
 echo '# the lock' > Cargo.lock
@@ -74,6 +77,9 @@ echo 'package main' > engine/main.go
 echo 'syntax = "proto3";' > proto/engine.proto
 echo '# the protocol' > protocol/README.md
 echo 'engine:' > Makefile
+echo 'git describe' > scripts/version
+echo '# the tag' > VERSION
+echo '# a check' > scripts/check.py
 echo '// the app' > mac/App.swift
 echo '# the design' > docs/design.md
 echo '# jaw' > README.md
@@ -96,6 +102,13 @@ ahead() {
     echo more >> crates/lib.rs
     git commit -q -a -m 'off origin/main'
     b="$(git rev-parse --short HEAD)"
+}
+
+# aged: everything jawd is built from in this checkout last written in 2000, and $since in 2001
+since="$scratch/since"
+aged() {
+    find Cargo.toml Cargo.lock crates engine proto protocol Makefile scripts/version VERSION -exec touch -t 200001010000 {} +
+    touch -t 200101010000 "$since"
 }
 
 changed="with uncommitted changes to what jawd is built from"
@@ -121,11 +134,23 @@ says "a shallow clone of the project at origin/main" main "$at on main"
 copy release
 git tag v0.1.0
 says "at a release's tag on origin/main" release v0.1.0
+copy annotated
+git tag -a v0.1.0 -m 'jaw 0.1.0'
+says "at a release's annotated tag on origin/main, as scripts/release.sh has it made" release v0.1.0
+git worktree add -q -b other "$scratch/annotated-linked"
+says "a linked worktree at a release's tag on origin/main" release v0.1.0 "$scratch/annotated-linked"
+git clone -q --depth 1 "file://$scratch/annotated" "$scratch/annotated-shallow"
+git checkout -q --detach
+says "HEAD detached at a release's tag on origin/main" release v0.1.0
+inside "$scratch/annotated-shallow"
+git remote set-url origin "$repository.git"
+says "a shallow clone of the project at a release's tag on origin/main" release v0.1.0
 copy other-tag
 git tag vfoo
 says "at a tag on origin/main that isn't a release's" main "$at on main"
 copy origins
-for origin in "$repository" "git@${project%%/*}:${project#*/}.git" "git@${project%%/*}:${project#*/}" "ssh://git@$project.git"; do
+for origin in "$repository" "git@${project%%/*}:${project#*/}.git" "git@${project%%/*}:${project#*/}" \
+    "ssh://git@$project.git" "ssh://git@$project"; do
     git remote set-url origin "$origin"
     says "at origin/main, with origin $origin" main "$at on main"
 done
@@ -148,6 +173,10 @@ copy tag-called-origin-main
 ahead feature
 git tag origin/main
 says "a branch off origin/main, with a tag called origin/main at it" branch "feature at $b, not on origin/main"
+copy grafted
+ahead feature
+echo "$(git rev-parse refs/remotes/origin/main) $(git rev-parse HEAD)" > .git/info/grafts
+says "a branch off origin/main, which a graft makes origin/main's parent" branch "feature at $b, not on origin/main"
 copy no-origin-main
 git update-ref -d refs/remotes/origin/main
 says "no origin/main" branch "main at $at, not on origin/main"
@@ -171,6 +200,24 @@ echo more >> crates/lib.rs
 says "a file under crates changed" changed "main at $at, $changed"
 git add crates/lib.rs
 says "a file under crates changed and staged" changed "main at $at, $changed"
+copy replaced
+ahead feature
+git replace "$(git rev-parse refs/remotes/origin/main)" HEAD
+git checkout -q --detach refs/remotes/origin/main
+says "HEAD at origin/main's commit, which a replace ref has stand for a branch's" changed "$at, $changed"
+copy environment
+echo more >> crates/lib.rs
+what="a file under crates changed, with GIT_DIR and GIT_WORK_TREE naming a checkout at origin/main"
+want="$(printf 'changed\nmain at %s, %s' "$at" "$changed")"
+if got="$(GIT_DIR="$base/.git" GIT_WORK_TREE="$base" "$built_from" "$PWD" 2>&1)" && [ "$got" = "$want" ]; then
+    echo "ok: $what"
+else
+    fail "$what" "$(printf 'wanted:\n%s\ngot:\n%s' "$want" "$got")"
+fi
+copy core-worktree
+echo more >> crates/lib.rs
+git config core.worktree "$base"
+refuses "a file under crates changed, with core.worktree naming a checkout at origin/main"
 copy deleted
 rm crates/lib.rs
 says "a file under crates deleted" changed "main at $at, $changed"
@@ -189,17 +236,46 @@ echo go.work > "$scratch/excludes"
 git config core.excludesFile "$scratch/excludes"
 echo 'go 1.24' > go.work
 says "a new go.work that an ignore file of your own leaves out" changed "main at $at, $changed"
+copy self-ignored
+echo '*' > crates/.gitignore
+echo 'fn main() {}' > crates/build.rs
+says "a new build.rs under crates, beside a new .gitignore there that leaves out everything, itself included" changed \
+    "main at $at, $changed"
 n=0
-for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work; do
+for new in crates/build.rs go.work; do
+    n=$((n + 1))
+    copy "ignored-here-$n"
+    basename "$new" >> .gitignore
+    echo '# new' > "$new"
+    says "a new $new that the checkout's .gitignore, changed and not committed, leaves out" changed "main at $at, $changed"
+done
+n=0
+for new in go.work .cargo/config.toml; do
+    n=$((n + 1))
+    copy "ignored-on-main-$n"
+    printf 'go.work\n.cargo/\n' >> .gitignore
+    git commit -q -a -m 'on origin/main, its .gitignore leaving out go.work and .cargo'
+    git update-ref refs/remotes/origin/main HEAD
+    m="$(git rev-parse --short HEAD)"
+    mkdir -p "$(dirname "$new")"
+    echo '# new' > "$new"
+    says "a new $new that origin/main's .gitignore leaves out" changed "main at $m, $changed"
+done
+n=0
+for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work GNUmakefile; do
     n=$((n + 1))
     copy "new-$n"
     mkdir -p "$(dirname "$new")"
     echo '# new' > "$new"
     says "a new $new" changed "main at $at, $changed"
 done
-copy makefile
-echo 'more:' >> Makefile
-says "the Makefile changed" changed "main at $at, $changed"
+n=0
+for input in Makefile scripts/version VERSION; do
+    n=$((n + 1))
+    copy "input-$n"
+    echo more >> "$input"
+    says "$input changed" changed "main at $at, $changed"
+done
 copy assumed
 echo more >> crates/lib.rs
 git update-index --assume-unchanged crates/lib.rs
@@ -222,10 +298,29 @@ copy not-built-from
 echo more >> mac/App.swift
 echo more >> README.md
 echo new > docs/new.md
+echo more >> scripts/check.py
 touch crates/.DS_Store
-mkdir crates/target
-echo built > crates/target/lib
-says "the app, the docs and a README changed, and files the repository's .gitignore leaves out" main "$at on main"
+says "the app, the docs, a README and a script but scripts/version changed, and a new .DS_Store under crates" main \
+    "$at on main"
+
+copy written
+: > crates/.DS_Store
+aged
+echo finder > crates/.DS_Store
+says "a .DS_Store under crates written since the file it's given, and nothing else" main "$at on main" "$PWD" "$since"
+copy rewritten
+aged
+echo more >> crates/lib.rs
+git checkout -q -- crates/lib.rs
+says "a file under crates changed and put back since the file it's given" changed \
+    "main at $at, with what jawd is built from written since $since" "$PWD" "$since"
+copy made-and-removed
+aged
+echo new > crates/new.rs
+rm crates/new.rs
+says "a new file under crates made and removed again since the file it's given" changed \
+    "main at $at, with what jawd is built from written since $since" "$PWD" "$since"
+refuses "given a file that isn't there" "$PWD" "$scratch/missing"
 
 copy locks
 touch -t 200001010000 crates/lib.rs

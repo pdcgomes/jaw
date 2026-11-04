@@ -17,9 +17,14 @@ cd "$repo"
 team="${JAW_TEAM_ID:-3JP75Z3F98}"
 out="mac/build/release"
 app="$out/Jaw.app"
+# Made before the first reading, so the second sees anything jawd is built from written since, a
+# change made and undone while it builds included.
+stamp="$(mktemp "${TMPDIR:-/tmp}/jaw-bundle.XXXXXX")"
+trap 'rm -f "$stamp"' EXIT
 built="$(mac/scripts/built-from)"
-# The helpers are copied from this checkout's target, whatever target-dir a setting of Cargo's names.
-export CARGO_TARGET_DIR="$repo/target"
+# The helpers are copied from this checkout's target, whatever target-dir a setting of Cargo's names,
+# and go builds jaw-engine from engine/go.mod alone, whatever go.work a folder above it holds.
+export CARGO_TARGET_DIR="$repo/target" GOWORK=off
 
 echo "==> jawd, jaw and jaw-engine for release"
 cargo build --release -p jawd --bin jawd --quiet
@@ -46,7 +51,7 @@ cp mac/JawApp/Helpers/dev.badcoffee.jaw.jawd.plist "$app/Contents/Library/Launch
 jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
 /usr/libexec/PlistBuddy -c "Add :JawdVersion string $jawd_version" "$app/Contents/Info.plist" 2>/dev/null ||
     /usr/libexec/PlistBuddy -c "Set :JawdVersion $jawd_version" "$app/Contents/Info.plist"
-again="$(mac/scripts/built-from)"
+again="$(mac/scripts/built-from "$repo" "$stamp")"
 if [ "$again" != "$built" ]; then
     echo "==> the checkout changed while make mac built it: run it again" >&2
     exit 1
