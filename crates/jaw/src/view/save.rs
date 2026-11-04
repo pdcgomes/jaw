@@ -44,8 +44,13 @@ pub fn said_saved(path: &str) -> String {
 
 impl View {
     /// s on a selected message, or the palette's "Save this message's file": the palette asking
-    /// where, from Downloads.
+    /// where, from Downloads. An album has no file of its own: each photo or video in it is saved
+    /// as a message of its own, which the terminal can't select yet.
     pub(super) fn palette_save(&mut self, m: &Message) {
+        if m.kind == Kind::Album && !m.deleted {
+            self.say("saving an album's photos and videos one by one comes later");
+            return;
+        }
         if !has_file(m) {
             self.say("there's no file to save in this one");
             return;

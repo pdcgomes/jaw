@@ -1946,6 +1946,19 @@ fn s_asks_where_to_save_a_file_from_downloads_tab_completes_a_folder_and_the_mad
 }
 
 #[test]
+fn s_on_an_album_says_its_photos_and_videos_are_saved_one_by_one_which_comes_later() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<a-down><a-down><a-down>");
+    assert_eq!(v.open.as_deref(), Some("familia"));
+    let album = v.messages.as_ref().unwrap().rows().find(|m| m.kind == Kind::Album).cloned().unwrap();
+    v.focus = Focus::Message(album.id.clone());
+    press(&mut v, &rx, "s");
+    let screen = frame(&mut v);
+    assert!(screen.contains("saving an album's photos and videos one by one comes later"), "{screen}");
+    assert!(!screen.contains("╭ save "), "{screen}");
+}
+
+#[test]
 fn i_shows_who_has_it_and_who_has_read_it_and_any_key_closes_it() {
     for width in [140, 100, 80] {
         let (mut v, rx) = anas(width);
