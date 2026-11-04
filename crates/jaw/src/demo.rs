@@ -15,8 +15,8 @@ mod voice;
 
 use crate::data::Place;
 use crate::data::{
-    Album, AlbumItem, Chat, ChatKind, Contact, FoundKind, Jawd, Kind, Last, Location, Media, Message, Person, Quote,
-    Reaction, Sender, Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
+    Album, AlbumItem, Chat, ChatKind, Contact, FoundKind, Jawd, Kind, Last, Location, Media, Message, Person, Poll,
+    PollOption, Quote, Reaction, Sender, Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
@@ -577,6 +577,7 @@ impl Account {
             location: None,
             event: None,
             contact: None,
+            poll: None,
         }
     }
 
@@ -998,6 +999,11 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_forward(&messages, &to));
     }
 
+    fn vote(&mut self, _chat: &str, message: &str, options: &[String], key: &str) {
+        let (message, options, key) = (message.to_string(), options.to_vec(), key.to_string());
+        self.defer(move |a| a.on_vote(&message, &options, &key));
+    }
+
     fn message_info(&mut self, _chat: &str, message: &str) {
         let message = message.to_string();
         self.defer(move |a| a.on_message_info(&message));
@@ -1271,6 +1277,7 @@ impl Writing {
             location: None,
             event: None,
             contact: None,
+            poll: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }
@@ -1455,7 +1462,13 @@ fn made_up(now: i64) -> Vec<Thread> {
     let thu = 24.0 * h;
     let tiago = person("person:6", "Tiago", 4);
     w.system(thu - 4.0 * h - 40.0, Kind::System, "Rui added Sofia");
-    w.other(thu - 4.0 * h - 20.0, Some(&rui), Kind::Poll, "☰ Onde jantamos sexta? · one choice · 6 voted", "");
+    let option = |name: &str, votes: u32| PollOption { name: name.into(), votes, mine: false };
+    w.other(thu - 4.0 * h - 20.0, Some(&rui), Kind::Poll, "☰ Onde jantamos sexta?", "").poll = Some(Box::new(Poll {
+        question: "Onde jantamos sexta?".into(),
+        options: vec![option("Ramiro", 3), option("Cervejaria Trindade", 2), option("Tasca do Chico", 1)],
+        max: 1,
+        voters: 6,
+    }));
     w.theirs(thu - 4.0 * h - 24.0, &ines, "Ramiro! há anos que não vou").reactions =
         vec![Reaction { emoji: "❤".into(), n: 3, mine: true }, Reaction { emoji: "☺".into(), n: 1, mine: false }];
     w.system(thu - 5.0 * h - 2.0, Kind::Call, "✆ Missed voice call from Rui");

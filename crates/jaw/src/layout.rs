@@ -4,7 +4,7 @@
 //! the costly part of a frame, so the view keeps what this returns per message, version, width and
 //! layout, and lays out only what's on screen.
 
-use crate::data::{Contact, Kind, Message, Part, SpanKind, Tick, Voice};
+use crate::data::{Contact, Kind, Message, Part, Poll, SpanKind, Tick, Voice};
 use crate::fmt;
 use crate::theme::Theme;
 use chrono::FixedOffset;
@@ -138,6 +138,49 @@ pub fn card(contact: &Contact, t: &Theme) -> Vec<(String, Style)> {
             }
         }
     }
+    out
+}
+
+/// The most cells a poll option's bar takes.
+const POLL_BAR: usize = 10;
+
+/// A poll as lines: its question, then each option on a line of its own, your choice marked, how
+/// many chose it and a bar of its share of those who voted, as the Mac's card has them, then how
+/// many voted and what a vote may choose. Each option's line fits `room`, its name cut to fit.
+pub fn poll(p: &Poll, room: usize, t: &Theme) -> Vec<(String, Style)> {
+    let plain = Style::new().fg(t.fg);
+    let mut out =
+        vec![("☰ ".to_string(), Style::new().fg(t.muted)), (p.question.clone(), plain.add_modifier(Modifier::BOLD))];
+    let counts: Vec<String> = p.options.iter().map(|o| fmt::num(o.votes as u64)).collect();
+    let count_w = counts.iter().map(|c| c.width()).max().unwrap_or(1);
+    let longest = p.options.iter().map(|o| o.name.width()).max().unwrap_or(0);
+    // Each line is a mark and a space, the name, a space and the count, then a space and the bar.
+    let name_w = longest.min(room.saturating_sub(3 + count_w).max(4));
+    let bar_w = room.saturating_sub(4 + name_w + count_w).min(POLL_BAR);
+    let total = p.voters.max(p.options.iter().map(|o| o.votes).max().unwrap_or(0)) as usize;
+    for (o, count) in p.options.iter().zip(&counts) {
+        let mark = match (o.mine, p.max > 1) {
+            (true, false) => "● ",
+            (false, false) => "○ ",
+            (true, true) => "■ ",
+            (false, true) => "□ ",
+        };
+        let name = fmt::fit(&o.name, name_w);
+        let pad = " ".repeat(name_w.saturating_sub(name.width()) + 1);
+        out.push(("\n".into(), plain));
+        out.push((mark.into(), Style::new().fg(if o.mine { t.progress } else { t.comment })));
+        out.push((format!("{name}{pad}"), plain));
+        out.push((format!("{count:>count_w$}"), Style::new().fg(t.muted)));
+        if bar_w >= 3 {
+            let share = (o.votes as usize * bar_w + total / 2).checked_div(total).unwrap_or(0);
+            let filled = share.clamp(usize::from(o.votes > 0), bar_w);
+            out.push((" ".into(), plain));
+            out.push(("━".repeat(filled), Style::new().fg(if o.mine { t.progress } else { t.muted })));
+            out.push(("─".repeat(bar_w - filled), Style::new().fg(t.gutter)));
+        }
+    }
+    out.push(("\n".into(), plain));
+    out.push((format!("{} · {}", p.voted(), p.rule()), Style::new().fg(t.comment)));
     out
 }
 
@@ -378,6 +421,12 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
     {
         // Its words are the names on it, which the card shows.
         return card(contact, t);
+    }
+    if m.kind == Kind::Poll
+        && let Some(p) = &m.poll
+    {
+        // Its words are its question, which the poll shows.
+        return poll(p, room, t);
     }
     if m.kind == Kind::Voice
         && let Some(v) = &m.voice
@@ -630,6 +679,7 @@ mod tests {
             location: None,
             event: None,
             contact: None,
+            poll: None,
         }
     }
 

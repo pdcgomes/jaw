@@ -1,7 +1,8 @@
 //! M2's message actions from the selected message: r replies, e edits, d deletes, + and 1 to 6
-//! react, f forwards, i shows the info, and Enter opens a link or a file, or starts a chat with
-//! whoever a contact card shares. Each asks jawd and shows what jawd pushes back (an edited row, a
-//! deleted one, the reactions), never a guess of its own. @ in a group's box completes its
+//! react, f forwards, i shows the info, and Enter opens a link or a file, starts a chat with
+//! whoever a contact card shares, or opens a poll's options to vote with (`vote`). Each asks jawd
+//! and shows what jawd pushes back (an edited row, a deleted one, the reactions, a vote), never a
+//! guess of its own. @ in a group's box completes its
 //! members, and what's taken goes as a real mention. A card of yours is made from a person's name
 //! and number, as a vCard 3.0.
 
@@ -329,10 +330,11 @@ impl View {
         out
     }
 
-    /// Forgets the box's reply, edit and names, as a chat is left.
+    /// Forgets the box's reply, edit and names, and the votes asked, as a chat is left.
     pub(super) fn drop_actions(&mut self) {
         self.editing_stop();
         self.replying = None;
+        self.votes.clear();
         self.taken.clear();
         self.dismissed = None;
         self.naming_selected = 0;

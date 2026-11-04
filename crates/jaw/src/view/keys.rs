@@ -22,7 +22,7 @@ fn opens(kind: Kind) -> &'static str {
         Kind::Audio => "playing audio files comes later",
         Kind::Location => "its map link opens from your terminal",
         Kind::Event => "its links open from your terminal",
-        Kind::LiveLocation | Kind::Poll => "opening these comes later",
+        Kind::LiveLocation => "opening these comes later",
         Kind::Contact => "there's no number on this card to start a chat with",
         _ => "there's nothing to open in this one",
     }
@@ -367,6 +367,7 @@ impl View {
                 self.jawd.retry(&m.id);
                 self.say("sending it again");
             }
+            KeyCode::Enter if m.kind == Kind::Poll => self.palette_vote(&m),
             KeyCode::Enter => {
                 let folded = !self.unfolded.contains(&m.id)
                     && self.laid.get(&m.id).is_some_and(|l| l.lines.lines.len() > crate::layout::FOLD);

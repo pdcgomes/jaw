@@ -311,6 +311,10 @@ pub struct Message {
     /// For a contact card: its name and its vCard, which holds each card when it shares several.
     #[serde(default)]
     pub contact: Option<Box<Contact>>,
+    /// For a poll: its question, its options with how many chose each and whether you did, how
+    /// many one vote may choose, and how many voted.
+    #[serde(default)]
+    pub poll: Option<Box<Poll>>,
 }
 
 /// A pin: where it is, which a row may not say, as jawd shows each field it has and null for the
@@ -476,6 +480,60 @@ pub struct Contact {
     pub name: Option<String>,
     #[serde(default)]
     pub vcard: Option<String>,
+}
+
+/// A poll, as jawd counts it: its question, its options in their order, how many of them one vote
+/// may choose, and how many people voted.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Poll {
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<PollOption>,
+    #[serde(default = "one_choice")]
+    pub max: u32,
+    #[serde(default)]
+    pub voters: u32,
+}
+
+fn one_choice() -> u32 {
+    1
+}
+
+/// One of a poll's options: its name, which a vote names it by, how many chose it, and whether you
+/// did.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct PollOption {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub votes: u32,
+    #[serde(default)]
+    pub mine: bool,
+}
+
+impl Poll {
+    /// The options you chose, by name, in the poll's order.
+    pub fn mine(&self) -> Vec<String> {
+        self.options.iter().filter(|o| o.mine).map(|o| o.name.clone()).collect()
+    }
+
+    /// What a vote in it may choose, as the Mac's card says it.
+    pub fn rule(&self) -> String {
+        match self.max as usize {
+            0 | 1 => "choose one".into(),
+            n if n >= self.options.len() => "choose any".into(),
+            n => format!("choose up to {n}"),
+        }
+    }
+
+    /// How many voted, as the Mac's card says it.
+    pub fn voted(&self) -> String {
+        match self.voters {
+            0 => "no votes yet".into(),
+            n => format!("{} voted", crate::fmt::num(n as u64)),
+        }
+    }
 }
 
 impl Contact {
@@ -1316,6 +1374,9 @@ pub trait Jawd {
     fn delete(&mut self, chat: &str, message: &str, everyone: bool);
     /// Forwards messages from `chat` to each chat in `to`.
     fn forward(&mut self, chat: &str, messages: &[String], to: &[String]);
+    /// Votes in poll `message` for `options`, by name, or with none takes your vote back, under
+    /// `key`, made for this vote alone, which `Update::Acted` names when jawd answers for it.
+    fn vote(&mut self, chat: &str, message: &str, options: &[String], key: &str);
     /// Asks for the receipts of a message in `chat`; they come as `Update::Info`.
     fn message_info(&mut self, chat: &str, message: &str);
     /// Asks for a chat's members; they come as `Update::Members`.

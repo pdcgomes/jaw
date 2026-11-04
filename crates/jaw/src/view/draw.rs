@@ -352,7 +352,14 @@ impl View {
                 let m = self.messages.as_ref().and_then(|w| w.get(id));
                 let editable = m.is_some_and(|m| self.not_editable(m).is_none());
                 let card = m.is_some_and(|m| !super::actions::card_numbers(m).is_empty());
-                let opens = if card { "start a chat" } else { "open" };
+                let poll = m.and_then(super::vote::votable).is_some();
+                let opens = if card {
+                    "start a chat"
+                } else if poll {
+                    "vote"
+                } else {
+                    "open"
+                };
                 vec![
                     ("r", "reply", true),
                     ("e", "edit", editable),
@@ -1265,7 +1272,7 @@ impl View {
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
             pair(("↑", "into the messages", true), Some(("y", "copy its text", true))),
-            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open, play, unfold", true))),
+            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open, play, unfold, vote", true))),
             pair(("ctrl-a e", "start, end of the line", true), Some(("r", "reply", true))),
             pair(("alt-b f", "back, on a word", true), Some(("e", "edit your own", true))),
             pair(("ctrl-w u", "cut a word, the line", true), Some(("d", "delete", true))),

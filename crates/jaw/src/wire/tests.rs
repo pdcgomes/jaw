@@ -60,6 +60,49 @@ struct Kept {
     /// Whether a chat's window reaches its first message, as one whose history jaw.db has whole
     /// does, so only the phone has older ones.
     whole: bool,
+    /// Rows a chat's window has beyond the fixture's, and the fixture's own as an action last
+    /// changed them, each pushed to the window as it changes, with the push's `seq`.
+    rows: Vec<Value>,
+    seq: u64,
+    /// Messages whose deletion for everyone is on its way, which jawd won't vote in or star.
+    deleting: Vec<String>,
+}
+
+/// A chat window's rows: the fixture's, each as an action last changed it, then the rest kept.
+fn rows(kept: &Kept) -> Value {
+    let fixture = fixture("messages.watch.result")["result"]["rows"].as_array().cloned().unwrap_or_default();
+    let kept_row = |id: &Value| kept.rows.iter().find(|r| r["id"] == *id).cloned();
+    let mut rows: Vec<Value> = fixture.iter().map(|r| kept_row(&r["id"]).unwrap_or_else(|| r.clone())).collect();
+    rows.extend(kept.rows.iter().filter(|r| !fixture.iter().any(|f| f["id"] == r["id"])).cloned());
+    json!(rows)
+}
+
+/// Changes a window's row as jawd does, with a new version, and the push that brings it.
+fn changed(kept: &mut Kept, id: &Value, change: impl FnOnce(&mut Value)) -> Option<Value> {
+    let mut row = rows(kept).as_array()?.iter().find(|r| r["id"] == *id)?.clone();
+    change(&mut row);
+    kept.seq = kept.seq.max(81_300) + 1;
+    row["v"] = json!(kept.seq);
+    kept.rows.retain(|r| r["id"] != *id);
+    kept.rows.push(row.clone());
+    Some(json!({ "method": "messages", "params": { "watch": "w2", "seq": kept.seq, "upsert": [row] } }))
+}
+
+/// A poll's row with `chosen` as your vote, counted as jawd counts it.
+fn voted(row: &mut Value, chosen: &[Value]) {
+    let poll = &mut row["poll"];
+    let had = poll["options"].as_array().is_some_and(|options| options.iter().any(|o| o["mine"] == true));
+    for o in poll["options"].as_array_mut().into_iter().flatten() {
+        let (mine, now) = (o["mine"] == true, chosen.contains(&o["name"]));
+        let votes = o["votes"].as_u64().unwrap_or_default() + u64::from(now && !mine);
+        (o["votes"], o["mine"]) = (json!(votes.saturating_sub(u64::from(mine && !now))), json!(now));
+    }
+    let voters = poll["voters"].as_u64().unwrap_or_default();
+    poll["voters"] = json!(match (had, chosen.is_empty()) {
+        (false, false) => voters + 1,
+        (true, true) => voters.saturating_sub(1),
+        _ => voters,
+    });
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
@@ -113,6 +156,7 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             if kept.whole {
                 window["older"] = json!(false);
             }
+            window["rows"] = rows(&kept);
             window
         }
         "find" if params["query"] == "ar" => fixture("find.result")["result"].clone(),
@@ -146,6 +190,18 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
                 return None;
             }
             answer
+        }
+        "poll.vote" if kept.deleting.iter().any(|d| params["message"] == d.as_str()) => {
+            return error(code::NOT_ALLOWED, "it's being deleted for everyone, so it can't be voted in", Value::Null);
+        }
+        "poll.vote" => {
+            let key = params["key"].as_str().unwrap_or_default().to_string();
+            if !kept.acted.contains_key(&key) {
+                let chosen = params["options"].as_array().cloned().unwrap_or_default();
+                push = changed(&mut kept, &params["message"], |row| voted(row, &chosen));
+                kept.acted.insert(key, json!({}));
+            }
+            json!({})
         }
         "message.info" => json!({
             "message": params["message"],
@@ -1482,6 +1538,108 @@ fn an_action_jawd_turns_down_says_jawds_reason_and_a_forward_says_where_it_went(
         })
         .collect();
     assert_eq!(acted, [Some("a message can be edited for 15 minutes after it's sent"), Some("forwarded to 2 chats")]);
+}
+
+/// Ana's poll, the fixture's, newest in her chat: Ramen, Tasca do Chico and Pizza, nobody's vote
+/// yet.
+const POLL: &str = "3EB0F2A9B8E7D61A2B4C5D";
+
+/// A scripted jawd whose Ana's chat ends with her poll, taking `max` of its options, and if
+/// `deleting`, being deleted for everyone.
+fn polled(max: u32, deleting: bool) -> Scripted {
+    let jawd = scripted();
+    let mut row = fixture("send.poll.result")["result"]["row"].clone();
+    (row["chat"], row["mine"], row["status"]) = (json!(ANA), json!(false), Value::Null);
+    row["from"] = json!({ "id": "person:12", "name": "Ana", "colour": 4 });
+    row["poll"]["max"] = json!(max);
+    let mut kept = jawd.kept.lock().unwrap();
+    kept.rows.push(row);
+    if deleting {
+        kept.deleting.push(POLL.into());
+    }
+    drop(kept);
+    jawd
+}
+
+/// The screen's first line saying `text`.
+fn said<'a>(screen: &'a str, text: &str) -> &'a str {
+    screen.lines().find(|l| l.contains(text)).unwrap_or_default()
+}
+
+/// Each `poll.vote`'s options, in the order asked.
+fn votes(jawd: &Scripted) -> Vec<Value> {
+    jawd.asked("poll.vote").iter().map(|p| p["options"].clone()).collect()
+}
+
+#[test]
+fn a_vote_for_one_option_goes_by_its_name_with_its_chat_and_a_key_and_the_poll_shows_it_once_jawd_has_it() {
+    let jawd = polled(1, false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n").unwrap();
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ vote ") && screen.contains("Onde jantamos sexta? · choose one"), "{screen}");
+    run::press_live(&mut v, &rx, "2").unwrap();
+    let screen = until(&mut v, &rx, "● Tasca do Chico");
+    assert!(said(&screen, "● Tasca do Chico").contains(" 1 ━━━━━━━━━━"), "its count and bar:\n{screen}");
+    assert!(said(&screen, "Ramen").contains("○ Ramen") && screen.contains("1 voted · choose one"), "{screen}");
+    assert!(!screen.contains("╭ vote "), "a poll of one choice closes its picker:\n{screen}");
+    let asked = jawd.asked("poll.vote");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let what = (&asked[0]["message"], &asked[0]["options"], &asked[0]["chat"]);
+    assert_eq!(what, (&json!(POLL), &json!(["Tasca do Chico"]), &json!(ANA)), "by name, with its chat");
+    assert!(made(&asked[0]["key"]), "with a key of its own: {asked:?}");
+}
+
+#[test]
+fn a_vote_in_a_poll_of_several_names_every_option_chosen_in_the_polls_order_up_to_its_most() {
+    let jawd = polled(2, false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n31").unwrap();
+    assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
+    assert_eq!(votes(&jawd), [json!(["Pizza"]), json!(["Ramen", "Pizza"])], "each vote, all chosen then");
+    let keys: std::collections::HashSet<Value> = jawd.asked("poll.vote").iter().map(|p| p["key"].clone()).collect();
+    assert_eq!(keys.len(), 2, "a key for each vote");
+    assert!(frame(&mut v).contains("╭ vote "), "a poll of several keeps its picker open for the next");
+    run::press_live(&mut v, &rx, "2").unwrap();
+    let screen = until(&mut v, &rx, "take one back first");
+    assert!(screen.contains("this poll takes 2 at most, so take one back first"), "{screen}");
+    assert_eq!(votes(&jawd).len(), 2, "and jawd is asked nothing");
+    run::press_live(&mut v, &rx, "<esc>").unwrap();
+    let screen = until(&mut v, &rx, "■ Pizza");
+    assert!(said(&screen, "Ramen").contains("■ Ramen") && said(&screen, "Tasca do Chico").contains("□"), "{screen}");
+    assert!(screen.contains("1 voted · choose up to 2"), "{screen}");
+}
+
+#[test]
+fn the_same_option_again_or_take_back_my_vote_takes_the_vote_back_with_none_chosen() {
+    let jawd = polled(1, false);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n2").unwrap();
+    until(&mut v, &rx, "● Tasca do Chico");
+    run::press_live(&mut v, &rx, "\n2").unwrap();
+    let screen = until(&mut v, &rx, "no votes yet");
+    assert!(said(&screen, "Tasca do Chico").contains("○ Tasca do Chico"), "{screen}");
+    run::press_live(&mut v, &rx, "\n1").unwrap();
+    until(&mut v, &rx, "● Ramen");
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    assert!(frame(&mut v).contains("Take back my vote"), "{}", frame(&mut v));
+    run::press_live(&mut v, &rx, "<down><down><down>\n").unwrap();
+    let screen = until(&mut v, &rx, "no votes yet");
+    assert!(said(&screen, "Ramen").contains("○ Ramen") && !screen.contains("╭ vote "), "{screen}");
+    assert_eq!(votes(&jawd), [json!(["Tasca do Chico"]), json!([]), json!(["Ramen"]), json!([])], "none chosen");
+}
+
+#[test]
+fn a_vote_jawd_turns_down_says_jawds_reason_and_the_next_goes_by_the_poll_as_jawd_has_it() {
+    let jawd = polled(1, true);
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>\n2").unwrap();
+    let screen = until(&mut v, &rx, "can't be voted in");
+    assert!(screen.contains("it's being deleted for everyone, so it can't be voted in"), "in the footer:\n{screen}");
+    assert!(said(&screen, "Tasca do Chico").contains("○") && screen.contains("no votes yet"), "as it was:\n{screen}");
+    run::press_live(&mut v, &rx, "\n2").unwrap();
+    assert!(until_true(&mut v, &rx, |_| votes(&jawd).len() == 2), "{:?}", votes(&jawd));
+    assert_eq!(votes(&jawd)[1], json!(["Tasca do Chico"]), "not taken back, as the vote turned down would have it");
 }
 
 /// The demo engine's message in its group, from a member jawd has no name for.

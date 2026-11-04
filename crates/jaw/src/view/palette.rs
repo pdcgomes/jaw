@@ -71,6 +71,10 @@ pub enum Does {
     React(String, String),
     /// Deletes a message for you, or for everyone.
     DeleteFor(String, bool),
+    /// Opens a poll's options to vote with.
+    Votes(String),
+    /// Votes for a poll's option, by its place, or with `None` takes your vote back.
+    Vote(String, Option<usize>),
     /// Asks a new folder's name, at the top or in a folder of yours.
     NewFolder(Option<String>),
     Rename(String),
@@ -129,6 +133,10 @@ pub enum Mode {
     Forward {
         messages: Vec<String>,
         picked: Vec<(String, String)>,
+    },
+    /// A poll's options, to vote with.
+    Vote {
+        message: String,
     },
     /// Filing a chat or a person: the folders ticked, those it was in, and a folder being made to
     /// tick once jawd has made it.
@@ -196,7 +204,7 @@ impl Action {
         }
     }
 
-    fn key(mut self, key: &'static str) -> Action {
+    pub(super) fn key(mut self, key: &'static str) -> Action {
         self.key = Some(key);
         self
     }
@@ -650,6 +658,9 @@ impl View {
             if m.mine && m.status == Some(crate::data::Tick::Failed) {
                 all.push(Action::new("Send it again", "it wasn't sent", Does::OnMessage(id.clone(), '\n')).key("⏎"));
             }
+            if super::vote::votable(m).is_some() {
+                all.push(Action::new("Vote in this poll", "the selected message", Does::Votes(id.clone())).key("⏎"));
+            }
             all.extend([on("Reply to this message", "r", 'r'), on("React to this message", "+", '+')]);
             if self.not_editable(m).is_none() {
                 all.push(on("Edit this message", "e", 'e'));
@@ -785,6 +796,7 @@ impl View {
             return self.attach_items(p.query.text(), picked);
         }
         match &p.mode {
+            Mode::Vote { message } => return self.vote_items(message),
             Mode::File { name, ticked, .. } => {
                 let mut items = vec![Item::Heading("file into", fmt::fit(name, 48))];
                 for (id, depth) in self.your_folders() {
@@ -1006,6 +1018,13 @@ impl View {
                 Mode::React { .. } | Mode::Delete { .. } | Mode::Contact { .. } | Mode::Card { .. },
                 KeyCode::Tab | KeyCode::BackTab,
             ) => return,
+            (Mode::Vote { message }, KeyCode::Char(c @ '1'..='9')) if !ctrl && !alt => {
+                let message = message.clone();
+                self.vote_number(&message, c as usize - '1' as usize);
+                return;
+            }
+            (Mode::Vote { .. }, KeyCode::Char(_)) if !ctrl && !alt => return,
+            (Mode::Vote { .. }, KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace) => return,
             (Mode::File { .. }, KeyCode::Char(' ')) => {
                 let at = p.selected;
                 if let Some((id, _)) = self.your_folders().get(at).cloned() {
@@ -1433,6 +1452,12 @@ impl View {
                 }
                 self.focus = super::Focus::Typing;
             }
+            Does::Votes(id) => {
+                if let Some(m) = self.messages.as_ref().and_then(|w| w.get(&id)).cloned() {
+                    self.palette_vote(&m);
+                }
+            }
+            Does::Vote(id, option) => self.vote_act(&id, option),
         }
     }
 
@@ -1569,6 +1594,17 @@ impl View {
             Mode::React { .. } => (" react ", " 1-6 the quick ones · type for any other · ⏎ reacts · esc closes "),
             Mode::Delete { .. } => (" delete ", " ↑↓ moves · ⏎ deletes · esc closes "),
             Mode::Forward { .. } => (" forward ", " tab picks a chat · ⏎ forwards · esc closes "),
+            Mode::Vote { message }
+                if self
+                    .messages
+                    .as_ref()
+                    .and_then(|w| w.get(message))
+                    .and_then(super::vote::votable)
+                    .is_some_and(|p| p.max > 1) =>
+            {
+                (" vote ", " ⏎ or its number adds it or takes it off · esc closes ")
+            }
+            Mode::Vote { .. } => (" vote ", " ⏎ or its number votes · again takes it back · esc closes "),
             Mode::Contact { .. } => (" contact ", " ↑↓ moves · ⏎ sends their card · esc closes "),
             Mode::Card { .. } => (" card ", " ↑↓ moves · ⏎ starts a chat · esc closes "),
             Mode::Attach { .. } => (" attach ", " tab completes a folder or picks a file · ⏎ attaches · esc closes "),
@@ -1609,7 +1645,7 @@ impl View {
                 "for how long?"
             } else if let Mode::Name { .. } = p.mode {
                 "the folder's name"
-            } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } = p.mode {
+            } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } | Mode::Vote { .. } = p.mode {
                 ""
             } else if let Mode::Contact { .. } = p.mode {
                 "whose card? a name or a number"

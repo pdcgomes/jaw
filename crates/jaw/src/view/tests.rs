@@ -87,6 +87,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         location: None,
         event: None,
         contact: None,
+        poll: None,
     }
 }
 
@@ -257,6 +258,7 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     assert!(screen.contains("╭ keys ─") && screen.contains("any key closes"), "{screen}");
     let save = screen.lines().find(|l| l.contains("attach files")).unwrap();
     assert!(save.contains("s          save"), "{screen}");
+    assert!(screen.contains("⏎          open, play, unfold, vote"), "{screen}");
     assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
     press(&mut v, &rx, "?");
     assert!(v.overlay.is_none());
@@ -1111,7 +1113,7 @@ fn poll_in_the_box_says_polls_come_later_and_keeps_what_was_typed() {
 }
 
 #[test]
-fn enter_on_a_file_jawd_hasnt_downloaded_says_it_opens_once_it_has_and_on_a_poll_that_that_comes_later() {
+fn enter_on_a_file_jawd_hasnt_downloaded_says_it_opens_once_it_has_and_on_a_poll_without_options_why() {
     let (mut v, rx) = view(100, 30);
     let open = v.open.clone().unwrap();
     let mut photo = theirs("photo", "9999999999999~1", NOW, "");
@@ -1124,7 +1126,7 @@ fn enter_on_a_file_jawd_hasnt_downloaded_says_it_opens_once_it_has_and_on_a_poll
     assert!(frame(&mut v).contains("it opens once jawd has downloaded it"));
     v.focus = Focus::Message("poll".into());
     press(&mut v, &rx, "\n");
-    assert!(frame(&mut v).contains("opening these comes later"));
+    assert!(frame(&mut v).contains("jawd hasn't sent this poll's options"));
 }
 
 #[test]
@@ -1791,6 +1793,81 @@ fn enter_while_forwarding_with_none_picked_forwards_to_the_selected_chat() {
     v.open_chat("mae");
     run::settle(&mut v, &rx);
     assert_eq!(newest(&v).forwarded, 1);
+}
+
+/// The made-up account's poll, Rui's in Jantar de sexta, which is that chat's oldest message,
+/// selected.
+fn jantar_poll(width: u16) -> (View, Receiver<Event>) {
+    let (mut v, rx) = view(width, 40);
+    v.open_chat("jantar");
+    v.picking = false;
+    run::settle(&mut v, &rx);
+    press(&mut v, &rx, "<up><home>");
+    assert!(newest(&v).kind != Kind::Poll && shown_poll(&v).is_some(), "{}", frame(&mut v));
+    (v, rx)
+}
+
+/// The open chat's poll, as its window holds it.
+fn shown_poll(v: &View) -> Option<Message> {
+    v.messages.as_ref()?.rows().find(|m| m.kind == Kind::Poll).cloned()
+}
+
+#[test]
+fn a_poll_shows_each_option_with_your_choice_marked_how_many_chose_it_and_how_many_voted() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = jantar_poll(width);
+        assert_eq!(v.focus, Focus::Message(shown_poll(&v).unwrap().id));
+        let screen = frame(&mut v);
+        assert!(line_with(&screen, "Onde jantamos sexta?").contains("Rui   ☰"), "at {width}:\n{screen}");
+        assert!(line_with(&screen, "○ Ramiro").contains(" 3 ━━━━━─────"), "half of those who voted:\n{screen}");
+        assert!(line_with(&screen, "○ Tasca do Chico").contains(" 1 ━━────────"), "{screen}");
+        assert!(screen.contains("6 voted · choose one"), "{screen}");
+        assert!(v.hints().contains(&("⏎", "vote", true)), "{:?}", v.hints());
+        press(&mut v, &rx, "<esc>");
+    }
+}
+
+#[test]
+fn enter_on_a_poll_opens_its_options_and_a_number_votes_for_one_which_the_poll_shows_once_jawd_has_it() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = jantar_poll(width);
+        press(&mut v, &rx, "\n");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("╭ vote ") && screen.contains("Onde jantamos sexta? · choose one"),
+            "at {width}:\n{screen}"
+        );
+        assert!(
+            screen.contains("3 votes  1") && screen.contains("1 vote  3"),
+            "each with its count and key:\n{screen}"
+        );
+        assert!(screen.contains("⏎ or its number votes"), "{screen}");
+        press(&mut v, &rx, "3");
+        let screen = frame(&mut v);
+        assert!(!screen.contains("╭ vote "), "one choice, so it closes:\n{screen}");
+        assert!(line_with(&screen, "● Tasca do Chico").contains(" 2 ━━━─"), "{screen}");
+        assert!(screen.contains("7 voted · choose one"), "{screen}");
+        press(&mut v, &rx, "\n");
+        assert!(frame(&mut v).contains("Take back my vote"), "once you have a vote");
+        press(&mut v, &rx, "3");
+        let screen = frame(&mut v);
+        assert!(line_with(&screen, "○ Tasca do Chico").contains(" 1 ━"), "the same again takes it back:\n{screen}");
+        assert!(screen.contains("6 voted · choose one"), "{screen}");
+    }
+}
+
+#[test]
+fn on_a_selected_poll_one_to_six_still_react_and_the_palette_votes_in_it() {
+    let (mut v, rx) = jantar_poll(140);
+    press(&mut v, &rx, "2");
+    assert!(!frame(&mut v).contains("╭ vote "));
+    let mine: Vec<String> =
+        shown_poll(&v).unwrap().reactions.iter().filter(|r| r.mine).map(|r| r.emoji.clone()).collect();
+    assert_eq!(mine, ["❤️"], "a quick reaction, as on the Mac");
+    press(&mut v, &rx, "<c-k>vote");
+    assert!(frame(&mut v).contains("Vote in this poll"));
+    press(&mut v, &rx, "\n1");
+    assert!(shown_poll(&v).unwrap().poll.unwrap().options[0].mine, "{}", frame(&mut v));
 }
 
 #[test]

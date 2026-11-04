@@ -1,7 +1,7 @@
 //! The made-up account's answers to M2's message actions, as jawd would push them: a reply's
 //! quote and its mentions in the row it sends, one reaction of yours per message, edits for 15
 //! minutes and deletes for everyone for 60 hours, forwards as new messages of yours, contact cards
-//! of yours, each recipient's receipts, and a chat's members.
+//! of yours, votes counted as jawd counts them, each recipient's receipts, and a chat's members.
 
 use super::{Account, Later, ME, markup};
 use crate::data::{
@@ -341,6 +341,40 @@ impl Account {
         }
         let said = if sent == 1 { "forwarded".to_string() } else { format!("forwarded to {sent} chats") };
         self.send(Update::Notice(said));
+    }
+
+    /// A vote in a poll, counted as jawd counts it: your last vote replaced, none taking it back,
+    /// and one jawd would refuse refused in its words.
+    pub(super) fn on_vote(&mut self, message: &str, options: &[String], key: &str) {
+        let Some((t, i)) = self.locate(message) else { return };
+        let m = &self.threads[t].messages[i];
+        let why = match m.poll.as_deref() {
+            _ if m.deleted => Some("a deleted poll can't be voted in".to_string()),
+            None => Some("only a poll can be voted in".to_string()),
+            Some(p) if options.len() > p.max as usize && p.max <= 1 => {
+                Some("this poll takes one choice, so a vote chooses one option at most".to_string())
+            }
+            Some(p) if options.len() > p.max as usize => Some(format!("this poll takes {} choices at most", p.max)),
+            Some(_) => None,
+        };
+        if let Some(why) = why {
+            self.send(Update::Acted { key: key.to_string(), said: Some(why) });
+            return;
+        }
+        let Some(poll) = self.threads[t].messages[i].poll.as_deref_mut() else { return };
+        let voted = poll.options.iter().any(|o| o.mine);
+        for o in &mut poll.options {
+            let chosen = options.contains(&o.name);
+            o.votes = (o.votes + u32::from(chosen && !o.mine)).saturating_sub(u32::from(o.mine && !chosen));
+            o.mine = chosen;
+        }
+        match (voted, options.is_empty()) {
+            (false, false) => poll.voters += 1,
+            (true, true) => poll.voters = poll.voters.saturating_sub(1),
+            _ => {}
+        }
+        self.changed(t, i);
+        self.send(Update::Acted { key: key.to_string(), said: None });
     }
 
     pub(super) fn on_message_info(&mut self, message: &str) {

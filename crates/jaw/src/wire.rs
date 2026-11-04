@@ -43,9 +43,9 @@ struct Sending {
     first: SystemTime,
 }
 
-/// An action on messages, `react`, `edit`, `delete` or `forward`, or contact cards sent with
-/// `send.contact`, asked with a key made for it alone and kept until jawd answers for it, as a
-/// message is.
+/// An action on messages, `react`, `edit`, `delete`, `forward` or `poll.vote`, or contact cards
+/// sent with `send.contact`, asked with a key made for it alone and kept until jawd answers for
+/// it, as a message is.
 struct Acting {
     method: &'static str,
     /// The chat its messages are in.
@@ -315,9 +315,9 @@ impl Wire {
     }
 
     /// Asks for an action on messages in `chat`, with a key of its own, so asking again after a
-    /// lost answer does it once.
+    /// lost answer does it once: the one in `params` when the interface made it, or a new one.
     fn act(&mut self, method: &'static str, chat: &str, mut params: Value, what: &'static str, done: Option<String>) {
-        let key = crate::data::key();
+        let key = params["key"].as_str().map_or_else(crate::data::key, String::from);
         params["chat"] = json!(chat);
         params["key"] = json!(key);
         let acting = Acting {
@@ -841,6 +841,10 @@ impl Jawd for Wire {
     fn forward(&mut self, chat: &str, messages: &[String], to: &[String]) {
         let done = if to.len() == 1 { "forwarded".into() } else { format!("forwarded to {} chats", to.len()) };
         self.act("forward", chat, json!({ "messages": messages, "to": to }), "forwarding", Some(done));
+    }
+
+    fn vote(&mut self, chat: &str, message: &str, options: &[String], key: &str) {
+        self.act("poll.vote", chat, json!({ "message": message, "options": options, "key": key }), "voting", None);
     }
 
     fn message_info(&mut self, chat: &str, message: &str) {

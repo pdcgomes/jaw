@@ -16,6 +16,7 @@ mod settings;
 mod sidebar;
 mod status_line;
 mod voice;
+mod vote;
 
 use crate::composer::Composer;
 use crate::data::{
@@ -279,6 +280,9 @@ pub struct View {
     /// A card being made of someone whose chat jawd keeps under their LID, waiting for that chat's
     /// members to say their number.
     carding: Option<actions::Carding>,
+    /// The vote last asked in each poll, by the poll's ID, with its key and its options, until the
+    /// poll's row shows it or jawd turns it down, so a choice made meanwhile builds on it.
+    votes: HashMap<String, (String, Vec<String>)>,
     /// The message whose info the sheet shows, and jawd's answer once it comes.
     info: Option<(String, Option<Result<crate::data::MessageInfo, String>>)>,
     /// The voice message playing or paused, or the recording being listened to, as jawd last
@@ -417,6 +421,7 @@ impl View {
             members: HashMap::new(),
             members_asked: HashSet::new(),
             carding: None,
+            votes: HashMap::new(),
             info: None,
             playing: None,
             voice_asked: None,
@@ -636,6 +641,7 @@ impl View {
                     self.laid.remove(&id);
                     self.placed.remove(&id);
                 }
+                self.votes_shown();
                 if was_empty && !now_empty {
                     self.chomp_until = Some(self.now() + CHOMP);
                 }
@@ -683,6 +689,7 @@ impl View {
             Update::Acted { key, said } => {
                 self.unsure.retain(|(_, k)| *k != key);
                 if let Some(said) = said {
+                    self.votes.retain(|_, (k, _)| *k != key);
                     self.say(said);
                 }
             }
