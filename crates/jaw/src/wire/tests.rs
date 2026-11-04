@@ -42,8 +42,8 @@ struct Kept {
     keyed: HashMap<String, String>,
     /// Each action it did, by key, with its answer.
     acted: HashMap<String, Value>,
-    /// Whether to take the next message, action, layout or settings change and drop the connection
-    /// before answering, as a jawd killed between its commit and its answer does.
+    /// Whether to take the next message, action, save, layout or settings change and drop the
+    /// connection before answering, as a jawd killed between its commit and its answer does.
     swallow: bool,
     /// The panes' layout it keeps for jaw, and its version.
     layout: Option<Value>,
@@ -238,6 +238,9 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
                     return error(code::INTERNAL, &why, Value::Null);
                 }
             };
+            if std::mem::take(&mut kept.swallow) {
+                return None;
+            }
             json!({ "path": path.display().to_string() })
         }
         "message.info" => json!({
@@ -1735,18 +1738,21 @@ fn a_star_jawd_turns_down_says_jawds_reason_and_shows_none() {
     assert_eq!(jawd.asked("star"), [json!({ "message": VOICE, "starred": true, "chat": ANA })]);
 }
 
-/// Ana's photo, newest in her chat, which jawd has.
+/// Ana's photo, newest in her chat.
 const PHOTO: &str = "3EB0B7C8D9E0F1A2";
 
-/// A scripted jawd whose Ana's chat ends with her photo, and if `gone`, one jawd can't download.
+/// A scripted jawd whose Ana's chat ends with her photo: one jawd has, or if `gone`, one it hasn't
+/// and can't download.
 fn with_photo(gone: bool) -> Scripted {
     let jawd = scripted();
     let mut row = fixture("messages.watch.result")["result"]["rows"][0].clone();
     (row["id"], row["sort"], row["at"]) =
         (json!(PHOTO), json!("1792145190123~000000000126"), json!(1_792_145_190_123_i64));
     (row["kind"], row["spans"], row["reactions"]) = (json!("image"), json!([]), json!([]));
-    let media =
-        json!({ "w": 4032, "h": 3024, "mime": "image/jpeg", "state": "local", "path": "media/files/9d6c20c8.jpg" });
+    let mut media = json!({ "w": 4032, "h": 3024, "mime": "image/jpeg", "state": "remote" });
+    if !gone {
+        (media["state"], media["path"]) = (json!("local"), json!("media/files/9d6c20c8.jpg"));
+    }
     row["media"] = media;
     let mut kept = jawd.kept.lock().unwrap();
     kept.rows.push(row);
@@ -1772,7 +1778,10 @@ fn a_save_into_a_folder_asks_where_from_downloads_and_says_where_jawd_put_it() {
     run::press_live(&mut v, &rx, "<up>s").unwrap();
     let screen = frame(&mut v);
     assert!(screen.contains("╭ save ") && screen.contains("› ~/Downloads/"), "asks where, from Downloads:\n{screen}");
-    run::press_live(&mut v, &rx, &format!("<c-u>{folder}/\n")).unwrap();
+    run::press_live(&mut v, &rx, &format!("<c-u>{folder}/")).unwrap();
+    press_quick(&mut v, "\n");
+    let (screen, saving) = (frame(&mut v), format!("saving to {folder}/"));
+    assert!(screen.contains(&saving) && !screen.contains("╭ save "), "before jawd answers:\n{screen}");
     let said = format!("saved to {folder} as {PHOTO}.jpg");
     let screen = until(&mut v, &rx, &said);
     assert!(screen.contains(&said), "where jawd put it:\n{screen}");
@@ -1816,10 +1825,28 @@ fn a_save_jawd_turns_down_says_jawds_reason_and_a_path_jawd_wouldnt_take_is_said
     let screen = frame(&mut v);
     assert!(screen.contains("a path from / or ~/") && screen.contains("╭ save "), "still asking:\n{screen}");
     assert!(jawd.asked("media.save").is_empty(), "{:?}", jawd.asked("media.save"));
-    run::press_live(&mut v, &rx, "<c-u>~/\n").unwrap();
+    run::press_live(&mut v, &rx, "<c-u>~/").unwrap();
+    press_quick(&mut v, "\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("it downloads first; it's saved once it's here"), "before jawd answers:\n{screen}");
     let screen = until(&mut v, &rx, "not saved");
     let why = "not saved: jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
     assert!(screen.contains(why), "in the footer:\n{screen}");
+}
+
+#[test]
+fn a_save_whose_answer_the_connection_lost_says_to_look_for_the_file_and_isnt_asked_again() {
+    let (jawd, (_dir, folder)) = (with_photo(false), folder());
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, &format!("<up>s<c-u>{folder}/")).unwrap();
+    jawd.kept.lock().unwrap().swallow = true;
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    let why = "jawd went away before saying where it saved it, so look for it before saving again";
+    let screen = until(&mut v, &rx, why);
+    assert!(screen.contains(why), "in the footer:\n{screen}");
+    back_and_answered(&mut v, &rx);
+    let asked = jawd.asked("media.save");
+    assert_eq!(asked.len(), 1, "not asked again, which could make a second copy: {asked:?}");
 }
 
 /// The demo engine's message in its group, from a member jawd has no name for.
