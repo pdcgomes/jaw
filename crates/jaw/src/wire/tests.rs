@@ -218,7 +218,9 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             let why = "jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
             return error(code::NOT_ALLOWED, why, Value::Null);
         }
-        // Where jawd would copy it, which it answers with; nothing is written.
+        // Where jawd would copy it, which it answers with; nothing is written. As jawd does, it's
+        // into `to` if that's a folder there is, and otherwise `to` is a file's path, named by its
+        // last part even with a `/` after it, in a folder that has to be there.
         "media.save" => {
             let to = params["to"].as_str().unwrap_or_default();
             if !(to.starts_with('/') || to.starts_with("~/")) {
@@ -226,9 +228,17 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
                 return error(code::INVALID_PARAMS, why, json!({ "param": "to" }));
             }
             let home = std::env::var("HOME").unwrap_or_default();
-            let whole = to.strip_prefix('~').map_or_else(|| to.to_string(), |rest| format!("{home}{rest}"));
+            let whole = to.strip_prefix("~/").map_or_else(|| PathBuf::from(to), |rest| Path::new(&home).join(rest));
             let named = format!("{}.jpg", params["message"].as_str().unwrap_or_default());
-            json!({ "path": if whole.ends_with('/') { format!("{whole}{named}") } else { whole } })
+            let path = match (whole.parent(), whole.file_name()) {
+                _ if whole.is_dir() => whole.join(named),
+                (Some(folder), Some(file)) if folder.is_dir() => folder.join(file),
+                _ => {
+                    let why = format!("jawd couldn't save the file: {} isn't a folder there is", whole.display());
+                    return error(code::INTERNAL, &why, Value::Null);
+                }
+            };
+            json!({ "path": path.display().to_string() })
         }
         "message.info" => json!({
             "message": params["message"],
@@ -1716,28 +1726,55 @@ fn with_photo(gone: bool) -> Scripted {
     jawd
 }
 
+/// A folder of the test's own to save into, as it's typed: the scripted jawd, as jawd does, saves
+/// into a folder only if it's there, and `~/Downloads` needn't be.
+fn folder() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let typed = dir.path().display().to_string();
+    (dir, typed)
+}
+
 #[test]
 fn a_save_into_a_folder_asks_where_from_downloads_and_says_where_jawd_put_it() {
-    let jawd = with_photo(false);
+    let (jawd, (_dir, folder)) = (with_photo(false), folder());
     let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
     run::press_live(&mut v, &rx, "<up>s").unwrap();
     let screen = frame(&mut v);
     assert!(screen.contains("╭ save ") && screen.contains("› ~/Downloads/"), "asks where, from Downloads:\n{screen}");
-    run::press_live(&mut v, &rx, "\n").unwrap();
-    let screen = until(&mut v, &rx, "saved to Downloads as");
-    assert!(screen.contains(&format!("saved to Downloads as {PHOTO}.jpg")), "where jawd put it:\n{screen}");
-    assert_eq!(jawd.asked("media.save"), [json!({ "message": PHOTO, "to": "~/Downloads/", "chat": ANA })]);
+    run::press_live(&mut v, &rx, &format!("<c-u>{folder}/\n")).unwrap();
+    let said = format!("saved to {folder} as {PHOTO}.jpg");
+    let screen = until(&mut v, &rx, &said);
+    assert!(screen.contains(&said), "where jawd put it:\n{screen}");
+    assert_eq!(jawd.asked("media.save"), [json!({ "message": PHOTO, "to": format!("{folder}/"), "chat": ANA })]);
 }
 
 #[test]
 fn a_save_into_a_named_file_goes_to_the_path_typed_and_says_where() {
-    let jawd = with_photo(false);
+    let (jawd, (_dir, folder)) = (with_photo(false), folder());
     let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
-    run::press_live(&mut v, &rx, "<up>s<c-u>~/Documents/o lago.jpg\n").unwrap();
-    let screen = until(&mut v, &rx, "saved to ~/Documents as o lago.jpg");
-    assert!(screen.contains("saved to ~/Documents as o lago.jpg") && !screen.contains("╭ save "), "{screen}");
+    run::press_live(&mut v, &rx, &format!("<up>s<c-u>{folder}/o lago.jpg\n")).unwrap();
+    let said = format!("saved to {folder} as o lago.jpg");
+    let screen = until(&mut v, &rx, &said);
+    assert!(screen.contains(&said) && !screen.contains("╭ save "), "{screen}");
     let asked = jawd.asked("media.save");
-    assert_eq!(asked, [json!({ "message": PHOTO, "to": "~/Documents/o lago.jpg", "chat": ANA })]);
+    assert_eq!(asked, [json!({ "message": PHOTO, "to": format!("{folder}/o lago.jpg"), "chat": ANA })]);
+}
+
+#[test]
+fn a_folder_typed_with_its_slash_that_isnt_there_is_said_and_the_prompt_stays_open() {
+    let (jawd, (dir, folder)) = (with_photo(false), folder());
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, &format!("<up>s<c-u>{folder}/recibos/\n")).unwrap();
+    let screen = frame(&mut v);
+    let said = format!("there's no folder {folder}/recibos/");
+    assert!(screen.contains(&said) && screen.contains("╭ save "), "still asking:\n{screen}");
+    let asked = jawd.asked("media.save");
+    assert!(asked.is_empty(), "jawd would have saved it as a file named recibos: {asked:?}");
+    std::fs::create_dir(dir.path().join("recibos")).unwrap();
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    let said = format!("saved to {folder}/recibos as {PHOTO}.jpg");
+    let screen = until(&mut v, &rx, &said);
+    assert!(screen.contains(&said), "into it once it's there:\n{screen}");
 }
 
 #[test]
@@ -1748,7 +1785,7 @@ fn a_save_jawd_turns_down_says_jawds_reason_and_a_path_jawd_wouldnt_take_is_said
     let screen = frame(&mut v);
     assert!(screen.contains("a path from / or ~/") && screen.contains("╭ save "), "still asking:\n{screen}");
     assert!(jawd.asked("media.save").is_empty(), "{:?}", jawd.asked("media.save"));
-    run::press_live(&mut v, &rx, "<c-u>~/Downloads/\n").unwrap();
+    run::press_live(&mut v, &rx, "<c-u>~/\n").unwrap();
     let screen = until(&mut v, &rx, "not saved");
     let why = "not saved: jawd couldn't download the file: neither WhatsApp's server nor the phone has it any more";
     assert!(screen.contains(why), "in the footer:\n{screen}");

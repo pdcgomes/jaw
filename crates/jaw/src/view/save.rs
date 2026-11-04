@@ -1,6 +1,7 @@
 //! Saving a message's file: s, or the palette's "Save this message's file", asks where in the
 //! palette, from `~/Downloads/`, where the Mac's Save puts a file: what's typed is a folder to save
-//! it into or a file's path, whole or from `~/`, Tab completing a folder as the attach picker does.
+//! it into or a file's path, whole or from `~/`, Tab completing a folder as the attach picker does,
+//! and a folder typed with its `/` has to be there.
 //! jawd copies the file there with `media.save`, downloading it first if it isn't here yet, and
 //! answers once the copy is whole, on a task of its own, so other requests don't wait for it. Where
 //! it went is said as the Mac says it, "saved to Downloads as …", and why not in jawd's words.
@@ -72,12 +73,18 @@ impl View {
         }
     }
 
-    /// Enter: the file asked of jawd to where it's typed, a whole path or one from `~/`.
+    /// Enter: the file asked of jawd to where it's typed, a whole path or one from `~/`. A folder
+    /// typed with its `/` that isn't there is said and asks jawd nothing, since jawd takes a path
+    /// that isn't a folder for a file's, and would save it under the folder's name.
     pub(super) fn save_go(&mut self) {
         let Some(Palette { mode: Mode::Save { message }, query, .. }) = self.palette.as_ref() else { return };
         let (message, to) = (message.clone(), query.text().trim().to_string());
         if !(to.starts_with('/') || to.starts_with("~/")) {
             self.say("a path from / or ~/");
+            return;
+        }
+        if to.ends_with('/') && !expand(&to).is_dir() {
+            self.say(format!("there's no folder {to}"));
             return;
         }
         self.palette = None;
