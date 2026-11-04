@@ -3915,6 +3915,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_rows_left_in_the_inbox_go_in_short_transactions_with_nothing_waiting() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        // As in a converter's batch, far fewer than BATCH_ROWS changes, and with nothing waiting to end
+        // one early only BATCH_TIME splits them.
+        let count = BATCH_ROWS / 2;
+        let chat = "351910000001@s.whatsapp.net";
+        let left = messages((0..count).map(|n| text(chat, &format!("l{n}"), n as i64, "left from before")));
+        let applied = store.apply_leftovers(left).await.unwrap();
+        assert_eq!(store.count("messages").unwrap(), count as u64);
+        assert!(
+            applied.transactions > 1,
+            "{count} changes with nothing waiting in {} transaction",
+            applied.transactions
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn jawd_status_counts_the_rows_left_in_the_inbox_waiting_for_the_writer_among_its_background_work() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
