@@ -2783,7 +2783,7 @@ INSERT INTO messages_fts (messages_fts, rank) VALUES ('secure-delete', ?1)
 INSERT INTO links_fts (links_fts, rank) VALUES ('secure-delete', ?1)
 
 -- src/store/write/expiry.rs
-SELECT m.expires_at IS NOT NULL OR m.view_once, o.raw FROM messages m LEFT JOIN outbox o ON o.message = m.n WHERE m.n = ?1
+SELECT m.expires_at IS NOT NULL OR m.view_once, o.raw, iif(m.mine AND m.expires_at IS NULL AND NOT m.view_once AND o.n IS NULL, m.raw, NULL) FROM messages m LEFT JOIN outbox o ON o.message = m.n WHERE m.n = ?1
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH o USING INDEX sqlite_autoindex_outbox_1 (message=?) LEFT-JOIN
 
@@ -3474,6 +3474,10 @@ SELECT 1 FROM messages WHERE n = ?1 AND deleted
 
 -- src/store/write/outbox.rs
 UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+SELECT raw FROM messages WHERE n = ?1 AND mine AND status = 'failed' AND expires_at IS NULL
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs

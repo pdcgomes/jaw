@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
@@ -1966,6 +1965,137 @@ async fn a_message_of_yours_waiting_to_go_with_a_timer_deleted_or_revoked_leaves
         settled(&store).await;
         assert_eq!(store.count("outbox").unwrap(), 0, "{what}: WhatsApp has it");
         gone_but_for(home.path(), "gnuwaiting", &before, &format!("{what}, once WhatsApp has it"));
+    }
+}
+
+/// A failed message of yours that went with a timer is still taken as an erasure takes it once
+/// nothing can send it again (round four's I8): WhatsApp refused it, and your deletion of it for
+/// everyone had no receipt in its day, so that deletion is kept for a late one and the message's own
+/// outbox row goes, leaving its row, which WhatsApp never gave a time to go, saying all it said.
+/// Then the deletion's late receipt revokes it, or you delete it for you, or its own late receipt
+/// says WhatsApp had it after all, which starts its time from the timer it went with, and it goes
+/// then: its words and its link's leave every index's segments, no page freed since keeps them, and
+/// the WAL is emptied. Among thirty captioned photos and thirty messages with links.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_message_of_yours_with_a_timer_whose_deletion_waits_for_a_late_receipt_still_goes_as_an_erasure_takes_it()
+ {
+    let goes_as = e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some("see https://gnufailing.example".into()),
+            context_info: Some(Box::new(e2e::ContextInfo { expiration: Some(86_400), ..Default::default() })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    // Its row's raw protobuf, as send.text writes it.
+    let went = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(true),
+            id: Some("mine".into()),
+            participant: None,
+        },
+        message: Some(goes_as.clone()),
+        message_timestamp: Some(((AT + 90) / 1000) as u64),
+        ..Default::default()
+    };
+    let receipt = |target: &str| {
+        Change::Amend(Amend {
+            chat: ANA.into(),
+            target: target.into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: AT + 200,
+            what: Amendment::Status { status: "delivered".into() },
+            raw: None,
+        })
+    };
+    let cases = [
+        ("the deletion's late receipt", receipt("x1")),
+        ("a deletion for you", Change::DeleteMessage { chat: ANA.into(), id: "mine".into() }),
+        ("its own late receipt", receipt("mine")),
+    ];
+    for (what, late) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let mine = Message {
+            sender: None,
+            mine: true,
+            status: Some("pending"),
+            expires_at: None,
+            raw: Some(Packed::new(&went.encode_to_vec())),
+            ..linked("mine", "gnufailing", 90)
+        };
+        let step = Step::Enqueue {
+            message: Box::new(mine),
+            kind: "text",
+            raw: goes_as.encode_to_vec(),
+            key: None,
+            written: Written::default(),
+        };
+        let mut changes = several_of_each();
+        changes.push(Change::Outbox(step));
+        apply(&store, changes).await;
+        let deletion = Step::Act {
+            chat: ANA.into(),
+            target: "mine".into(),
+            id: "x1".into(),
+            effect: Amendment::Revoke,
+            at: AT + 100,
+            raw: vec![1],
+            key: None,
+            written: Written::default(),
+        };
+        apply(&store, vec![Change::Outbox(deletion)]).await;
+        let row_of = |kind: &'static str| {
+            query(&store, move |db| {
+                Ok(db.query_row("SELECT n FROM outbox WHERE kind = ?1", [kind], |r| r.get::<_, i64>(0))?)
+            })
+        };
+        let (message, deletion) = (row_of("text").await, row_of("revoke").await);
+        let failed = Step::Failed { outbox: message, error: "406".into(), next_at: None };
+        apply(&store, vec![Change::Outbox(failed)]).await;
+        let unconfirmed = Step::Unconfirmed { outbox: deletion, error: "503".into(), until: 0 };
+        apply(&store, vec![Change::Outbox(unconfirmed)]).await;
+        apply(&store, vec![Change::Outbox(Step::NoReceipt { outbox: deletion, error: "no receipt".into() })]).await;
+        settled(&store).await;
+        let outbox: Vec<(String, String)> = query(&store, |db| {
+            Ok(db
+                .prepare("SELECT kind, state FROM outbox")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+        let kept = [("revoke".to_string(), "failed".to_string())];
+        assert_eq!(outbox, kept, "{what}: only the deletion, kept for a late receipt");
+        let (text, _, _) = said(&store, "mine").await;
+        assert_eq!(text.as_deref(), Some("see https://gnufailing.example"), "{what}: its row still says it");
+        let blocks = index_blocks(home.path(), "gnufailing");
+        assert!(blocks.iter().all(|(_, held)| *held > 0), "{what}: its words are in every index: {blocks:?}");
+        let before = free_holding(&store, home.path(), b"gnufailing").await;
+        let received_from = now_ms();
+        apply(&store, vec![late]).await;
+        if what == "its own late receipt" {
+            let (n, expires_at): (i64, Option<i64>) = query(&store, |db| {
+                Ok(db.query_row("SELECT n, expires_at FROM messages WHERE id = 'mine'", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?)
+            })
+            .await;
+            let day = 86_400_000;
+            let at = expires_at.expect("its time to go starts once WhatsApp has it");
+            assert!((received_from + day..=now_ms() + day).contains(&at), "{what}: a day from the receipt: {at}");
+            assert_eq!(apply(&store, vec![Change::Expire { n, at }]).await.changed, 1, "{what}: it goes at its time");
+        }
+        settled(&store).await;
+        let row: Option<bool> = query(&store, |db| {
+            Ok(db.query_row("SELECT deleted FROM messages WHERE id = 'mine'", [], |r| r.get(0)).optional()?)
+        })
+        .await;
+        let gone = if what == "the deletion's late receipt" { Some(true) } else { None };
+        assert_eq!(row, gone, "{what}: revoked by the receipt, or gone");
+        gone_but_for(home.path(), "gnufailing", &before, what);
+        still_found(&store, what).await;
     }
 }
 

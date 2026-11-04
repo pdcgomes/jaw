@@ -241,6 +241,8 @@ const GOES_AS: &str = "SELECT raw FROM outbox WHERE n = ?1";
 /// Whether message ?1 was deleted for everyone.
 pub(super) const REVOKED: &str = "SELECT 1 FROM messages WHERE n = ?1 AND deleted";
 const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 WHERE n = ?1 AND expires_at IS NULL RETURNING expires_at";
+/// Message ?1 of yours' raw protobuf, if it failed and has no time to go.
+const FAILED_WENT: &str = "SELECT raw FROM messages WHERE n = ?1 AND mine AND status = 'failed' AND expires_at IS NULL";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
     WHERE n = ?1 AND state = 'queued'";
@@ -1252,7 +1254,7 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
 /// that went without gets none, whatever its chat's timer is by then, as WhatsApp keeps it.
 pub(super) fn received(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     let went: Option<Vec<u8>> = db.prepare_cached(WENT)?.query_row([n], |r| r.get(0)).optional()?;
-    let Some(went) = went else { return Ok(()) };
+    let Some(went) = went else { return received_late(db, stamps, n) };
     let Some(seconds) = convert::timer(&went) else {
         db.prepare_cached(DEQUEUE)?.execute([n])?;
         return Ok(());
@@ -1264,6 +1266,23 @@ pub(super) fn received(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<(
     } else {
         db.prepare_cached(DEQUEUE)?.execute([n])?;
     }
+    goes_in(db, stamps, n, seconds)
+}
+
+/// Message `n` of yours, failed and with nothing to send it again (`tidied`), has reached the server
+/// after all, as a late receipt says: if it went with a timer, which its own row's raw protobuf says
+/// since no outbox row does, its time starts now, as `received` starts it.
+fn received_late(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
+    let raw: Option<Option<Vec<u8>>> = db.prepare_cached(FAILED_WENT)?.query_row([n], |r| r.get(0)).optional()?;
+    match raw.flatten().as_deref().and_then(expiry::went_with) {
+        Some(seconds) => goes_in(db, stamps, n, seconds),
+        None => Ok(()),
+    }
+}
+
+/// Message `n` has its time to go, `seconds` from now, unless it has one; a sooner time than the
+/// timer waits for wakes it.
+fn goes_in(db: &Connection, stamps: &mut Stamps, n: i64, seconds: u32) -> Result<()> {
     let at = now_ms() + i64::from(seconds) * 1000;
     let expires: Option<i64> = db.prepare_cached(EXPIRES)?.query_row(params![n, at], |r| r.get(0)).optional()?;
     stamps.expires(expires);

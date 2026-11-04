@@ -11,9 +11,11 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
+use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{CHAT, MESSAGE, PENDING_FOR, Stamps, delete_row, now_ms};
+use super::{CHAT, MESSAGE, PENDING_FOR, Stamps, delete_row, now_ms, unpack};
 use crate::convert;
 
 /// How many due messages the timer hands the writer at once, which erases them in the background
@@ -80,24 +82,38 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
     erase(db, stamps, chat, n)
 }
 
-/// Whether message ?1 has a time to go or is marked to open once, and, for one of yours still
-/// waiting for the server, what it goes as.
-const ERASABLE: &str = "SELECT m.expires_at IS NOT NULL OR m.view_once, o.raw FROM messages m
-    LEFT JOIN outbox o ON o.message = m.n WHERE m.n = ?1";
+/// Whether message ?1 has a time to go or is marked to open once; for one of yours still waiting
+/// for the server, what it goes as; and for one of yours with neither that nothing sends, its raw
+/// protobuf, which says what it went as.
+const ERASABLE: &str = "SELECT m.expires_at IS NOT NULL OR m.view_once, o.raw,
+        iif(m.mine AND m.expires_at IS NULL AND NOT m.view_once AND o.n IS NULL, m.raw, NULL)
+    FROM messages m LEFT JOIN outbox o ON o.message = m.n WHERE m.n = ?1";
+/// What ERASABLE reads of a message.
+type Marks = (bool, Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// Whether message `n` has a time to go or is marked to open once, so whatever changes what it
 /// says, or takes it away, takes its words as an erasure takes them (`unsaid`), lest they outlive
 /// it: an edit, a revoke, a deletion for you, a copy, a fold, a backfill's reading it again. One of
-/// yours still waiting for the server has a time to go once it gets there if it goes with a timer,
-/// so it counts as one from when it's written.
+/// yours that goes with a timer has a time to go once the server has it, so it counts as one from
+/// when it's written: by the outbox row that sends it while it waits, and by its own raw protobuf
+/// once nothing sends it and it has no time, as when it failed and your deletion of it for everyone
+/// waits for a late receipt, which leaves nothing to send it again.
 pub(super) fn erasable(db: &Connection, n: i64) -> Result<bool> {
-    let row: Option<(bool, Option<Vec<u8>>)> =
-        db.prepare_cached(ERASABLE)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    let row: Option<Marks> =
+        db.prepare_cached(ERASABLE)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     Ok(match row {
-        Some((true, _)) => true,
-        Some((false, Some(goes_as))) => convert::timer(&goes_as).is_some(),
+        Some((true, _, _)) => true,
+        Some((false, Some(goes_as), _)) => convert::timer(&goes_as).is_some(),
+        Some((false, None, Some(went))) => went_with(&went).is_some(),
         _ => false,
     })
+}
+
+/// The disappearing timer, in seconds, that `packed`, a message's raw protobuf as its row keeps it,
+/// went with; none for one that went without, or doesn't read.
+pub(super) fn went_with(packed: &[u8]) -> Option<u32> {
+    let info = unpack(packed).ok().and_then(|plain| WebMessageInfo::decode(plain.as_slice()).ok())?;
+    convert::timer_of(info.message.as_ref()?)
 }
 
 /// Erases message `n` of chat `chat`, as a disappearing message goes, and what waits for it.
