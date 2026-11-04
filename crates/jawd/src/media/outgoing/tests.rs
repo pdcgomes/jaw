@@ -498,6 +498,49 @@ async fn several_photos_go_as_an_album_in_the_order_given_with_the_reply_on_the_
     assert_eq!(rig.row(&album).await["kind"], "album");
 }
 
+/// An album of yours sent in a chat with a timer goes with that timer, as each photo in it does, and
+/// once WhatsApp has it, it has its time to go, as they do, so its line doesn't outlive them (round
+/// four's I9).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_album_of_yours_sent_with_a_timer_goes_at_its_time_once_whatsapp_has_it_as_its_photos_do() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let timer = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    rig.store.apply(Lane::Live, vec![Change::Chat(timer)]).await.unwrap();
+    let files: Vec<Value> = (0..2)
+        .map(|n| json!({ "path": yours(picked.path(), &format!("p{n}.jpg"), &Picture::numbered(640 + n, 480, n)) }))
+        .collect();
+    let answered_from = now_ms();
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": files })).await.unwrap();
+    let album = answer["album"].as_str().expect("an album").to_string();
+    let mut ids: Vec<String> =
+        answer["messages"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    ids.insert(0, album.clone());
+    for id in &ids {
+        rig.until(id, "sent", sent).await;
+    }
+    let answered_by = now_ms();
+    let [went] = rig.sent(&album).try_into().unwrap();
+    let carried = went.album_message.and_then(|album| album.context_info).and_then(|info| info.expiration);
+    assert_eq!(carried, Some(86_400), "the album goes with its chat's timer");
+    let day = 86_400_000;
+    for id in ids {
+        let looked_up = id.clone();
+        let expires_at: Option<i64> = rig
+            .query(move |db| {
+                Ok(db.query_row("SELECT expires_at FROM messages WHERE id = ?1", [&looked_up], |r| r.get(0))?)
+            })
+            .await;
+        assert!(
+            expires_at.is_some_and(|at| (answered_from + day..=answered_by + day).contains(&at)),
+            "{id} goes a day after WhatsApp had it: {expires_at:?} not in {}..={}",
+            answered_from + day,
+            answered_by + day,
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_that_cant_be_sent_is_refused_and_nothing_of_it_is_kept() {
     let home = tempfile::tempdir().unwrap();

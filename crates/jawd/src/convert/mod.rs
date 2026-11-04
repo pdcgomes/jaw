@@ -757,6 +757,7 @@ fn context_of(m: &e2e::Message) -> Option<&e2e::ContextInfo> {
         .or_else(|| m.contacts_array_message.as_deref().and_then(|x| x.context_info.as_deref()))
         .or_else(|| kinds::poll(m).and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.event_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.album_message.as_deref().and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.group_invite_message.as_deref().and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.template_message.as_deref().and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.interactive_message.as_deref().and_then(|x| x.context_info.as_deref()))

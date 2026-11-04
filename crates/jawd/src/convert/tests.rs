@@ -577,6 +577,38 @@ fn events_invites_calls_and_albums_have_a_line_each() {
     assert_eq!((m.kind, m.summary.as_str()), ("album", "Album: 3 photos and 1 video"));
 }
 
+/// An album in a disappearing chat has its time to go, as the photos in it do, from the timer its
+/// ContextInfo carries (round four's I9).
+#[test]
+fn an_album_in_a_disappearing_chat_goes_at_its_time_as_the_photos_in_it_do() {
+    let album = row(e2e::Message {
+        album_message: Some(Box::new(e2e::AlbumMessage {
+            expected_image_count: Some(2),
+            expected_video_count: Some(0),
+            context_info: context(|c| c.expiration = Some(86_400)),
+        })),
+        ..Default::default()
+    });
+    let photo = row(e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            context_info: context(|c| c.expiration = Some(86_400)),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    assert_eq!((album.kind, album.expires_at), ("album", Some(AT + 86_400_000)));
+    assert_eq!(album.expires_at, photo.expires_at, "as a photo in it");
+    let raw = e2e::Message {
+        album_message: Some(Box::new(e2e::AlbumMessage {
+            expected_image_count: Some(2),
+            expected_video_count: Some(0),
+            context_info: context(|c| c.expiration = Some(86_400)),
+        })),
+        ..Default::default()
+    };
+    assert_eq!(timer(&raw.encode_to_vec()), Some(86_400), "and what one of yours goes as says its timer");
+}
+
 #[test]
 fn a_kind_jaw_doesnt_know_keeps_its_protobuf_and_says_so() {
     let m = row(e2e::Message { request_location_message: Some(Default::default()), ..Default::default() });
