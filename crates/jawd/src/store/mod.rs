@@ -3814,9 +3814,10 @@ mod tests {
     }
 
     /// Applies `count` changes left in the inbox, their first transaction kept from starting by a
-    /// lock held outside until a live write waits behind it; says how they went in, the feed's last
-    /// seq before them, and the seq the live write went in at.
-    async fn leftovers_with_a_live_write_waiting(count: usize) -> (Applied, i64, i64) {
+    /// lock held outside until a live write waits behind it, and a second live write sent as soon as
+    /// that one is answered; says how they went in, the feed's last seq before them, and the seqs the
+    /// live writes went in at.
+    async fn leftovers_with_a_live_write_waiting(count: usize) -> (Applied, i64, i64, i64) {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
         // The writer's prune at its start is done, so the lock below holds up the leftovers.
@@ -3846,10 +3847,12 @@ mod tests {
         .await
         .expect("the live write waits");
         holder.execute_batch("COMMIT").unwrap();
-        let applied = leftovers.await.unwrap().unwrap();
         let live = live.await.unwrap().unwrap();
+        let change = Change::Remember { key: "live again".into(), value: "between".into() };
+        let again = store.apply(Lane::Live, vec![change]).await.unwrap();
+        let applied = leftovers.await.unwrap().unwrap();
         assert_eq!(store.count("messages").unwrap(), count as u64);
-        (applied, before, live.seq)
+        (applied, before, live.seq, again.seq)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3857,7 +3860,7 @@ mod tests {
         // A converter's batch makes far fewer than BATCH_ROWS changes, so in jawd only BATCH_TIME and
         // the early end for a waiting live write split the leftovers; BATCH_ROWS splits more than that.
         for count in [BATCH_ROWS / 2, 2 * BATCH_ROWS] {
-            let (applied, before, live) = leftovers_with_a_live_write_waiting(count).await;
+            let (applied, before, live, again) = leftovers_with_a_live_write_waiting(count).await;
             assert!(applied.transactions > 1, "{count} changes in {} transaction", applied.transactions);
             assert!(
                 before < live && live < applied.seq,
@@ -3865,7 +3868,50 @@ mod tests {
                  last, after {before} and before {}",
                 applied.seq
             );
+            assert!(
+                again < applied.seq,
+                "{count} changes: the live write sent once the first was answered went in at seq {again}, not \
+                 before the leftovers' last at {}",
+                applied.seq
+            );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_rows_left_in_the_inbox_go_in_short_transactions_with_inbox_rows_going_in_between() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
+        // The writer's prune at its start is done, so the lock below holds up the leftovers.
+        store.apply(Lane::Live, Vec::new()).await.unwrap();
+        let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut trouble = store.trouble();
+        let left = (0..BATCH_ROWS as i64)
+            .map(|n| text(&format!("3519300{:05}@s.whatsapp.net", n / 2), &format!("l{n}"), n, "left from before"));
+        let stop = Arc::new(AtomicBool::new(false));
+        // The rows stop coming once the leftovers are answered, so those counted came while they went in.
+        let leftovers = {
+            let (store, stop) = (store.clone(), stop.clone());
+            tokio::spawn(async move {
+                let applied = store.apply_leftovers(messages(left)).await;
+                stop.store(true, Ordering::Relaxed);
+                applied
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), trouble.wait_for(Option::is_some)).await.unwrap().unwrap();
+        // Handed over once the writer has the leftovers, so none acked before it has them is counted.
+        let rows = one_at_a_time(&store, stop);
+        holder.execute_batch("COMMIT").unwrap();
+        let applied = leftovers.await.unwrap().unwrap();
+        let (sent, _) = rows.join().unwrap();
+        assert_eq!(applied.changed, BATCH_ROWS);
+        // Taken only after their first transaction, or only once they're all in, three at most are.
+        assert!(
+            sent >= 10,
+            "only {sent} inbox rows coming one at a time were acked while {BATCH_ROWS} changes left in the inbox \
+             went in (transactions: {})",
+            applied.transactions
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
