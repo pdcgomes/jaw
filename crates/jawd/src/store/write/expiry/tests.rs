@@ -2124,6 +2124,92 @@ async fn a_failed_message_of_yours_with_a_timer_whose_deletion_waits_for_a_late_
     }
 }
 
+/// A revoke of a message of yours with a timer whose send failed cancels that send within its
+/// erasure (round four's V6), so the outbox row that still held what it said goes as an erasure
+/// takes it, every page it frees zeroed: a long message, whose outbox row spills onto pages of its
+/// own, which FAST would free as they were. jaw.db is vacuumed with every page it frees zeroed
+/// before the revoke, so whatever holds its words after it, the revoke left. Among thirty captioned
+/// photos and thirty messages with links.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoke_of_a_long_message_of_yours_with_a_timer_whose_send_failed_zeroes_the_pages_its_outbox_row_frees() {
+    let words: String = (0..900).map(|k| format!("zebrafail{k:03} ")).collect();
+    let said = format!("{words}see https://gnurevoked.example");
+    let goes_as = e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some(said.clone()),
+            context_info: Some(Box::new(e2e::ContextInfo { expiration: Some(86_400), ..Default::default() })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    // Its row's raw protobuf, as send.text writes it.
+    let went = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(true),
+            id: Some("mine".into()),
+            participant: None,
+        },
+        message: Some(goes_as.clone()),
+        message_timestamp: Some(((AT + 90) / 1000) as u64),
+        ..Default::default()
+    };
+    let spans = serde_json::json!([{ "t": "text", "s": format!("{words}see ") },
+        { "t": "link", "s": "https://gnurevoked.example", "url": "https://gnurevoked.example" }]);
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mine = Message {
+        sender: None,
+        mine: true,
+        status: Some("pending"),
+        spans: Some(spans.to_string()),
+        raw: Some(Packed::new(&went.encode_to_vec())),
+        ..message(ANA, "mine", AT + 90, &said, None)
+    };
+    let step = Step::Enqueue {
+        message: Box::new(mine),
+        kind: "text",
+        raw: goes_as.encode_to_vec(),
+        key: None,
+        written: Written::default(),
+    };
+    let mut changes = several_of_each();
+    changes.push(Change::Outbox(step));
+    apply(&store, changes).await;
+    let outbox: i64 =
+        query(&store, |db| Ok(db.query_row("SELECT n FROM outbox WHERE id = 'mine'", [], |r| r.get(0))?)).await;
+    apply(&store, vec![Change::Outbox(Step::Failed { outbox, error: "406".into(), next_at: None })]).await;
+    settled(&store).await;
+    let spilled: i64 = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*) FROM dbstat WHERE name = 'outbox' AND pagetype = 'overflow'", [], |r| {
+            r.get(0)
+        })?)
+    })
+    .await;
+    assert!(spilled > 0, "its outbox row spills onto pages of its own");
+    // Every page made again from what's there now, so none keeps what it held before.
+    store.truncate().await.unwrap();
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(30)).unwrap();
+    db.execute_batch("PRAGMA secure_delete = ON; VACUUM").unwrap();
+    drop(db);
+    let before = free_holding(&store, home.path(), b"gnurevoked").await;
+    let revoke = Amend {
+        chat: ANA.into(),
+        target: "mine".into(),
+        sender: None,
+        mine: true,
+        at: AT + 95,
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    assert_eq!(apply(&store, vec![Change::Amend(revoke)]).await.changed, 1, "revoked on another of your devices");
+    settled(&store).await;
+    assert_eq!(store.count("outbox").unwrap(), 0, "its failed send is cancelled");
+    gone_but_for(home.path(), "gnurevoked", &before, "the revoke");
+    still_found(&store, "the others").await;
+}
+
 /// How a case of the test below changes its message.
 enum How {
     /// A change, in the live lane.
