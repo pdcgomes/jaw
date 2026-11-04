@@ -26,7 +26,7 @@ These need nothing more than their branches, and are listed so nothing drops.
   - a place's name, address and coordinates, with Enter opening it on a map in the browser, and a live location saying until when;
   - a contact's name and numbers, with Enter starting a chat with the number (`chat.start`);
   - a link preview's title, two lines of its description and its host, its thumbnail drawn as a picture where the terminal draws them, which jawd sends since `m2-content` landed (6c1c81f).
-- **Polls,** as the design has them: each option's bar and count, the voters, your choice ticked, and number keys to vote (`poll.vote`, which jawd serves since `m2-content` landed). On a selected poll the numbers vote rather than react, and + still reacts.
+- **Polls,** as the design has them: each option's bar and count, the voters, your choice ticked, and voting with `poll.vote`, which jawd serves since `m2-content` landed. Built on `terminal-actions` (4 November), as the Mac parity plan's step 3.3 asked: Enter on a selected poll opens a vote picker of its own, where 1 to 9 or Enter on an option vote by the Mac's rules, and on the poll itself 1 to 6 still react, as on the Mac.
 - **View-once:** "Photo, view once · open it on your phone", as the Mac says it, and never forwarded.
 - **Emoji after a colon,** as the design's keys have it: `:` and a few letters offer emoji by name, from the `emojis` crate jaw already has, as `@` offers names, recents first.
 
