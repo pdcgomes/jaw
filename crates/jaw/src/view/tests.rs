@@ -259,7 +259,7 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     assert!(screen.contains("╭ keys ─") && screen.contains("any key closes"), "{screen}");
     let save = screen.lines().find(|l| l.contains("attach files")).unwrap();
     assert!(save.contains("s  *       save its file, star it"), "{screen}");
-    assert!(screen.contains("⏎          open, play, unfold, vote"), "{screen}");
+    assert!(screen.contains("⏎          open, play, unfold"), "{screen}");
     assert_eq!(milestones(&screen), Vec::<&str>::new(), "{screen}");
     press(&mut v, &rx, "?");
     assert!(v.overlay.is_none());
@@ -267,22 +267,29 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
 }
 
 #[test]
-fn at_80_by_24_the_keys_show_every_line_and_say_where_folders_are() {
-    // The sheet's rows with something on them, so the blank line between its sections, which a
-    // short screen leaves out, isn't counted.
-    let rows = |screen: &str| {
+fn at_80_by_24_the_keys_show_every_line_whole_and_say_where_folders_are() {
+    // The sheet's rows with something on them, each as it reads between the sheet's sides, so the
+    // blank line between its sections, which a short screen leaves out, isn't counted.
+    let rows = |screen: &str| -> Vec<String> {
         let lines: Vec<&str> = screen.lines().collect();
         let top = row_of(screen, "╭ keys ─").unwrap_or_else(|| panic!("{screen}"));
         let bottom = row_of(screen, " any key closes ─").unwrap_or_else(|| panic!("{screen}"));
         let left = lines[top][..lines[top].find("╭ keys ─").unwrap()].chars().count();
-        let said = |line: &str| line.chars().skip(left + 1).take_while(|&c| c != '│').any(|c| c != ' ');
-        lines[top + 1..bottom].iter().filter(|line| said(line)).count()
+        let said = |line: &str| line.chars().skip(left + 1).take_while(|&c| c != '│').collect::<String>();
+        lines[top + 1..bottom].iter().map(|line| said(line).trim().to_string()).filter(|s| !s.is_empty()).collect()
     };
     let (mut v, rx) = view(80, 24);
     press(&mut v, &rx, "?");
     let screen = frame(&mut v);
     let all = run::snapshot(&mut v, 120, 60);
-    assert_eq!(rows(&screen), rows(&all), "every line, as a tall screen has them:\n{screen}\n{all}");
+    assert_eq!(rows(&screen), rows(&all), "every line, whole, as a tall and wide screen has them:\n{screen}\n{all}");
+    let shown = rows(&screen);
+    for whole in [
+        "pgup pgdn  scroll the messages         ⏎          open, play, unfold",
+        "ctrl-o tab attach files, SD or HD      s  *       save its file, star it",
+    ] {
+        assert!(shown.iter().any(|row| row == whole), "{whole}, whole:\n{screen}");
+    }
     for said in [
         "typing                                 a selected message",
         "/search    words in this chat          esc        back to typing",

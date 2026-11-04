@@ -1280,7 +1280,7 @@ impl View {
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
             pair(("↑", "into the messages", true), Some(("y", "copy its text", true))),
-            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open, play, unfold, vote", true))),
+            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open, play, unfold", true))),
             pair(("ctrl-a e", "start, end of the line", true), Some(("r", "reply", true))),
             pair(("alt-b f", "back, on a word", true), Some(("e", "edit your own", true))),
             pair(("ctrl-w u", "cut a word, the line", true), Some(("d", "delete", true))),
@@ -1288,7 +1288,7 @@ impl View {
             pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward", true))),
             pair(("@", "a name, in a group", true), Some(("i", "info", true))),
             pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s  *", "save its file, star it", true))),
-            pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
+            pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "voice: seek, speed", true))),
             pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
         ];
         let mut moving = vec![
