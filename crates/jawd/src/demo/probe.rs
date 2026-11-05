@@ -47,6 +47,15 @@ impl Expected {
         (came, missing)
     }
 
+    /// Waits, `most` at most, for every message expected to come, so one still on its way as what
+    /// it came in ends is counted as come, not as never coming.
+    pub async fn settled(&self, most: Duration) {
+        let end = Instant::now() + most;
+        while !self.waiting.lock().expect("expected messages").is_empty() && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Pushes of any kind so far, and the chat list's.
     pub fn pushes(&self) -> (u64, u64) {
         (self.pushes.load(Ordering::Relaxed), self.lists.load(Ordering::Relaxed))

@@ -127,6 +127,8 @@ const OPEN_EVERY: Duration = Duration::from_millis(300);
 /// The quiet before a lone message, and how many are timed.
 const LONE_EVERY: Duration = Duration::from_millis(200);
 const LONE: u32 = if cfg!(test) { 3 } else { 50 };
+/// How long the watcher waits, as what it watched ends, for the messages still on their way to it.
+const STRAGGLERS: Duration = Duration::from_secs(10);
 /// Chats opened with nothing else going on, and times each page and find is asked for.
 const OPENS: usize = if cfg!(test) { 12 } else { 300 };
 const RUNS: usize = if cfg!(test) { 3 } else { 30 };
@@ -627,6 +629,7 @@ impl Demo {
         self.store.indexed().await?;
         let indexed = indexing.elapsed();
         let opens = opening.stop().await?;
+        self.expected.settled(STRAGGLERS).await;
         stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
@@ -746,6 +749,7 @@ impl Demo {
         self.store.indexed().await?;
         let indexed = indexing.elapsed();
         let opens = opening.stop().await?;
+        self.expected.settled(STRAGGLERS).await;
         stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
@@ -880,6 +884,7 @@ impl Demo {
             None => None,
         };
         let wal_most = wal.await?;
+        self.expected.settled(STRAGGLERS).await;
         stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
@@ -1047,6 +1052,7 @@ impl Demo {
         let opens = opening.stop().await?;
         let (pushed, listed) = self.expected.pushes();
         let presences = self.expected.presences() - presences;
+        self.expected.settled(STRAGGLERS).await;
         let watcher_cpu = stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
@@ -1173,6 +1179,7 @@ impl Demo {
         self.converted().await?;
         let all_in = drained + converted.elapsed();
         tokio::time::sleep(Duration::from_millis(200)).await;
+        self.expected.settled(STRAGGLERS).await;
         let (pushed, listed) = self.expected.pushes();
         stop(watcher).await;
         let (came, missing) = self.expected.take();
