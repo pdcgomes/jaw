@@ -54,7 +54,7 @@
 - **A jawd that stopped because another held the folder is started again.** This departs from the terminal on purpose, where parity rule 1 would make its behaviour the reference: the terminal says "jawd didn't start: another jawd is running on …" until the other's jawd answers. Here the app starts its jawd while an earlier Jaw's agent's jawd may still be stopping, holding `jaw.lock` for the moment its stop takes, and two apps can start jawd at once. So the starter starts its jawd again a second after it stopped, while nothing answers and within the terminal's 15 s, and neither case ends saying it. The app waits that second on a timer of its own (`DispatchQueue.main.asyncAfter`), not for jaw-client's next try: the client's failed tries are drained only at the window's display frames, so with the window closed in that second, a restart waiting on one would wait until the window opened again. It knows the case by jawd's own words, which a test reads from `crates/jawd/src/main.rs`, so a change there fails it. Task 6 writes it into the Mac design.
 - **The earlier agent, unregistered after the start and never waited on.** `SMAppService`'s header says `agent(plistName:)` names a plist in the app's `Contents/Library/LaunchAgents` ("The plistName must correspond to a plist in the calling app's Contents/Library/LaunchAgents directory"), which this step removes, so whether `status` and `unregister` still find an earlier build's registration isn't documented. On jaw's own folder, a Jaw that starts jawd there calls `unregister(completionHandler:)` at every launch, whatever `status` says, an error meaning there was nothing it could find, and calls it just after starting its jawd. So a launch with nothing answering never waits on `SMAppService`, which answers through the background-task daemon, and the window says "Starting jawd" from its first frame. The trace says when it asked and how many milliseconds the answer took.
   - If an earlier agent's jawd is still stopping as the app's starts, `jaw.lock` refuses the app's, and the restart above starts it again.
-  - If an earlier agent's jawd was the one answering at launch, unregistering stops it (the header has the answer come "after the running process has been killed"), and the app starts its own once `SMAppService` says it removed the agent, unless another jawd answers by then; until then the window says what jaw-client says, as it does whenever a jawd goes. That's the one wait on `SMAppService`, and it has no cap. It comes only after a launch that found an agent's jawd answering, which no Mac we know has; nothing waits on it to draw; and starting a jawd before `SMAppService` has said the agent has gone would start one whenever a jawd that had answered stops, which the terminal never does. A Jaw whose answer never comes starts its jawd at once at its next launch.
+  - If an earlier agent's jawd was the one answering at launch, or was still starting then, refusing the app's by `jaw.lock`, and answered by the end of the restart's wait, unregistering stops it (the header has the answer come "after the running process has been killed"), and the app starts its own once `SMAppService` says it removed the agent, unless another jawd answers by then; until then the window says what jaw-client says, as it does whenever a jawd goes. That's the one wait on `SMAppService`, and it has no cap, so the jawd the app starts then has its 15 s from that start, not from an earlier one's, which is over. It comes only after a launch or a restart's wait that found an agent's jawd answering, which no Mac we know has; nothing waits on it to draw; and starting a jawd before `SMAppService` has said the agent has gone would start one whenever a jawd that had answered stops, which the terminal never does. A Jaw whose answer never comes starts its jawd at once at its next launch.
   - The completion handler is marked `@Sendable`. The header has it called "on libdispatch's default target queue" and declares it without `NS_SWIFT_SENDABLE`; a compiler that took a closure written in the main-actor `Agent` for the main actor's would check that it runs there and stop the app the moment `SMAppService` answered. Xcode 26.6's Swift 6.3.3, on both Macs, already imports the handler as `@Sendable`, and makes the closure nonisolated with no such check, mark or not; the mark says so in the code and keeps it so for any compiler. The handler hops to the main queue itself.
   - Question 2 asks whether to keep the plist one more build instead.
 - **The terminal's agent is named in the status line, and left alone.** For its few seconds, at each launch on jaw's own folder while `~/Library/LaunchAgents/dev.badcoffee.jaw.jawd.plist` is there: "jaw agent install's LaunchAgent still starts jawd at login: jaw agent uninstall removes it", with ", and Jaw starts jawd as it opens" from a Jaw that does. While it's there, the app asks `SMAppService` nothing, which narrows the lifetime design's "the app unregisters any agent an earlier build registered" on purpose: the label is that agent's as well, and no Jaw ever registered beside it (`registerAgent` refused while the plist was there, the takeover removed it first, and `jaw agent install` refuses while the app's agent is loaded), so nothing has shown what unregistering under that label would do to it, and no earlier Jaw's agent can be loaded beside it; the first launch after it has gone asks. The app still starts its own jawd when nothing answers, as the terminal does beside one.
@@ -685,6 +685,11 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     let again = starter.unregistered(removed: true, answers: false, now: t0 + 0.3)
     #expect(again.isEmpty, "SMAppService's answer counts once")
     #expect(starter.unreachable(now: t0 + 14) == .starting)
+    var starting = Starter(facts())
+    _ = starting.launched(answers: false, now: t0)
+    #expect(starting.unregistered(removed: true, answers: false, now: t0 + 0.2)
+        == [.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)],
+        "the jawd already starting is the one, so none is started beside it")
 }
 
 @Test func `an earlier Jaw's agent whose jawd answered is said once SMAppService has removed it, and a jawd of the app's takes its place unless another answers`() {
@@ -737,6 +742,45 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     greeted.answered()
     let after = greeted.waited(answers: false, now: t0 + 1.1)
     #expect(after.isEmpty && greeted.unreachable(now: t0 + 1.2) == .unreachable, "nor once a jawd has said hello")
+}
+
+@Test func `a jawd refused by jaw.lock while an earlier Jaw's agent's was stopping is started again once after the wait, and none beside it when SMAppService says it removed that agent`() {
+    var starter = Starter(facts())
+    let (first, shown) = starter.launched(answers: false, now: t0)
+    #expect(starter.spawn.map { first == [.start($0), .unregister] } == true && shown == .starting,
+            "nothing answers as the agent's jawd stops, so the app's starts before SMAppService is asked")
+    let stopped = starter.exited(status: 1 << 8, said: Starter.held + starter.here.home, now: t0 + 0.1)
+    #expect(stopped == [.wait(Starter.again)], "the agent's jawd held jaw.lock for the moment its stop took")
+    let removed = starter.unregistered(removed: true, answers: false, now: t0 + 0.2)
+    #expect(removed == [.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)],
+            "the app's is already to be started again, so none is started beside it")
+    let again = starter.waited(answers: false, now: t0 + 1.1)
+    #expect(starter.spawn.map { again == [.start($0)] } == true, "then the app's is started again, the one start since it stopped")
+    let twice = starter.waited(answers: false, now: t0 + 1.2)
+    #expect(twice.isEmpty, "and only once")
+}
+
+@Test func `an earlier Jaw's agent whose jawd held jaw.lock against the app's as it started, then answered, is said once SMAppService has removed it, and a jawd of the app's takes its place, with 15 s of its own, unless another answers`() {
+    let said = Starter.Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
+    var starter = Starter(facts())
+    let (first, shown) = starter.launched(answers: false, now: t0)
+    #expect(starter.spawn.map { first == [.start($0), .unregister] } == true && shown == .starting,
+            "nothing answers while the agent's jawd starts, so the app's starts before SMAppService is asked")
+    let stopped = starter.exited(status: 1 << 8, said: Starter.held + starter.here.home, now: t0 + 0.1)
+    #expect(stopped == [.wait(Starter.again)], "the agent's jawd held jaw.lock as it started")
+    let taken = starter.waited(answers: true, now: t0 + 1.1)
+    #expect(taken.isEmpty, "by the wait's end the agent's jawd answers, so the app's isn't started again")
+    let removed = starter.unregistered(removed: true, answers: false, now: t0 + 20)
+    #expect(starter.spawn.map { removed == [said, .start($0)] } == true,
+            "SMAppService has stopped the agent's jawd, and none of the app's is on its way, so the app's starts")
+    #expect(starter.unreachable(now: t0 + 20.1) == .starting, "its 15 s count from this start, though more than 15 have passed since the first")
+    let refused = starter.exited(status: 1 << 8, said: Starter.held + starter.here.home, now: t0 + 20.2)
+    #expect(refused == [.wait(Starter.again)], "and one refused by jaw.lock within them is to be started again, as any is")
+    var other = Starter(facts())
+    _ = other.launched(answers: false, now: t0)
+    _ = other.exited(status: 1 << 8, said: Starter.held + other.here.home, now: t0 + 0.1)
+    _ = other.waited(answers: true, now: t0 + 1.1)
+    #expect(other.unregistered(removed: true, answers: true, now: t0 + 20) == [said], "another jawd answers by then, so none is started")
 }
 
 @Test func `a jawd that stopped as it started for anything else says why until a jawd answers, and one that stops after it answered is jaw-client's to say`() {
@@ -972,14 +1016,15 @@ public struct Starter: Sendable {
     }
 
     /// `SMAppService` answered for the earlier Jaw's agent, `removed` when there was one, whose jawd it
-    /// has stopped by then: when that jawd was the one answering, and no jawd of the app's is on its
-    /// way, the app starts its own.
+    /// has stopped by then: when nothing answers, no jawd of the app's is running or to be started
+    /// again, and none failed to start, the app starts its own, which has 15 s from then to answer.
     public mutating func unregistered(removed: Bool, answers: Bool, now: Date) -> [Step] {
         guard unregistering else { return [] }
         unregistering = false
         guard removed else { return [] }
         let said = Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
-        guard since == nil, failed == nil else { return [said] }
+        guard !running, !restarting, failed == nil else { return [said] }
+        since = nil
         return [said] + decide(answers: answers, now: now)
     }
 
@@ -1102,6 +1147,8 @@ git commit -F- <<'EOF'
 JawKit's Starter decides who starts jawd for the app and what the window says meanwhile, as the terminal's wire.rs has them: when nothing answers at launch, a release starts the jawd inside it in a process group of its own and --demo the demo's, which the app stops, each with its output appended to jawd.log beside the socket; a jawd it started has the terminal's 15 s to answer, one that stopped as it started says why from its log's last words, and one that stopped because another jawd held the folder, by jawd's own words, is started again a second later while nothing answers, after a wait the app keeps itself rather than at jaw-client's next try, which waits for the window's display frames; on an account's folder, jaw's own, known however its path is written, or one holding a session.db, only a Jaw built from origin/main or a release's tag starts one and --demo never runs, and on jaw's own folder such a Jaw asks for the agent an earlier Jaw registered to be unregistered only after starting its jawd, never waiting on the answer, starting its own once the answer says the agent whose jawd answered has gone, and asks nothing while the terminal's agent, which it names with jaw agent uninstall, holds the label; tests: each of those, and jawd's words read from crates/jawd/src/main.rs
 EOF
 ```
+
+**Amended while it was built.** Its review (4 November) found the code and tests above to be the plan's and to meet the Decisions, but no test reaching the one guard against a second start when `SMAppService` answers: with `unregistered`'s `guard since == nil, failed == nil` removed, all 133 of JawKit's tests passed, since the first test's `removed: true` came after its `removed: false`, stopping at the guard that makes the answer count once, and the second test's starters had started no jawd. It also found two departures from the terminal's `unreachable` that the Decisions don't name, both keeping a true reason on screen longer than the terminal does: a jawd of the app's that couldn't be started is said until a jawd answers, where the terminal says it once, and one that stops past its 15 s without having answered is said as stopped as it started until a jawd answers, where by then the terminal says nothing of it. It left four Minors for the branch review (`unreachable`'s `running || restarting` untested, `same` letting the paths' spellings answer before the kernel does, `held` pinned by jawd's format string rather than by what jawd writes, and doc comments saying less than the code), and for Task 5 what the starter can't check, among them that `Here.jawd` is the bundle's own jawd and that the restart rests on the refused jawd's line being the last in `jawd.log`, which others write too. On 4 November the owner chose to add two tests beyond the plan's for the guard: the review's three lines, which end the first test, where `SMAppService`'s answer comes while the app's jawd is starting and only says so; and a test of the sequence of an earlier agent's jawd still stopping as the app's starts, where `jaw.lock` refuses the app's, `SMAppService`'s answer during the wait only says so, and the wait starts the app's jawd once. Without the guard both fail and JawKit's other 132 pass. He chose to keep the two departures, which Task 6 writes into the Mac design. The re-review (4 November) approved the tests and found that the guard keyed on `since`, which outlives the app's jawd being on its way. An earlier agent's jawd still starting at launch, holding `jaw.lock` before it listens, refused the app's; the wait found that jawd answering and started nothing; and `SMAppService`, answering once it had stopped that jawd and before its hello was applied, found the first start's `since`, so the app only said so and nothing started a jawd, the window saying jaw-client's words until Jaw was opened again. On 5 November the owner chose the fix. When `SMAppService` says it removed the agent, the app starts its own if nothing answers, no jawd of its own is running or to be started again (`running`, `restarting`) and none failed to start (`failed`), whatever `since` says, so one of the app's on its way still keeps it from starting a second. That jawd's 15 s count from its own start, since the earlier attempt is over and `SMAppService`'s answer has no cap: the window says Starting jawd for it, and one `jaw.lock` refuses within them is started again, as any is. `unregistered` clears `since` before it starts, and its doc comment says what it now does. A new test takes that order whole, `SMAppService` answering 20 s after launch, and holds that a jawd answering by then keeps the app's from starting. It fails three times with the old guard, and twice with the new one but `since` kept from the first start, JawKit's other 134 passing each time; with the fix all 135 pass. The guard's `failed` half, which the re-review found pinned by no test, still is, and with the guard no longer keyed on `since` the app can reach it: a jawd of the app's that couldn't be started, or stopped as it started, before `SMAppService` answers. Steps 1 and 3 show the code as it now is: Step 1 holds twelve tests, two more than Step 4 counts, so JawKit has 135.
 
 ---
 
