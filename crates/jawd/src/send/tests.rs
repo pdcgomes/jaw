@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use jaw_proto::{Push, code};
 use prost::Message as _;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
 use wa_proto::wa_web_protobuf_sync_action::{ContactAction, PinAction, SyncActionValue};
@@ -37,7 +37,9 @@ fn quick() -> Timing {
 const CONNECTING: Duration = Duration::from_secs(10);
 
 /// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
-/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s. Its transactions take the
+/// lock as they begin, before any read: a deferred one's first insert has met a snapshot a commit
+/// of jawd's made stale (SQLITE_BUSY_SNAPSHOT), which no wait cures.
 const SIDE_WAITS: Duration = Duration::from_secs(60);
 
 /// jawd's sending on a jaw.db in `home`, with the demo engine on `world`, connected.
@@ -1136,7 +1138,7 @@ async fn past_a_thousand_messages_waiting_a_new_one_is_refused_and_none_is_dropp
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(SIDE_WAITS).unwrap();
-        let tx = db.transaction().unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         for n in 0..1_000i64 {
             tx.execute(
                 "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
@@ -2907,7 +2909,7 @@ async fn an_outbox_full_of_messages_whatsapp_refuses_for_good_is_emptied_by_dele
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(SIDE_WAITS).unwrap();
-        let tx = db.transaction().unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         // 998 messages of yours WhatsApp refused, one still to go and one waiting for a receipt.
         let failed = (0..998).map(|n| (format!("w{n}"), "failed", "failed"));
         let waiting =
@@ -2960,7 +2962,7 @@ async fn past_a_thousand_a_deletion_for_you_of_a_message_with_a_reaction_kept_fo
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(SIDE_WAITS).unwrap();
-        let tx = db.transaction().unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         // A thousand messages of yours WhatsApp refused, and your reaction to Ana's, which had no
         // receipt in its day and is kept for a late one, outside the thousand.
         for n in 0..1_000 {
@@ -3927,7 +3929,7 @@ async fn past_a_thousand_waiting_an_action_or_a_forward_is_refused_and_nothing_i
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(SIDE_WAITS).unwrap();
-        let tx = db.transaction().unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         for n in 0..1_000i64 {
             tx.execute(
                 "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
