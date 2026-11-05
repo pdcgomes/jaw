@@ -50,28 +50,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !hasVisibleWindows { window.showWindow(nil) }
         return true
     }
-
-    // MARK: - Asked from a menu
-
-    @objc func jawdAtLogin(_: Any?) {
-        let alert = NSAlert()
-        #if DEBUG
-            alert.messageText = "A build from source doesn't start jawd at login"
-            alert.informativeText = "Only a signed release registers its jawd as the LaunchAgent; this build runs \(model.launch.demo ? "a made-up account in \(model.launch.home)" : "against the jawd already running")."
-            alert.runModal()
-        #else
-            let terminal = FileManager.default.fileExists(atPath: Agent.terminalAgent)
-            alert.messageText = terminal ? "Take over the terminal's jawd?" : "Start jawd at login?"
-            alert.informativeText = terminal
-                ? "jaw agent install's LaunchAgent is installed. Jaw can stop it, remove it, and start its own jawd at login in its place, under the same label, so there's still only one."
-                : "jawd keeps your messages and brings notifications with no window open."
-            alert.addButton(withTitle: terminal ? "Take Over" : "Start at Login")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let own = Bundle.main.object(forInfoDictionaryKey: "JawdVersion") as? String
-            if let why = terminal ? model.agent.takeOver(running: model.welcome?.jawd, own: own) : model.agent.registerAgent() {
-                model.say(why, warn: true)
-            }
-        #endif
-    }
 }

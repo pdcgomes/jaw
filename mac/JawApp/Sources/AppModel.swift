@@ -126,11 +126,8 @@ final class AppModel {
     var madeSpec: LayoutSpec?
 
     func start() {
-        if let why = agent.ensure() {
-            reach = .starting(failed: why)
-        } else if agent.started != nil {
-            reach = .starting(failed: nil)
-        }
+        agent.say = { [weak self] text, warn in self?.say(text, warn: warn) }
+        reach = Reach(agent.launched())
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         jawd = Jawd(socket: launch.socket, client: "jaw-mac", version: version, focus: NSApp.isActive) { urgent in
             DispatchQueue.main.async {
@@ -178,6 +175,7 @@ final class AppModel {
     func apply(_ update: JawUpdate) {
         switch update {
         case let .hello(w, me):
+            agent.answered()
             welcome = w
             reach = .up
             connection = w.connection
@@ -187,13 +185,7 @@ final class AppModel {
             window?.sidebar.roster.root = w.root
             pictures.files = .folder(w.root)
         case let .unreachable(why, retryIn):
-            if let stopped = agent.stopped {
-                reach = .starting(failed: stopped)
-            } else if agent.starting {
-                reach = .starting(failed: nil)
-            } else {
-                reach = .unreachable(why: why, retry: Int(retryIn / .seconds(1)))
-            }
+            reach = Reach(agent.unreachable(), why: why, retry: Int(retryIn / .seconds(1)))
         case let .connection(c):
             connection = c
             if c.state == .loggedOut { linked = false }

@@ -1,16 +1,17 @@
 #!/bin/sh
-# `make mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed.
+# `make mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed, saying what it
+# was built from.
 #
 # jawd and jaw are built for release here, since the build Mac has no Rust or Go, jawd with its
 # Info.plist, which its own build embeds, so macOS asks for the microphone in jaw's words, and
 # jaw-engine by make engine, which stamps it with the version jaw and jawd say; the app is built in
 # Release on the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
-# helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and what
-# mac/scripts/built-from says into its Info.plist (JawBuiltFrom and JawBuiltAt), since only a Jaw from
-# origin/main or a release's tag on it starts its jawd on an account's folder; everything is signed
-# from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else the team's Developer ID
-# Application identity by its SHA-1, else ad hoc, which doesn't open: under the hardened runtime,
-# library validation refuses an app signed ad hoc its own frameworks.
+# helpers go into Contents/Helpers, and what mac/scripts/built-from says into its Info.plist
+# (JawBuiltFrom and JawBuiltAt), since only a Jaw from origin/main or a release's tag on it starts its
+# jawd on an account's folder; everything is signed from the inside out with the hardened runtime:
+# with JAW_SIGN_IDENTITY, else the team's Developer ID Application identity by its SHA-1, else ad hoc,
+# which doesn't open: under the hardened runtime, library validation refuses an app signed ad hoc its
+# own frameworks.
 set -eu
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
@@ -44,13 +45,10 @@ else
     ditto mac/build/DerivedData-release/Build/Products/Release/Jaw.app "$app"
 fi
 
-echo "==> the helpers and jawd's agent"
-mkdir -p "$app/Contents/Helpers" "$app/Contents/Library/LaunchAgents"
+echo "==> the helpers, and what it was built from"
+mkdir -p "$app/Contents/Helpers"
 cp target/release/jawd target/release/jaw target/engine/jaw-engine "$app/Contents/Helpers/"
-cp mac/JawApp/Helpers/dev.badcoffee.jaw.jawd.plist "$app/Contents/Library/LaunchAgents/"
 jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
-/usr/libexec/PlistBuddy -c "Add :JawdVersion string $jawd_version" "$app/Contents/Info.plist" 2>/dev/null ||
-    /usr/libexec/PlistBuddy -c "Set :JawdVersion $jawd_version" "$app/Contents/Info.plist"
 again="$(mac/scripts/built-from "$repo" "$stamp")"
 if [ "$again" != "$built" ]; then
     echo "==> the checkout changed while make mac built it: run it again" >&2

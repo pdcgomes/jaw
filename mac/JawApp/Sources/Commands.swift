@@ -18,8 +18,6 @@ extension AppModel {
         add(Command("about", "About Jaw", place: .app, send: #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
         add(Command("settings", "Settings…", phrase: "Settings", detail: "appearance and messages", key: Shortcut(","), place: .app, group: 1)
             { [weak self] in self?.window?.showSettings() })
-        add(Command("agent", "jawd at Login…", phrase: "jawd at login", detail: "start jawd when you log in", place: .app, group: 1)
-            { AppDelegate.shared?.jawdAtLogin(nil) })
         add(Command("hide", "Hide Jaw", key: Shortcut("h"), place: .app, group: 2, send: #selector(NSApplication.hide(_:))))
         add(Command("hide.others", "Hide Others", key: Shortcut("h", [.command, .option]), place: .app, group: 2,
                     send: #selector(NSApplication.hideOtherApplications(_:))))

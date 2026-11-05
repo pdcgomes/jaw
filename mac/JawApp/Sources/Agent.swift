@@ -1,29 +1,58 @@
 import AppKit
 import Foundation
+import JawKit
+import JawUI
 import ServiceManagement
 
-/// Who runs jawd. A release build registers the jawd inside it as the one LaunchAgent, under the
-/// label `jaw agent install` uses, so there can't be two agents, and jawd's `jaw.lock` refuses a
-/// second jawd whoever starts it. A debug build, and `--demo`, run a jawd of their own on a folder
-/// of their own instead, and never touch the agent.
+/// Who starts jawd, as JawKit's `Starter` decides it: a release starts the jawd inside it when nothing
+/// answers, in a process group of its own so it goes on when the app quits, and on jaw's own folder
+/// then asks `SMAppService` to unregister the LaunchAgent an earlier Jaw registered; a debug build,
+/// and `--demo`, start only the demo's jawd, on a folder of its own, and stop it when the app quits.
+/// There's no jawd at login: the owner decided on 29 October that jawd runs while an app does.
 @MainActor
 final class Agent {
+    /// The label an earlier Jaw registered its jawd under, as `jaw agent install` does.
     static let label = "dev.badcoffee.jaw.jawd"
-    static let plist = "\(label).plist"
 
     let launch: Launch
-    /// The jawd this app started, for `--demo`, stopped when the app quits.
-    var demo: Process?
-    var started: Date?
+    var starter: Starter
+    /// Says something in the status line, as the model does.
+    var say: (String, Bool) -> Void = { _, _ in }
+    /// The jawd this app started for `--demo`, stopped when the app quits.
+    var demo: pid_t?
+    /// `JAW_TRACE=1` says each jawd started and stopped, and when `SMAppService` was asked and what it answered.
+    let trace = ProcessInfo.processInfo.environment["JAW_TRACE"] != nil
 
     init(launch: Launch) {
         self.launch = launch
+        #if DEBUG
+            let debug = true
+        #else
+            let debug = false
+        #endif
+        starter = Starter(Starter.Here(
+            debug: debug,
+            demo: launch.demo,
+            home: launch.home,
+            jawsOwn: Starter.same(launch.home, Launch.platformHome),
+            account: FileManager.default.fileExists(atPath: (launch.home as NSString).appendingPathComponent("session.db")),
+            build: Build(info: Bundle.main.infoDictionary ?? [:]),
+            jawd: launch.demo ? Self.jawd : Self.helpers,
+            environment: ProcessInfo.processInfo.environment,
+            terminalAgent: FileManager.default.fileExists(atPath: Self.terminalAgent),
+        ))
     }
 
-    /// The jawd beside the app, or, building from source, the one cargo built.
+    /// The jawd inside the app, the only one a release starts by itself.
+    static var helpers: String? {
+        let inside = Bundle.main.bundleURL.appending(path: "Contents/Helpers/jawd").path
+        return FileManager.default.isExecutableFile(atPath: inside) ? inside : nil
+    }
+
+    /// The jawd `--demo` runs: the one inside the app, `JAWD`'s, or, building from source, the one
+    /// cargo built.
     static var jawd: String? {
-        let helpers = Bundle.main.bundleURL.appending(path: "Contents/Helpers/jawd").path
-        if FileManager.default.isExecutableFile(atPath: helpers) { return helpers }
+        if let helpers = Self.helpers { return helpers }
         if let env = ProcessInfo.processInfo.environment["JAWD"], FileManager.default.isExecutableFile(atPath: env) {
             return env
         }
@@ -36,6 +65,11 @@ final class Agent {
             }
         #endif
         return nil
+    }
+
+    /// The plist `jaw agent install` writes, if the terminal installed its own agent.
+    static var terminalAgent: String {
+        (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/\(label).plist")
     }
 
     static func answers(_ socket: String) -> Bool {
@@ -55,135 +89,120 @@ final class Agent {
         } == 0
     }
 
-    /// Makes sure a jawd will answer on the app's folder; says why not when it can't.
-    func ensure() -> String? {
-        if Self.answers(launch.socket) { return nil }
-        if launch.demo { return startDemo() }
-        // jawd at login is registered only when the owner asks, with jaw › jawd at Login…: doing it
-        // by itself on his Mac would replace his jawd with a build in progress.
-        return "nothing answers on \(launch.socket): Jaw › jawd at Login… starts Jaw's own, jaw agent install the terminal's, and --demo a made-up account"
+    /// At launch: what the starter does first, and what the window says until jawd's first word.
+    func launched() -> Starter.Shown {
+        let (steps, shown) = starter.launched(answers: Self.answers(launch.socket), now: Date())
+        run(steps)
+        return shown
     }
 
-    /// `jawd --engine demo` on the demo folder: a made-up account, with no WhatsApp behind it.
-    func startDemo() -> String? {
-        guard let jawd = Self.jawd else { return "there's no jawd to run: make build builds it" }
-        try? FileManager.default.createDirectory(atPath: launch.home, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-        let log = (launch.home as NSString).appendingPathComponent("jawd.log")
-        FileManager.default.createFile(atPath: log, contents: nil)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: jawd)
-        process.arguments = ["--engine", "demo", "--no-notify"]
-        var env = ProcessInfo.processInfo.environment
-        env["JAW_HOME"] = launch.home
-        process.environment = env
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle(forWritingAtPath: log)
-        do {
-            try process.run()
-        } catch {
-            return "can't start jawd: \(error.localizedDescription)"
-        }
-        demo = process
-        started = Date()
-        return nil
+    /// jaw-client couldn't reach jawd: what the window says.
+    func unreachable() -> Starter.Shown {
+        starter.unreachable(now: Date())
     }
 
-    /// Whether the app started a jawd that's still starting, as the terminal waits 15 s for one.
-    var starting: Bool {
-        guard let started else { return false }
-        return Date().timeIntervalSince(started) < 15 && (demo?.isRunning ?? true)
+    /// jawd said hello.
+    func answered() {
+        starter.answered()
     }
 
-    /// Why the jawd the app started stopped, if it did.
-    var stopped: String? {
-        guard let demo, !demo.isRunning else { return nil }
-        let log = (try? String(contentsOfFile: (launch.home as NSString).appendingPathComponent("jawd.log"), encoding: .utf8)) ?? ""
-        let last = log.split(separator: "\n").last.map { ": \($0)" } ?? ""
-        return "jawd stopped as it started (status \(demo.terminationStatus))\(last)"
-    }
-
-    /// Stops the jawd the app started, giving it a few seconds to go, so its folder is still by the
-    /// time the app has quit: a snapshot's folder is removed then.
-    func stop() {
-        guard let demo, demo.isRunning else { return }
-        demo.terminate()
-        let until = Date().addingTimeInterval(5)
-        while demo.isRunning, Date() < until {
-            usleep(10000)
-        }
-    }
-
-    // MARK: - The LaunchAgent
-
-    var service: SMAppService {
-        SMAppService.agent(plistName: Self.plist)
-    }
-
-    /// The plist `jaw agent install` writes, if the terminal installed its own agent.
-    static var terminalAgent: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/\(plist)")
-    }
-
-    /// Registers the bundled jawd as the agent, unless the terminal's agent is installed, which the
-    /// app offers to take over and never does by itself.
-    func registerAgent() -> String? {
-        if FileManager.default.fileExists(atPath: Self.terminalAgent) {
-            return "jaw agent install's agent is installed but jawd isn't answering; jaw agent status says more"
-        }
-        switch service.status {
-        case .enabled:
-            return nil
-        case .requiresApproval:
-            return "jawd needs your approval in System Settings › General › Login Items"
-        default:
-            do {
-                try service.register()
-                started = Date()
-                return nil
-            } catch {
-                return "can't register jawd to start at login: \(error.localizedDescription)"
+    func run(_ steps: [Starter.Step]) {
+        for step in steps {
+            switch step {
+            case let .say(text, warn): say(text, warn)
+            case .unregister: unregister()
+            case let .start(spawn): start(spawn)
+            case let .wait(seconds): DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.waited() }
             }
         }
     }
 
-    /// Takes over the terminal's agent, on the owner's click: stops it, removes its plist, and
-    /// registers the app's own under the same label. A newer jawd than the app's own is kept, since an
-    /// older jawd refuses a newer jaw.db.
-    func takeOver(running: String?, own: String?) -> String? {
-        if let running, let own, Self.newer(running, than: own) {
-            return "the jawd running (\(running)) is newer than this app's (\(own)), so it stays"
+    /// The wait the starter asked for is over: on the main queue's own timer, so it ends whether or not
+    /// the window is drawing.
+    func waited() {
+        run(starter.waited(answers: Self.answers(launch.socket), now: Date()))
+    }
+
+    func start(_ spawn: Spawn) {
+        do {
+            let pid = try spawn.run { [weak self] pid, status in self?.exited(pid, status, log: spawn.log) }
+            if !spawn.ownGroup { demo = pid }
+            note("started jawd \(pid)\(spawn.ownGroup ? ", in a process group of its own" : "")")
+        } catch {
+            let why = "can't start jawd: \(error.localizedDescription)"
+            note(why)
+            starter.didntStart(why)
         }
-        let uid = getuid()
-        let bootout = Process()
-        bootout.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        bootout.arguments = ["bootout", "gui/\(uid)/\(Self.label)"]
-        try? bootout.run()
-        bootout.waitUntilExit()
-        try? FileManager.default.removeItem(atPath: Self.terminalAgent)
-        return registerAgent()
     }
 
-    /// Whether version `a` is newer than `b`, as git describe gives them: by the release's dotted
-    /// numbers, then the commits since it, so 0.2.0-3-g4d2c1e9 is newer than 0.2.0 and older than
-    /// 0.2.1. Before the first tag a build says its commit's hash, which has no order, and neither is
-    /// newer, as when every jawd said 0.1.0.
-    static func newer(_ a: String, than b: String) -> Bool {
-        guard let a = order(a), let b = order(b) else { return false }
-        return b.lexicographicallyPrecedes(a)
+    func exited(_ pid: pid_t, _ status: Int32, log: String) {
+        if demo == pid { demo = nil }
+        let words = Spawn.lastWords(log)
+        note("jawd \(pid) stopped (\(Spawn.said(status)))\(words.isEmpty ? "" : ": \(words)")")
+        run(starter.exited(status: status, said: words, now: Date()))
     }
 
-    /// A version's release numbers and the commits since it: [0, 2, 0] for 0.2.0, [0, 2, 0, 3] for
-    /// 0.2.0-3-g4d2c1e9, and nil for a commit's hash or anything else.
-    static func order(_ version: String) -> [Int]? {
-        let parts = version.split(separator: "-", omittingEmptySubsequences: false)
-        let release = parts[0].split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
-        guard release.count == 3, !release.contains(nil) else { return nil }
-        let numbers = release.compactMap(\.self)
-        switch parts.count {
-        case 1: return numbers
-        case 3 where parts[2].hasPrefix("g"): return Int(parts[1]).map { numbers + [$0] }
-        default: return nil
+    /// Asks `SMAppService` to unregister the agent an earlier Jaw registered, which stops that agent's
+    /// jawd before it answers, and tells the starter; an error is there being none it could find.
+    /// `SMAppService` calls the handler on libdispatch's default queue, so it's `@Sendable`, never the
+    /// main actor's, and hops to the main queue itself.
+    func unregister() {
+        let service = SMAppService.agent(plistName: "\(Self.label).plist")
+        let asked = Date()
+        if trace {
+            note("unregistering an earlier Jaw's agent at \(AppModel.sinceStart) ms, which SMAppService says is \(Self.said(service.status))")
+        }
+        service.unregister { @Sendable error in
+            let removed = error == nil
+            let answer = error.map { "\(($0 as NSError).domain) \(($0 as NSError).code): \($0.localizedDescription)" } ?? "done"
+            let took = Int(Date().timeIntervalSince(asked) * 1000)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.note("unregistered \(took) ms after asking: \(answer)")
+                    self.run(self.starter.unregistered(removed: removed, answers: Self.answers(self.launch.socket), now: Date()))
+                }
+            }
+        }
+    }
+
+    /// An agent's status as the trace says it.
+    static func said(_ status: SMAppService.Status) -> String {
+        switch status {
+        case .notRegistered: "not registered"
+        case .enabled: "enabled"
+        case .requiresApproval: "waiting for approval"
+        case .notFound: "not found"
+        @unknown default: "status \(status.rawValue)"
+        }
+    }
+
+    /// With `JAW_TRACE`, says it on standard error.
+    func note(_ text: String) {
+        if trace { FileHandle.standardError.write(Data("jaw-mac: \(text)\n".utf8)) }
+    }
+
+    /// Stops the jawd the app started for `--demo`, once, giving it a few seconds to go, so its folder
+    /// is still by the time the app has quit: a snapshot's folder is removed then. A release's jawd
+    /// goes on, as the terminal's does.
+    func stop() {
+        guard let demo else { return }
+        self.demo = nil
+        kill(demo, SIGTERM)
+        let until = Date().addingTimeInterval(5)
+        while kill(demo, 0) == 0, Date() < until {
+            usleep(10000)
+        }
+    }
+}
+
+extension Situation.Reach {
+    /// What the window says of jawd, from what the starter says and jaw-client's words.
+    init(_ shown: Starter.Shown, why: String = "", retry: Int = 0) {
+        switch shown {
+        case .waiting: self = .waiting
+        case .starting: self = .starting(failed: nil)
+        case let .failed(said): self = .starting(failed: said)
+        case .unreachable: self = .unreachable(why: why, retry: retry)
         }
     }
 }
