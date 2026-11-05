@@ -124,6 +124,28 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     #expect(other.unregistered(removed: true, answers: true, now: t0 + 20) == [said], "another jawd answers by then, so none is started")
 }
 
+@Test func `a jawd of the app's refused by jaw.lock past its 15 s, or one that couldn't be started, is tried again once SMAppService has removed an earlier Jaw's agent, the window saying Starting jawd, and its words again if it fails again`() {
+    let said = Starter.Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
+    var starter = Starter(facts())
+    let held = Starter.held + starter.here.home
+    let (first, shown) = starter.launched(answers: false, now: t0)
+    #expect(starter.spawn.map { first == [.start($0), .unregister] } == true && shown == .starting)
+    let late = starter.exited(status: 1 << 8, said: held, now: t0 + 15.1)
+    #expect(late.isEmpty && starter.unreachable(now: t0 + 16) == .failed("jawd stopped as it started (exit status: 1): \(held)"),
+            "an agent's jawd slow to listen held jaw.lock past the 15 s, so it says why")
+    let removed = starter.unregistered(removed: true, answers: false, now: t0 + 30)
+    #expect(starter.spawn.map { removed == [said, .start($0)] } == true,
+            "SMAppService has stopped that agent's jawd, and the app's that failed isn't on its way, so another starts")
+    #expect(starter.unreachable(now: t0 + 30.1) == .starting, "the failure is no longer true, and this start has 15 s of its own")
+    var unstarted = Starter(facts())
+    _ = unstarted.launched(answers: false, now: t0)
+    unstarted.didntStart("can't start jawd: Permission denied")
+    let again = unstarted.unregistered(removed: true, answers: false, now: t0 + 0.2)
+    #expect(unstarted.spawn.map { again == [said, .start($0)] } == true, "one that couldn't be started is tried once more")
+    unstarted.didntStart("can't start jawd: Permission denied")
+    #expect(unstarted.unreachable(now: t0 + 0.3) == .failed("can't start jawd: Permission denied"), "and says its words again")
+}
+
 @Test func `a jawd that stopped as it started for anything else says why until a jawd answers, and one that stops after it answered is jaw-client's to say`() {
     var starter = Starter(facts(own: false))
     _ = starter.launched(answers: false, now: t0)

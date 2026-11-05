@@ -86,7 +86,8 @@ public struct Starter: Sendable {
     /// Whether it's to be started again once the app has waited, after it stopped because another
     /// jawd held the folder.
     var restarting = false
-    /// Why it didn't start, or why the app won't start one here, until a jawd answers.
+    /// Why it didn't start, or why the app won't start one here, until a jawd answers or the app
+    /// starts another.
     var failed: String?
     /// Whether `SMAppService` has yet to answer for an earlier Jaw's agent.
     var unregistering = false
@@ -113,15 +114,16 @@ public struct Starter: Sendable {
     }
 
     /// `SMAppService` answered for the earlier Jaw's agent, `removed` when there was one, whose jawd it
-    /// has stopped by then: when nothing answers, no jawd of the app's is running or to be started
-    /// again, and none failed to start, the app starts its own, which has 15 s from then to answer.
+    /// has stopped by then: when nothing answers and no jawd of the app's is running or to be started
+    /// again, the app starts its own, even if an earlier one failed, with 15 s from then to answer.
     public mutating func unregistered(removed: Bool, answers: Bool, now: Date) -> [Step] {
         guard unregistering else { return [] }
         unregistering = false
         guard removed else { return [] }
         let said = Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
-        guard !running, !restarting, failed == nil else { return [said] }
+        guard !running, !restarting else { return [said] }
         since = nil
+        failed = nil
         return [said] + decide(answers: answers, now: now)
     }
 
