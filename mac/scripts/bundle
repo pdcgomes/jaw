@@ -26,6 +26,9 @@ built="$(mac/scripts/built-from)"
 # The helpers are copied from this checkout's target, whatever target-dir a setting of Cargo's names,
 # and go builds jaw-engine from engine/go.mod alone, whatever go.work a folder above it holds.
 export CARGO_TARGET_DIR="$repo/target" GOWORK=off
+# jawd and jaw an earlier build left go first, so the copy fails rather than sign them under this
+# tree's record when a target a setting of Cargo's names has cargo build into target/<triple>.
+rm -f target/release/jawd target/release/jaw
 
 echo "==> jawd, jaw and jaw-engine for release"
 cargo build --release -p jawd --bin jawd --quiet

@@ -116,6 +116,9 @@ elsewhere="in a checkout whose origin isn't $project"
 
 says "a checkout at origin/main" main "$at on main"
 says "a checkout at origin/main, given a folder inside it" main "$at on main" "$base/mac"
+if [ -d "$scratch/BASE" ]; then
+    says "a checkout at origin/main, given in another case, which the volume ignores" main "$at on main" "$scratch/BASE"
+fi
 if got="$("$base/mac/scripts/built-from" 2>&1)" && [ "$got" = "$(printf 'main\n%s on main' "$at")" ]; then
     echo "ok: a checkout at origin/main, read by its own built-from given nothing"
 else
@@ -286,6 +289,17 @@ echo more >> crates/lib.rs
 git update-index --skip-worktree crates/lib.rs
 says "a file under crates changed, which git is told to skip" changed \
     "main at $at, with files jawd is built from whose changes git is told to ignore"
+copy monitored
+# The copy's index describes the original's files, so it's brought up to date first, as a checkout's
+# in use is; with the hook set, one git status then marks every entry valid.
+git update-index -q --refresh
+printf '%s\n' '#!/bin/sh' "printf 'token\\0'" > "$scratch/fsmonitor"
+chmod +x "$scratch/fsmonitor"
+git config core.fsmonitor "$scratch/fsmonitor"
+git status --porcelain > /dev/null
+echo more >> crates/lib.rs
+says "a file under crates changed, which a core.fsmonitor hook answering no paths hides from git status" changed \
+    "main at $at, $changed"
 copy changed-release
 git tag v0.1.0
 echo more >> engine/main.go
