@@ -274,7 +274,7 @@ async fn a_voice_message_in_the_cache_plays_with_its_playhead_and_ends_at_its_le
     assert_eq!(end["at"], end["seconds"], "it ends at its length");
     assert!(end.get("recording").is_none(), "and it's no recording");
     assert!(heard.sound() > 0, "it was heard");
-    assert_eq!(rig.voice.status().playing, None, "nothing plays once it's ended");
+    status_when(&rig, "nothing plays once it's ended", |s| s.playing.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -286,13 +286,13 @@ async fn pause_then_play_without_at_carries_on_and_seek_and_speed_move_the_playh
     rig.call("voice.play", json!({ "message": "3EB0VOICE1", "at": 1.0, "speed": 1 })).await.unwrap();
     let started = playbacks(&mut pushes, "playing", |p| state(p) == "playing").await;
     assert!(started.last().unwrap()["at"].as_f64().unwrap() >= 1.0, "from where it was asked: {started:?}");
-    let status = rig.voice.status();
-    assert_eq!((status.playing.as_deref(), status.state.as_deref()), (Some("3EB0VOICE1"), Some("playing")));
+    let plays = |s: &VoiceStatus| (s.playing.as_deref(), s.state.as_deref()) == (Some("3EB0VOICE1"), Some("playing"));
+    status_when(&rig, "it plays", plays).await;
 
     rig.call("voice.pause", json!({})).await.unwrap();
     let paused = playbacks(&mut pushes, "paused", |p| state(p) == "paused").await;
     let at = paused.last().unwrap()["at"].as_f64().unwrap();
-    assert_eq!(rig.voice.status().state.as_deref(), Some("paused"));
+    status_when(&rig, "it's paused", |s| s.state.as_deref() == Some("paused")).await;
     rig.call("voice.play", json!({ "message": "3EB0VOICE1", "speed": 1 })).await.unwrap();
     let resumed = playbacks(&mut pushes, "playing again", |p| state(p) == "playing").await;
     let again = resumed.last().unwrap()["at"].as_f64().unwrap();
@@ -358,7 +358,7 @@ async fn a_play_waiting_for_a_download_that_stops_is_pushed_failed_with_why() {
     let failed = seen.last().unwrap();
     assert_eq!(failed["message"], "3EB0VOICE1");
     assert!(failed["error"].as_str().unwrap().contains("cancelled"), "{failed}");
-    assert_eq!(rig.voice.status().playing, None);
+    status_when(&rig, "nothing plays", |s| s.playing.is_none()).await;
     rig.world.gate_downloads(false);
 }
 
@@ -411,7 +411,7 @@ async fn no_audio_output_or_a_file_that_isnt_a_voice_message_is_pushed_failed_wi
     let failed = seen.last().unwrap();
     assert_eq!(failed["message"], "3EB0NOTVOICE");
     assert!(failed["error"].as_str().unwrap().contains("isn't a voice message"), "{failed}");
-    assert_eq!(rig.voice.status().playing, None);
+    status_when(&rig, "nothing plays", |s| s.playing.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -477,7 +477,7 @@ async fn what_a_connection_plays_stops_when_it_ends_unless_another_has_played_si
     assert_eq!(rig.voice.status().playing.as_deref(), Some("3EB0VOICE1"), "another connection's end changes nothing");
     rig.voice.ended(7);
     playbacks(&mut pushes, "stopped", |p| state(p) == "stopped").await;
-    assert_eq!(rig.voice.status().playing, None);
+    status_when(&rig, "nothing plays", |s| s.playing.is_none()).await;
 }
 
 /// `seconds` of a 440 Hz tone at 48 kHz, as a microphone hears someone humming.
@@ -507,6 +507,21 @@ async fn recordings(pushes: &mut broadcast::Receiver<Push>, what: &str, done: im
     });
     assert!(waited.await.is_ok(), "no recording push came to {what}; these came: {seen:?}");
     seen
+}
+
+/// The voice status once `done` holds: the voice task leaves it as each step ends, after the
+/// pushes and answers the step sends, so one read just after them may find the step before's.
+async fn status_when(rig: &Rig, what: &str, done: impl Fn(&VoiceStatus) -> bool) -> VoiceStatus {
+    let waited = tokio::time::timeout(PATIENCE, async {
+        loop {
+            let status = rig.voice.status();
+            if done(&status) {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    waited.await.unwrap_or_else(|_| panic!("the status never said {what}: {:?}", rig.voice.status()))
 }
 
 /// Waits until the fake microphone has given everything it has.
@@ -545,8 +560,8 @@ async fn a_recording_pushes_its_levels_then_stopped_with_its_waveform_its_file_w
     assert_eq!(stopped["end"], "stopped");
     assert_eq!(stopped["waveform"].as_array().map(Vec::len), Some(64), "{stopped}");
     assert!((1.8..2.2).contains(&stopped["seconds"].as_f64().unwrap()), "{stopped}");
-    let status = rig.voice.status();
-    assert_eq!((status.recording.as_deref(), status.files), (Some("stopped"), 1));
+    let kept = |s: &VoiceStatus| (s.recording.as_deref(), s.files) == (Some("stopped"), 1);
+    let status = status_when(&rig, "it's stopped, its file kept", kept).await;
     assert!(status.hard_links && !status.silent);
     // Stopped already, it stays as it is.
     assert_eq!(rig.call("voice.stop", json!({})).await.unwrap(), json!({}));
@@ -576,8 +591,8 @@ async fn the_stopped_recording_plays_to_listen_to_and_cancel_throws_it_away() {
     assert!(rig.recordings().is_empty(), "thrown away, its file goes: {:?}", rig.recordings());
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     playbacks(&mut pushes, "listening stopped", |p| p["state"] == "stopped" && p["recording"] == true).await;
-    let status = rig.voice.status();
-    assert_eq!((status.recording, status.playing, status.files), (None, None, 0));
+    let none = |s: &VoiceStatus| s.recording.is_none() && s.playing.is_none() && s.files == 0;
+    status_when(&rig, "nothing records, plays or is kept", none).await;
     let e = rig.call("voice.play", json!({ "recording": true })).await.unwrap_err();
     assert_eq!(e.code, code::NOT_FOUND, "there's none to listen to now");
     let e = rig.call("voice.stop", json!({})).await.unwrap_err();
@@ -595,7 +610,7 @@ async fn a_recording_thrown_away_while_it_goes_leaves_nothing() {
     rig.call("voice.cancel", json!({})).await.unwrap();
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty(), "nothing left: {:?}", rig.recordings());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -612,7 +627,7 @@ async fn a_microphone_failing_midway_ends_interrupted_keeping_what_came_before()
     assert!(stopped["reason"].as_str().unwrap().contains("unplugged"), "{stopped}");
     assert!((0.8..1.2).contains(&stopped["seconds"].as_f64().unwrap()), "what came before is kept: {stopped}");
     assert_eq!(rig.recordings().len(), 1);
-    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    status_when(&rig, "it's stopped", |s| s.recording.as_deref() == Some("stopped")).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -624,7 +639,7 @@ async fn no_microphone_is_refused_and_leaves_nothing() {
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert!(e.message.contains("no microphone"), "{e:?}");
     assert!(rig.recordings().is_empty());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
     assert!(rig.said().is_empty(), "WhatsApp isn't told you're recording: {:?}", rig.said());
 }
 
@@ -652,7 +667,7 @@ async fn a_recording_with_nothing_in_it_is_refused_and_leaves_nothing() {
         .unwrap();
     assert_eq!(kept, (0, 0, 0), "no message, outbox row or copy to make");
     assert!(rig.files("media/outgoing").is_empty() && rig.recordings().is_empty(), "and no file");
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
     assert!(rig.world.sends().is_empty());
     let e = rig.call("voice.send", json!({ "key": "jaw-voice-empty" })).await.unwrap_err();
     assert_eq!(e.code, code::NOT_FOUND, "its key names nothing, so there's nothing to send: {e:?}");
@@ -677,7 +692,7 @@ async fn digital_silence_is_pushed_silent_and_status_keeps_it() {
     let mut pushes = rig.pushes.subscribe();
     rig.call("voice.record", json!({ "chat": ANA })).await.unwrap();
     recordings(&mut pushes, "silent", |p| p["state"] == "silent").await;
-    assert!(rig.voice.status().silent, "status says it heard nothing");
+    status_when(&rig, "it heard nothing", |s| s.silent).await;
     heard_all(&heard).await;
     rig.call("voice.stop", json!({})).await.unwrap();
     assert!(rig.voice.status().silent, "and still does once it's stopped");
@@ -769,7 +784,7 @@ async fn a_connection_ending_throws_its_recording_away() {
     rig.voice.ended(7);
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -805,7 +820,7 @@ async fn a_connection_that_recorded_and_closes_its_socket_throws_its_recording_a
     drop(connection);
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty(), "{:?}", rig.recordings());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
 
     // One closed while it records stops the microphone there and then.
     let path = jaw_proto::local::socket(home.path());
@@ -820,7 +835,7 @@ async fn a_connection_that_recorded_and_closes_its_socket_throws_its_recording_a
     drop(connection);
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty(), "nor its part: {:?}", rig.recordings());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
     let waited = tokio::time::timeout(PATIENCE, async {
         while rig.said().last() != Some(&(ANA.to_string(), PAUSED_SAID)) {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -858,7 +873,7 @@ async fn a_connection_ending_while_the_voice_tasks_requests_are_full_still_throw
     }
     recordings(&mut pushes, "cancelled", |p| p["state"] == "cancelled").await;
     assert!(rig.recordings().is_empty(), "{:?}", rig.recordings());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -925,7 +940,7 @@ async fn a_recording_goes_to_whatsapp_as_a_voice_note_with_its_waveform_length_a
     assert_eq!((&row["kind"], &row["status"], &row["mine"]), (&json!("voice"), &json!("pending"), &json!(true)));
     assert_eq!((&row["voice"]["seconds"], &row["voice"]["waveform"]), (&json!(2), &waveform), "{row}");
     assert!(rig.recordings().is_empty(), "the recording's own file goes once it's written: {:?}", rig.recordings());
-    assert_eq!(rig.voice.status().recording, None);
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
 
     let row = rig.until(ANA, &id, "sent", sent).await;
     assert_eq!(row["media"]["state"], "local", "its copy is in the cache: {row}");
@@ -978,7 +993,7 @@ async fn a_recording_goes_to_whatsapp_as_a_voice_note_with_its_waveform_length_a
     let reused = rig.call("voice.send", json!({ "key": "jaw-voice-1" })).await.unwrap();
     assert_eq!(reused["message"], id.as_str());
     assert_eq!(rig.recordings().len(), 1, "the new recording is kept");
-    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    status_when(&rig, "it's stopped", |s| s.recording.as_deref() == Some("stopped")).await;
     assert_eq!(rig.world.sends().len(), 1, "and nothing more goes");
 }
 
@@ -1024,7 +1039,7 @@ async fn sending_later_is_refused_until_jawd_schedules_and_the_recording_kept() 
         assert_eq!((e.code, e.data.map(|d| d["param"].clone())), (code::INVALID_PARAMS, Some(json!(param))));
     }
     assert_eq!(rig.recordings().len(), 1, "kept, to send now or throw away");
-    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    status_when(&rig, "it's stopped", |s| s.recording.as_deref() == Some("stopped")).await;
     assert!(rig.world.sends().is_empty());
     rig.call("voice.send", json!({})).await.unwrap();
 }
@@ -1058,7 +1073,7 @@ async fn a_full_outbox_refuses_it_and_keeps_the_recording() {
     assert_eq!(e.code, code::LIMIT);
     assert_eq!(e.data.map(|d| d["limit"].clone()), Some(json!("outbox")));
     assert_eq!(rig.recordings().len(), 1, "the recording is kept as it was");
-    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    status_when(&rig, "it's stopped", |s| s.recording.as_deref() == Some("stopped")).await;
     assert!(
         rig.files("media/outgoing").is_empty(),
         "and nothing of it kept to send: {:?}",
@@ -1114,7 +1129,7 @@ async fn kept_bytes_past_their_bound_refuse_it_and_keep_the_recording() {
     assert_eq!(e.code, code::LIMIT, "{e:?}");
     assert_eq!(e.data.as_ref().map(|d| d["limit"].clone()), Some(json!("media")), "{e:?}");
     assert_eq!(rig.recordings().len(), 1, "the recording is kept as it was");
-    assert_eq!(rig.voice.status().recording.as_deref(), Some("stopped"));
+    status_when(&rig, "it's stopped", |s| s.recording.as_deref() == Some("stopped")).await;
     let (messages, outbox, outgoing, copies) = left_of(&rig, &id).await;
     assert_eq!(
         (messages, outbox, outgoing, copies),
