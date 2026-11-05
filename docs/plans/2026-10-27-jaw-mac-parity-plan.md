@@ -110,7 +110,7 @@ The terminal's Ctrl-O has a picker and `send.media`, SD or HD, albums, progress 
 
 ### 2.6 Voice messages
 
-The terminal draws the waveform; Enter plays and pauses, the speeds and seeking go by key, and the next unplayed message follows. All of it goes through jawd's `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push, on the made-up account until jawd serves voice.
+The terminal draws the waveform; Enter plays and pauses, the speeds and seeking go by key, and the next unplayed message follows. All of it goes through jawd's `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push, which jawd has served since 2 November; played receipts are still to come.
 
 - **The Mac's** is Mac-M2's step 3: the waveform's played part, play and pause, 1×, 1.5× and 2×, seeking by a click and by ← and →, the dot until it's played, the next unplayed after one ends, the playhead moving between jawd's pushes only while playing, and the small player in the status line.
 - **Needs from jawd:** voice, M5: jawd has served `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push since 2 November. Built against the protocol and `FakeJawd`'s `playback` pushes, as the terminal was against its made-up account.
