@@ -101,6 +101,29 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     #expect(twice.isEmpty, "and only once")
 }
 
+@Test func `an earlier Jaw's agent whose jawd held jaw.lock against the app's as it started, then answered, is said once SMAppService has removed it, and a jawd of the app's takes its place, with 15 s of its own, unless another answers`() {
+    let said = Starter.Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
+    var starter = Starter(facts())
+    let (first, shown) = starter.launched(answers: false, now: t0)
+    #expect(starter.spawn.map { first == [.start($0), .unregister] } == true && shown == .starting,
+            "nothing answers while the agent's jawd starts, so the app's starts before SMAppService is asked")
+    let stopped = starter.exited(status: 1 << 8, said: Starter.held + starter.here.home, now: t0 + 0.1)
+    #expect(stopped == [.wait(Starter.again)], "the agent's jawd held jaw.lock as it started")
+    let taken = starter.waited(answers: true, now: t0 + 1.1)
+    #expect(taken.isEmpty, "by the wait's end the agent's jawd answers, so the app's isn't started again")
+    let removed = starter.unregistered(removed: true, answers: false, now: t0 + 20)
+    #expect(starter.spawn.map { removed == [said, .start($0)] } == true,
+            "SMAppService has stopped the agent's jawd, and none of the app's is on its way, so the app's starts")
+    #expect(starter.unreachable(now: t0 + 20.1) == .starting, "its 15 s count from this start, though more than 15 have passed since the first")
+    let refused = starter.exited(status: 1 << 8, said: Starter.held + starter.here.home, now: t0 + 20.2)
+    #expect(refused == [.wait(Starter.again)], "and one refused by jaw.lock within them is to be started again, as any is")
+    var other = Starter(facts())
+    _ = other.launched(answers: false, now: t0)
+    _ = other.exited(status: 1 << 8, said: Starter.held + other.here.home, now: t0 + 0.1)
+    _ = other.waited(answers: true, now: t0 + 1.1)
+    #expect(other.unregistered(removed: true, answers: true, now: t0 + 20) == [said], "another jawd answers by then, so none is started")
+}
+
 @Test func `a jawd that stopped as it started for anything else says why until a jawd answers, and one that stops after it answered is jaw-client's to say`() {
     var starter = Starter(facts(own: false))
     _ = starter.launched(answers: false, now: t0)

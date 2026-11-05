@@ -113,14 +113,15 @@ public struct Starter: Sendable {
     }
 
     /// `SMAppService` answered for the earlier Jaw's agent, `removed` when there was one, whose jawd it
-    /// has stopped by then: when that jawd was the one answering, and no jawd of the app's is on its
-    /// way, the app starts its own.
+    /// has stopped by then: when nothing answers, no jawd of the app's is running or to be started
+    /// again, and none failed to start, the app starts its own, which has 15 s from then to answer.
     public mutating func unregistered(removed: Bool, answers: Bool, now: Date) -> [Step] {
         guard unregistering else { return [] }
         unregistering = false
         guard removed else { return [] }
         let said = Step.say("an earlier Jaw started jawd at login; it doesn't now, and Jaw starts it as it opens", warn: false)
-        guard since == nil, failed == nil else { return [said] }
+        guard !running, !restarting, failed == nil else { return [said] }
+        since = nil
         return [said] + decide(answers: answers, now: now)
     }
 
