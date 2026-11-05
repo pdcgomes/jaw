@@ -110,8 +110,12 @@ let project = Project(
             productName: "Jaw",
             bundleId: prefix,
             deploymentTargets: .macOS(macOS),
-            // Contacts is asked for in jaw's words, the first time a contact picked is sent as a card.
-            infoPlist: appInfo(name: "Jaw", extra: ["NSContactsUsageDescription": "Jaw reads the contacts you pick, to send each as a card."]),
+            infoPlist: appInfo(name: "Jaw", extra: [
+                // Contacts is asked for in jaw's words, the first time a contact picked is sent as a card.
+                "NSContactsUsageDescription": "Jaw reads the contacts you pick, to send each as a card.",
+                // The microphone is asked for in jaw's words for a jawd the app starts, which macOS counts as the app's.
+                "NSMicrophoneUsageDescription": "Jaw records the voice messages you send.",
+            ]),
             sources: ["JawApp/Sources/**"],
             resources: ["JawApp/Resources/**"],
             entitlements: .file(path: "JawApp/Jaw.entitlements"),

@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Under the hardened runtime, the app reads a contact picked to send as a card only with this. -->
 <plist version="1.0">
 <dict>
+    <!-- Under the hardened runtime, the app reads a contact picked to send as a card only with this. -->
     <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
+    <!-- Under the hardened runtime, a jawd the app starts, which macOS counts as the app's, records voice messages only with this. -->
+    <key>com.apple.security.device.audio-input</key>
     <true/>
 </dict>
 </plist>
