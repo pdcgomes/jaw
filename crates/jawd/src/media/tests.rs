@@ -2508,7 +2508,9 @@ async fn a_photo_arriving_is_done_ahead_of_what_windows_show_after_it() {
             later_done += 1;
         }
     }
-    assert!(later_done < 8, "{later_done} of the 32 shown after it came first");
+    // Taken first, it runs beside at most UNASKED_AT_ONCE - 1 of them, which on a machine with few
+    // cores may end before it; taken after them, at least UNASKED_AT_ONCE would have started first.
+    assert!(later_done < schedule::UNASKED_AT_ONCE, "{later_done} of the 32 shown after it came first");
 }
 
 #[tokio::test(flavor = "multi_thread")]
