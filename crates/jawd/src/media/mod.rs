@@ -161,6 +161,8 @@ struct Inner {
     schedule: schedule::Schedule,
     /// Wakes the cleaner, which drops unnamed files and keeps the cache to its size.
     clean: Notify,
+    /// Wakes the settle, once previews or a thumbnail are named: it has nothing to do until then.
+    made: Notify,
     /// Wakes whatever waits for a copy waiting for the phone to be over.
     asked_phone: Notify,
     stats: Mutex<Stats>,
@@ -180,6 +182,9 @@ struct Inner {
     /// The cleaner's passes that found nothing more to do, as a test waits for one.
     #[cfg(test)]
     tidied: std::sync::atomic::AtomicU64,
+    /// The settles the settle's task has started, as a test counts them.
+    #[cfg(test)]
+    settles: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -252,6 +257,7 @@ impl Media {
             claims: cache::Claims::default(),
             schedule: schedule::Schedule::default(),
             clean: Notify::new(),
+            made: Notify::new(),
             asked_phone: Notify::new(),
             stats: Mutex::new(Stats { partial_removed: partial as u64, ..Stats::default() }),
             paused: Mutex::new(None),
@@ -261,6 +267,8 @@ impl Media {
             opening: Mutex::default(),
             #[cfg(test)]
             tidied: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            settles: std::sync::atomic::AtomicU64::new(0),
         });
         // Previews and thumbnails a power cut may have broken are shown only once they're checked,
         // so they're known before anything reads a row.

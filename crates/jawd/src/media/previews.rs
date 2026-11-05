@@ -55,6 +55,7 @@ pub(super) async fn thumbnail(inner: &Arc<Inner>, copy: &Wanted, priority: Prior
     match inner.store.apply(lane(priority), vec![Change::Media(made)]).await {
         Ok(_) => {
             inner.clean.notify_one();
+            inner.made.notify_one();
             Drawn::Done
         }
         Err(e) => Drawn::Failed(format!("{e:#}")),
@@ -122,6 +123,7 @@ pub(super) async fn previews(inner: &Arc<Inner>, copy: &Wanted, path: &str, prio
     match inner.store.apply(lane(priority), vec![Change::Media(made)]).await {
         Ok(_) => {
             inner.clean.notify_one();
+            inner.made.notify_one();
             Drawn::Done
         }
         Err(e) => Drawn::Failed(format!("{e:#}")),

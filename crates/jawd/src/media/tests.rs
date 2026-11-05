@@ -1037,6 +1037,108 @@ async fn a_stops_settle_gives_up_at_its_bound_and_notes_nothing_after() {
     assert_eq!((settled, made), (0, 2), "a settle given up notes nothing, even once the drive is done");
 }
 
+/// The settles the settle's task has started.
+fn settles(rig: &Rig) -> u64 {
+    rig.media.inner.settles.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Waits until every preview and thumbnail named is settled, failing past `bound`.
+async fn until_settled(rig: &Rig, bound: Duration) {
+    let began = std::time::Instant::now();
+    loop {
+        let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        if made > 0 && settled == made {
+            return;
+        }
+        assert!(began.elapsed() < bound, "settled through {settled} of {made} after {:?}", began.elapsed());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settle_wakes_only_once_previews_are_named_and_settles_them_within_settle_every() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let (drive, asked) = recording(home.path());
+    let every = Duration::from_millis(100);
+    let rig = rig_in(home.clone(), Config { drive: Some(drive), settle_every: every, ..quick() }).await;
+    until_checked(&rig).await;
+    tokio::time::sleep(every * 10).await;
+    assert_eq!(settles(&rig), 0, "nothing was named, so the settle never woke");
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0NAMED").await;
+    rig.until(ANA, "3EB0NAMED", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    until_settled(&rig, every + Duration::from_secs(5)).await;
+    let barriers = asked.lock().unwrap().iter().filter(|(flush, ..)| *flush == drive::Flush::Barrier).count();
+    assert!(barriers >= 1, "sent to the drive and fenced, with nothing but the naming to wake it");
+    // One named while a settle ran is left for the next, settle_every later.
+    tokio::time::sleep(every * 5).await;
+    let woken = settles(&rig);
+    tokio::time::sleep(every * 10).await;
+    assert_eq!(settles(&rig), woken, "once they're settled, it doesn't wake again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_that_fails_is_tried_again_every_settle_every_until_it_goes_through() {
+    // More failures than the namings of a photo's previews and thumbnail could wake it for.
+    let failing = Arc::new(std::sync::atomic::AtomicU32::new(3));
+    let drive = {
+        let failing = failing.clone();
+        // Only a settle sends to the drive, one at a time.
+        drive::Drive::stand_in(move |_, _| {
+            let order = std::sync::atomic::Ordering::SeqCst;
+            if failing.load(order) == 0 {
+                return Ok(());
+            }
+            failing.fetch_sub(1, order);
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        })
+    };
+    let every = Duration::from_millis(100);
+    let rig = rig(Config { drive: Some(drive), settle_every: every, ..quick() }).await;
+    until_checked(&rig).await;
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0AGAIN").await;
+    rig.until(ANA, "3EB0AGAIN", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    until_settled(&rig, every * 10 + Duration::from_secs(5)).await;
+    assert_eq!(failing.load(std::sync::atomic::Ordering::SeqCst), 0, "three settles failed before one went through");
+    assert!(settles(&rig) >= 4, "each tried again with nothing more named: {}", settles(&rig));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_named_are_settled_by_a_clean_stops_settle_however_long_the_settle_would_wait() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let (drive, asked) = recording(home.path());
+    let rig = rig_in(home.clone(), Config { drive: Some(drive), ..quick() }).await;
+    until_checked(&rig).await;
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0STOP").await;
+    rig.until(ANA, "3EB0STOP", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (0, 2), "the settle waits settle_every, an hour here, after they're named");
+    // As jawd's stop asks within its bound, SETTLING.
+    rig.media.settle_within(Duration::from_millis(500)).await.unwrap();
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (2, 2), "the stop's settle takes them");
+    let barriers = asked.lock().unwrap().iter().filter(|(flush, ..)| *flush == drive::Flush::Barrier).count();
+    assert_eq!(barriers, 1, "behind one barrier");
+}
+
+#[test]
+fn previews_a_start_found_unsettled_are_settled_once_the_check_has_passed_them() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    // A jawd draws a photo's previews and thumbnail, and stops before they're settled.
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0LEFT").await;
+        rig.until(ANA, "3EB0LEFT", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    });
+    as_a_jawd(async {
+        let every = Duration::from_millis(100);
+        let rig = rig_in(home.clone(), Config { settle_every: every, ..quick() }).await;
+        until_checked(&rig).await;
+        until_settled(&rig, every + Duration::from_secs(5)).await;
+        assert_eq!(rig.media.status().remade, 0, "whole, so passed as they were, and nothing named since");
+    });
+}
+
 /// A photo whose previews and thumbnail a jawd on `home` drew and never settled, and the path of
 /// its 256 px preview, emptied as a power cut leaves it.
 fn drawn_and_cut(home: &Arc<tempfile::TempDir>, id: &'static str) -> (std::path::PathBuf, Vec<u8>) {

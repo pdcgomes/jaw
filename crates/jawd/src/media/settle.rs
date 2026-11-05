@@ -1,13 +1,14 @@
 //! Previews and thumbnails made durable after the fact, checked at a start, and looked at weekly.
 //! They're put in place without waiting for the disk, each write numbered in jaw.db (`media_made`).
-//! Every so often, and at a clean stop, those written since the last time are sent to the drive,
-//! fenced with one barrier, and only then noted as durable up to their number, so the note can't
-//! reach the disk before them (`drive`). At a start, the files with writes past that number may have
-//! been broken by a power cut: they're suspect, checked off the read path, which doesn't show their
-//! previews and thumbnail until the check has passed them, and a broken one is mended, forgotten in
-//! a synced commit, removed and made again. One a job holds the file of stays suspect until it can
-//! be mended, and nothing settles until every one has been passed. Weekly, every file's previews and
-//! thumbnail are looked at the same way, for what a disk error or a hand from outside broke.
+//! A few seconds after one is written, and at a clean stop, those written since the last time are
+//! sent to the drive, fenced with one barrier, and only then noted as durable up to their number, so
+//! the note can't reach the disk before them (`drive`). At a start, the files with writes past that
+//! number may have been broken by a power cut: they're suspect, checked off the read path, which
+//! doesn't show their previews and thumbnail until the check has passed them, and a broken one is
+//! mended, forgotten in a synced commit, removed and made again. One a job holds the file of stays
+//! suspect until it can be mended, and nothing settles until every one has been passed. Weekly,
+//! every file's previews and thumbnail are looked at the same way, for what a disk error or a hand
+//! from outside broke.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,21 +44,38 @@ pub(super) async fn suspects(inner: &Inner, settled: i64, made: i64) -> anyhow::
     Ok(suspects)
 }
 
-/// Checks what a start found suspect, then settles what's made from then on, every `settle_every`,
-/// and looks at every file's previews every `look_every`.
+/// Checks what a start found suspect, then settles what's made from then on `settle_every` after
+/// previews or a thumbnail are named, and again every `settle_every` while a settle fails; looks at
+/// every file's previews every `look_every`.
 pub(super) fn start(inner: &Arc<Inner>, suspects: Vec<Vec<u8>>) {
     let inner = inner.clone();
     tokio::spawn(async move {
+        // Whether previews or a thumbnail were named since the last settle that went through, as
+        // those a start found suspect were.
+        let mut made = !suspects.is_empty();
         check(&inner, suspects).await;
         let mut look_at = next_look(&inner).await;
         loop {
-            let settle_at = tokio::time::Instant::now() + inner.config.settle_every;
-            tokio::time::sleep_until(settle_at.min(look_at)).await;
+            if !made {
+                tokio::select! {
+                    () = inner.made.notified() => made = true,
+                    () = tokio::time::sleep_until(look_at) => {}
+                }
+            }
+            if made {
+                let settle_at = tokio::time::Instant::now() + inner.config.settle_every;
+                tokio::time::sleep_until(settle_at.min(look_at)).await;
+            }
             if tokio::time::Instant::now() >= look_at {
                 look(&inner).await;
                 look_at = tokio::time::Instant::now() + inner.config.look_every;
-            } else if let Err(e) = settle(&inner).await {
-                eprintln!("jawd: can't make the previews made lately durable this time: {e:#}");
+            } else {
+                #[cfg(test)]
+                inner.settles.fetch_add(1, Ordering::SeqCst);
+                match settle(&inner).await {
+                    Ok(()) => made = false,
+                    Err(e) => eprintln!("jawd: can't make the previews made lately durable this time: {e:#}"),
+                }
             }
         }
     });
