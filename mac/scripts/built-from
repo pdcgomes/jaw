@@ -47,7 +47,8 @@ commit=$(git rev-parse --short HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
-changes=$(git -c core.fsmonitor=false status --porcelain --untracked-files=no --ignore-submodules=none -- $inputs)
+changes=$(git -c core.fsmonitor=false -c core.trustctime=true -c core.checkStat=default \
+    status --porcelain --untracked-files=no --ignore-submodules=none -- $inputs)
 others=$(git -c core.fsmonitor=false ls-files --others -- $inputs)
 untracked=$(printf '%s\n' "$others" | sed '/\/\.DS_Store$/d')
 tracked=$(git -c core.fsmonitor=false ls-files -v -- $inputs)

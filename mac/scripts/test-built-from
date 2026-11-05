@@ -300,6 +300,18 @@ git status --porcelain > /dev/null
 echo more >> crates/lib.rs
 says "a file under crates changed, which a core.fsmonitor hook answering no paths hides from git status" changed \
     "main at $at, $changed"
+copy untrusted
+git config core.trustctime false
+# Last written in 2000, so git doesn't take the file for racily clean and read it whole, and changed
+# a second after git reads it, since git may compare its ctime only to the second.
+touch -t 200001010000 crates/lib.rs
+git update-index -q --refresh
+sleep 1
+touch -r crates/lib.rs "$scratch/times"
+echo 'pub fn jawe() {}' > crates/lib.rs
+touch -r "$scratch/times" crates/lib.rs
+says "a file under crates changed in place, its size kept and its time put back, with core.trustctime=false" changed \
+    "main at $at, $changed"
 copy changed-release
 git tag v0.1.0
 echo more >> engine/main.go
