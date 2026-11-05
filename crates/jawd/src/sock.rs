@@ -1957,7 +1957,11 @@ mod tests {
         fn send(&mut self, method: &str, params: Value) -> u64 {
             let id = self.next;
             self.next += 1;
-            writeln!(self.writer, "{}", json!({ "id": id, "method": method, "params": params }))
+            // In one write: Linux charges each write to a Unix socket a buffer of its own, so a line
+            // written a piece at a time, as writeln! does, fills it at a few dozen bytes a piece.
+            let line = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
+            self.writer
+                .write_all(line.as_bytes())
                 .unwrap_or_else(|e| panic!("request {id}, {method}, wasn't read: {e}"));
             id
         }
