@@ -84,6 +84,8 @@ final class AppModel {
     var listCame: (() -> Void)?
     /// `JAW_TRACE=1` says each update drained, on standard error.
     let trace = ProcessInfo.processInfo.environment["JAW_TRACE"] != nil
+    /// What the trace last said the window shows of jawd.
+    var traced: String?
 
     /// The focused pane's conversation, the one the keys and the menus act on.
     var conversation: ConversationController? {
@@ -144,6 +146,8 @@ final class AppModel {
         foldersWindow = jawd.watchFolders()
         preferences.changed.append { [weak self] in self?.restyle() }
         glance.model = self
+        window?.refresh()
+        if trace { DispatchQueue.main.async { [weak self] in self?.traceShown() } }
     }
 
     func stop() {
@@ -164,10 +168,11 @@ final class AppModel {
         let updates = jawd.drain()
         guard !updates.isEmpty else { return }
         for update in updates {
-            if trace { FileHandle.standardError.write(Data("jaw-mac: \(String(describing: update).prefix(160))\n".utf8)) }
+            if trace { FileHandle.standardError.write(Data("jaw-mac: \(String(describing: update).prefix(160)) at \(Self.sinceStart) ms\n".utf8)) }
             apply(update)
         }
         window?.refresh()
+        traceShown()
     }
 
     func apply(_ update: JawUpdate) {
@@ -358,6 +363,28 @@ final class AppModel {
     /// What fills the panes' place, when it isn't chats.
     var stateView: StateView.Kind? {
         situation.stateView(hasChats: !(window?.chatList.all.isEmpty ?? true) || folder != "all", hasPanes: grid != nil)
+    }
+
+    /// With `JAW_TRACE`, says on standard error what the window shows of jawd each time that or the
+    /// window's visibility changes, once a frame with it is on screen, with the time since the process
+    /// started: the status line's state, what fills the panes' place by its case, and jawd's words when
+    /// it didn't start.
+    func traceShown() {
+        guard trace else { return }
+        let place = stateView.map { kind in String("\(kind)".prefix { $0 != "(" }) } ?? "chats"
+        let why = if case let .starting(failed?) = reach { " · \(failed)" } else { "" }
+        let hidden = window?.window?.isVisible == true ? "" : " · window hidden"
+        let shows = "\(situation.stateLine?.text ?? "online") · \(place)\(why)\(hidden)"
+        guard shows != traced else { return }
+        traced = shows
+        Bench.nextFrame {
+            FileHandle.standardError.write(Data("jaw-mac: shown at \(Self.sinceStart) ms: \(shows)\n".utf8))
+        }
+    }
+
+    /// Milliseconds since the process started, as the trace counts them.
+    static var sinceStart: Int {
+        Int(Date().timeIntervalSince(Launch.processStart() ?? Date()) * 1000)
     }
 
     // MARK: - Panes
