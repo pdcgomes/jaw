@@ -44,11 +44,12 @@ fn command(program: &Path, home: &Path) -> Command {
     command
 }
 
-/// One frame of jaw on `home`, `width` by `height`, after `keys`, as `jaw snapshot` prints it.
+/// One frame of jaw on `home`, `width` by `height`, after `keys`, as `jaw snapshot` prints it with
+/// NO_COLOR set, so a photo is its one line whether or not the shell running the tests sets it.
 fn snapshot_with(home: &Path, keys: &str, (width, height): (u16, u16), more: &[&str], jawd: Option<&Path>) -> String {
     let (width, height) = (width.to_string(), height.to_string());
     let mut jaw = command(Path::new(env!("CARGO_BIN_EXE_jaw")), home);
-    jaw.args(["snapshot", "--width", &width, "--height", &height, "--keys", keys]).args(more);
+    jaw.args(["snapshot", "--width", &width, "--height", &height, "--keys", keys]).args(more).env("NO_COLOR", "1");
     if let Some(jawd) = jawd {
         jaw.env("JAWD", jawd);
     }

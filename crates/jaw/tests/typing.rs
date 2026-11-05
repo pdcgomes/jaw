@@ -87,7 +87,8 @@ impl Drop for Jawd {
     }
 }
 
-/// `jaw snapshot` on the jawd in `home` after `keys`, 140 columns by 34 rows, its status line on.
+/// `jaw snapshot` on the jawd in `home` after `keys`, 140 columns by 34 rows, its status line on,
+/// with NO_COLOR set, so a photo is its one line whether or not the shell running the tests sets it.
 /// One still running after `JAW_FINISHES` is killed, through its own child, and fails the test.
 fn snapshot(home: &Path, keys: &str) -> String {
     let out = tempfile::tempfile().unwrap();
@@ -95,6 +96,7 @@ fn snapshot(home: &Path, keys: &str) -> String {
         .args(["snapshot", "--width", "140", "--height", "34", "--keys", keys])
         .env("JAW_HOME", home)
         .env("JAW_EXPERIMENTS", "status_line")
+        .env("NO_COLOR", "1")
         .stdout(out.try_clone().unwrap())
         .stderr(Stdio::null())
         .spawn()
