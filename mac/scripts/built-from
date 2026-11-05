@@ -19,9 +19,10 @@
 # so make mac records nothing. Given a file as well, it says changed when anything jawd is built
 # from was written since that file was, so make mac sees a change made and undone while it built.
 # What it can't see: a change a filter of git's hides, a file made at the checkout's top and removed
-# again since the file given, a change undone with its files' times put back, and settings outside
-# the checkout, Cargo's and go's own and the environment's. It only reads: git takes none of its
-# optional locks.
+# again since the file given, a change undone with its files' times put back, or kept with them put
+# back within the second git last read the files, since git may compare ctime only to the second,
+# and settings outside the checkout, Cargo's and go's own and the environment's. It only reads: git
+# takes none of its optional locks.
 #
 #   mac/scripts/built-from [<checkout> [<since>]]   # this script's own checkout by default
 set -eu
