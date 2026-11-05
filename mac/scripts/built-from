@@ -12,17 +12,17 @@
 # origin/main can't stand in for; counts as a change every untracked file but a .DS_Store, whatever
 # an ignore file or status.showUntrackedFiles says, since Cargo runs a new build.rs and go compiles a
 # new .go file however git is told to ignore it, and every file git is told to assume unchanged or
-# skip; has git look at every tracked file itself, whatever core.fsmonitor says; reads the checkout
-# that holds the folder it's given, from its top, whatever GIT_DIR and GIT_WORK_TREE say, and
-# refuses a folder whose work tree, as core.worktree can set it, doesn't hold it; takes no replace
-# refs or grafts, which make one commit stand for another; and stops when git can't read the tree,
-# so make mac records nothing. Given a file as well, it says changed when anything jawd is built
-# from was written since that file was, so make mac sees a change made and undone while it built.
-# What it can't see: a change a filter of git's hides, a file made at the checkout's top and removed
-# again since the file given, a change undone with its files' times put back, or kept with them put
-# back within the second git last read the files, since git may compare ctime only to the second,
-# and settings outside the checkout, Cargo's and go's own and the environment's. It only reads: git
-# takes none of its optional locks.
+# skip; has git look at every tracked file itself, its ctime included, whatever core.fsmonitor,
+# core.trustctime and core.checkStat say; reads the checkout that holds the folder it's given, from
+# its top, whatever GIT_DIR and GIT_WORK_TREE say, and refuses a folder whose work tree, as
+# core.worktree can set it, doesn't hold it; takes no replace refs or grafts, which make one commit
+# stand for another; and stops when git can't read the tree, so make mac records nothing. Given a
+# file as well, it says changed when anything jawd is built from was written since that file was,
+# so make mac sees a change made and undone while it built. What it can't see: a change a filter of
+# git's hides, a file made at the checkout's top and removed again since the file given, a change
+# undone with its files' times put back, or kept with them put back within the second git last read
+# the files, since git may compare ctime only to the second, and settings outside the checkout,
+# Cargo's and go's own and the environment's. It only reads: git takes none of its optional locks.
 #
 #   mac/scripts/built-from [<checkout> [<since>]]   # this script's own checkout by default
 set -eu
