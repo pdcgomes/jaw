@@ -36,6 +36,10 @@ fn quick() -> Timing {
 /// How long a test's jawd waits for the demo engine to connect as it starts.
 const CONNECTING: Duration = Duration::from_secs(10);
 
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
+
 /// jawd's sending on a jaw.db in `home`, with the demo engine on `world`, connected.
 struct Running {
     store: Store,
@@ -1131,7 +1135,7 @@ async fn past_a_thousand_messages_waiting_a_new_one_is_refused_and_none_is_dropp
     running.chats(&[ANA]).await;
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         let tx = db.transaction().unwrap();
         for n in 0..1_000i64 {
             tx.execute(
@@ -2902,7 +2906,7 @@ async fn an_outbox_full_of_messages_whatsapp_refuses_for_good_is_emptied_by_dele
     running.arrives(ANA, ANA, "theirs", now_ms()).await;
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         let tx = db.transaction().unwrap();
         // 998 messages of yours WhatsApp refused, one still to go and one waiting for a receipt.
         let failed = (0..998).map(|n| (format!("w{n}"), "failed", "failed"));
@@ -2955,7 +2959,7 @@ async fn past_a_thousand_a_deletion_for_you_of_a_message_with_a_reaction_kept_fo
     running.arrives(ANA, ANA, "theirs", now_ms()).await;
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         let tx = db.transaction().unwrap();
         // A thousand messages of yours WhatsApp refused, and your reaction to Ana's, which had no
         // receipt in its day and is kept for a late one, outside the thousand.
@@ -3922,7 +3926,7 @@ async fn past_a_thousand_waiting_an_action_or_a_forward_is_refused_and_nothing_i
     running.store.apply(Lane::Live, vec![Change::Message(mine)]).await.unwrap();
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         let tx = db.transaction().unwrap();
         for n in 0..1_000i64 {
             tx.execute(
@@ -5003,7 +5007,8 @@ async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
     running.arrives(CLIMBING, RUI, "g1", now_ms() - 3_000).await;
     running.arrives(ANA, ANA, "d1", now_ms() - 2_000).await;
     let mine = running.send(ANA, "o meu").await;
-    running.until_status(ANA, &mine, "sent").await;
+    // Read, so its receipts, which change its row, are all in before what the echoes mustn't change.
+    running.until_status(ANA, &mine, "read").await;
     let before = row(&running, CLIMBING, "g1").await.unwrap().v;
     // Starred while WhatsApp can't be reached, so the rows are read before any patch goes.
     until_offline(&running).await;
