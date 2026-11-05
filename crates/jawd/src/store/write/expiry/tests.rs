@@ -2500,6 +2500,49 @@ async fn below_the_disks_floor_what_disappears_goes_at_its_time_and_what_it_leav
     gone_but_for(home.path(), "yakfulldisk", &full_before, "deleted for you as jaw.db filled");
 }
 
+/// Below the disk's floor in a writer with nothing left to index or merge, as a running jawd's
+/// usually is, not a store just opened: a history message waits for room and goes in once the disk
+/// has it, though nothing else comes to wake the writer; a live message's text waits to be
+/// indexed; and the WAL a disappearing message deleted for you leaves is emptied while that text
+/// still waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn below_the_disks_floor_with_nothing_left_to_merge_indexing_and_background_work_wait_while_the_wal_is_emptied() {
+    let home = tempfile::tempdir().unwrap();
+    let (disk, fake) = Disk::faked(home.path(), disk::Config::default(), 10 * GB, 100 * GB);
+    let store = Store::open_on(home.path(), crate::store::LIMITS, disk.clone()).unwrap();
+    apply(&store, vec![Change::Message(message(ANA, "first", AT, "aardvark words", None))]).await;
+    store.indexed().await.unwrap();
+
+    fake.free.store(GB, Ordering::Relaxed);
+    assert!(!disk.room(), "1 GB free of 100 GB is below the floor");
+    let history = {
+        let store = store.clone();
+        let old = Message { live: false, ..message(RUI, "history", AT - 1_000, "an old message", None) };
+        tokio::spawn(async move { store.apply(Lane::Background, vec![Change::Message(old)]).await })
+    };
+    tokio::time::sleep(disk::POLL * 2).await;
+    assert!(!history.is_finished(), "background work waits for room");
+    fake.free.store(10 * GB, Ordering::Relaxed);
+    let history = tokio::time::timeout(Duration::from_secs(5), history).await;
+    history.expect("and goes on once the disk has room, with nothing to index").unwrap().unwrap();
+    store.indexed().await.unwrap();
+
+    fake.free.store(GB, Ordering::Relaxed);
+    apply(&store, vec![Change::Message(message(ANA, "live", AT + 1, "zebra words", None))]).await;
+    tokio::time::sleep(disk::POLL * 3).await;
+    assert_eq!(store.count("fts_backlog").unwrap(), 1, "with nothing left to merge, indexing waits for room");
+    apply(&store, vec![Change::Message(message(ANA, "goes", AT + 2, "yak words", Some(LATER)))]).await;
+    let gone = apply(&store, vec![Change::DeleteMessage { chat: ANA.into(), id: "goes".into() }]).await;
+    assert_eq!(gone.changed, 1, "a disappearing message is deleted for you");
+    assert_eq!(store.count("fts_backlog").unwrap(), 1, "its text goes with it, and the live message's waits");
+    assert!(wal_emptied(&store).await, "the WAL the deletion leaves is emptied below the floor");
+    assert_eq!(store.count("fts_backlog").unwrap(), 1, "and the live message's text still waits to be indexed");
+
+    fake.free.store(10 * GB, Ordering::Relaxed);
+    store.indexed().await.unwrap();
+    assert_eq!(store.count("fts_backlog").unwrap(), 0, "it's indexed once the disk has room");
+}
+
 fn opened(chat: &str, id: &str) -> Change {
     Change::Amend(Amend {
         chat: chat.into(),
