@@ -150,6 +150,13 @@ impl Jawd {
         snapshot_with(self.home(), keys, (110, 24), &[], None)
     }
 
+    /// A frame once the one message typed waits in jawd's outbox. The frame it was typed in shows
+    /// what jawd had said 200 ms after the last key, and a busy machine's jawd can be later.
+    fn with_one_waiting(&self) -> String {
+        self.until("the message typed to wait to go", |s| s.stored.is_some_and(|stored| stored.outbox == 1));
+        self.snapshot("")
+    }
+
     /// What `jawd status` prints.
     fn status(&self) -> String {
         let out = command(jawd_binary(), self.home()).arg("status").output().expect("jawd status runs");
@@ -281,6 +288,7 @@ fn with_whatsapp_out_of_reach_the_header_says_so_and_a_message_waits_with_its_cl
         frame.contains("Lisbon Climbing") && frame.contains("the one at the lake"),
         "everything local works:\n{frame}"
     );
+    let frame = jawd.with_one_waiting();
     let sent = lines_with(&frame, "on my way");
     assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('◷')), "it waits with its clock:\n{frame}");
     let said = jawd.status();
@@ -310,6 +318,7 @@ fn after_a_keepalive_times_out_the_header_says_connecting_and_a_message_sent_the
     jawd.until("the keepalive to time out", |s| s.connection.state == ConnectionState::Connecting);
     let frame = jawd.snapshot("sent while the pings fail\n");
     assert!(header(&frame).contains("jaw  connecting"), "{frame}");
+    let frame = jawd.with_one_waiting();
     let sent = lines_with(&frame, "sent while the pings fail");
     assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('◷')), "it waits with its clock:\n{frame}");
     std::thread::sleep(Duration::from_secs(1));
@@ -493,6 +502,7 @@ fn when_whatsapp_wants_a_newer_jaw_the_header_says_update_needed_and_reading_sti
     let frame = jawd.snapshot("hi\n");
     assert!(header(&frame).contains("jaw  update needed: WhatsApp wants a newer jaw · reading still works"), "{frame}");
     assert!(frame.contains("did you get the photos from Sunday?"), "reading still works:\n{frame}");
+    let frame = jawd.with_one_waiting();
     let sent = lines_with(&frame, " hi ");
     assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('◷')), "what's sent waits:\n{frame}");
     assert!(jawd.status().contains("whatsapp  WhatsApp wants a newer version of jaw"));
