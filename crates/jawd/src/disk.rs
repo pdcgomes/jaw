@@ -17,13 +17,19 @@ use std::time::Duration;
 
 use jaw_proto::Push;
 use jaw_proto::sync::{Notice, Tone};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 /// The ballast's name in jaw's folder, and the name it's made under until it's whole.
 const BALLAST: &str = "ballast";
 const PARTIAL: &str = "ballast.partial";
-/// How often the watchdog looks at the disk by itself, making the ballast again once there's room.
+/// How often the watchdog looks at the disk by itself while it's short of room, the ballast isn't
+/// kept or the free space can't be read, making the ballast again once there's room.
 const EVERY: Duration = Duration::from_secs(10);
+/// Further above the floor it looks again no later than the disk could come down to the floor and
+/// margin, filled at FILL bytes a second, and within LONGEST: an idle jawd's disk, far above it,
+/// isn't looked at every EVERY for nothing.
+const FILL: u64 = 2_000_000_000;
+const LONGEST: Duration = Duration::from_secs(600);
 /// How often whatever waits for room looks at the disk again.
 pub const POLL: Duration = Duration::from_millis(250);
 
@@ -65,13 +71,15 @@ enum Source {
     Fake(Arc<Fake>),
 }
 
-/// A disk's free space and size, as a test sets them, and whether they can be read.
+/// A disk's free space and size, as a test sets them, whether they can be read, and how often they
+/// were.
 #[cfg(test)]
 #[derive(Default)]
 pub struct Fake {
     pub free: Arc<AtomicU64>,
     pub size: AtomicU64,
     pub unreadable: std::sync::atomic::AtomicBool,
+    pub reads: AtomicU64,
 }
 
 /// The watchdog of the disk jaw's folder is on, shared by everything that waits for its room.
@@ -91,6 +99,8 @@ struct Inner {
     given_up: AtomicU64,
     waits: AtomicU64,
     waited_ms: AtomicU64,
+    /// Wakes the watchdog to look at the disk at once, as the ballast is given up.
+    look: Notify,
 }
 
 impl Disk {
@@ -124,6 +134,7 @@ impl Disk {
             given_up: AtomicU64::new(0),
             waits: AtomicU64::new(0),
             waited_ms: AtomicU64::new(0),
+            look: Notify::new(),
         }))
     }
 
@@ -133,15 +144,23 @@ impl Disk {
             Source::None => None,
             Source::System(folder) => free_space(folder),
             #[cfg(test)]
-            Source::Fake(fake) => (!fake.unreadable.load(Ordering::Relaxed))
-                .then(|| (fake.free.load(Ordering::Relaxed), fake.size.load(Ordering::Relaxed))),
+            Source::Fake(fake) => {
+                fake.reads.fetch_add(1, Ordering::Relaxed);
+                (!fake.unreadable.load(Ordering::Relaxed))
+                    .then(|| (fake.free.load(Ordering::Relaxed), fake.size.load(Ordering::Relaxed)))
+            }
         }
     }
 
     /// Whether the disk has room for background work and downloads, as it has now; while its free
     /// space can't be read, as it had when it last could, which is room if it never could.
     pub fn room(&self) -> bool {
-        let Some((free, size)) = self.read() else { return self.0.paused.borrow().is_none() };
+        self.room_as(self.read())
+    }
+
+    /// As `room`, with the free space and size `read` found, if it could.
+    fn room_as(&self, read: Option<(u64, u64)>) -> bool {
+        let Some((free, size)) = read else { return self.0.paused.borrow().is_none() };
         let inner = &self.0;
         inner.free.store(free, Ordering::Relaxed);
         inner.size.store(size, Ordering::Relaxed);
@@ -207,6 +226,7 @@ impl Disk {
                 if let Source::Fake(fake) = &self.0.source {
                     fake.free.fetch_add(self.0.config.ballast, Ordering::Relaxed);
                 }
+                self.0.look.notify_one();
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => eprintln!("jawd: can't give up the ballast, {}: {e}", path.display()),
@@ -214,53 +234,70 @@ impl Disk {
     }
 
     /// One look at the disk: whether it has room, and the ballast made again if it isn't kept and
-    /// the disk has room for it beside the floor.
-    pub async fn tick(&self) {
-        self.room();
-        if self.0.ballast.is_some() {
-            let disk = self.clone();
-            let _ = tokio::task::spawn_blocking(move || disk.keep_ballast()).await;
+    /// the disk has room for it beside the floor. Says how long until the next.
+    pub async fn tick(&self) -> Duration {
+        let read = self.read();
+        self.room_as(read);
+        let kept = match self.0.ballast {
+            None => true,
+            Some(_) => {
+                let disk = self.clone();
+                tokio::task::spawn_blocking(move || disk.keep_ballast()).await.unwrap_or(false)
+            }
+        };
+        match read {
+            // Short of room, the disk is under the floor and margin, so this is EVERY.
+            Some((free, size)) if kept => {
+                let above = free.saturating_sub(self.0.config.floor(size).saturating_add(self.0.config.margin));
+                Duration::from_secs(above / FILL).clamp(EVERY, LONGEST)
+            }
+            _ => EVERY,
         }
     }
 
-    /// Looks at the disk every EVERY until jawd stops, the first time now.
+    /// Looks at the disk until jawd stops: the first time now, then as each look says, and at once
+    /// when the ballast is given up.
     pub fn start(&self) {
         let disk = self.clone();
         tokio::spawn(async move {
             loop {
-                disk.tick().await;
-                tokio::time::sleep(EVERY).await;
+                let next = disk.tick().await;
+                tokio::select! {
+                    () = tokio::time::sleep(next) => {}
+                    () = disk.0.look.notified() => {}
+                }
             }
         });
     }
 
     /// Makes the ballast unless it's kept at its size or the disk hasn't room for it; a partial one,
-    /// left by a stop while it was made, goes.
-    fn keep_ballast(&self) {
-        let Some(path) = &self.0.ballast else { return };
+    /// left by a stop while it was made, goes. Says whether it's kept at its size.
+    fn keep_ballast(&self) -> bool {
+        let Some(path) = &self.0.ballast else { return true };
         let bytes = self.0.config.ballast;
         let partial = path.with_file_name(PARTIAL);
         let _ = std::fs::remove_file(&partial);
         if std::fs::metadata(path).is_ok_and(|kept| kept.len() == bytes) {
-            return;
+            return true;
         }
         let (free, size) = (self.0.free.load(Ordering::Relaxed), self.0.size.load(Ordering::Relaxed));
         if self.paused().is_some() || free < self.0.config.floor(size).saturating_add(bytes) {
-            return;
+            return false;
         }
         let _ = std::fs::remove_file(path);
         let made = make(&partial, bytes).and_then(|()| std::fs::rename(&partial, path));
         match made {
-            Ok(()) =>
-            {
+            Ok(()) => {
                 #[cfg(test)]
                 if let Source::Fake(fake) = &self.0.source {
                     fake.free.fetch_sub(bytes, Ordering::Relaxed);
                 }
+                true
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&partial);
                 eprintln!("jawd: can't make the ballast, {}: {e}", path.display());
+                false
             }
         }
     }
