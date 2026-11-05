@@ -2781,16 +2781,26 @@ mod tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let before = store.storage().shared_writes;
-        let live = Message { live: true, ..text("351910000002@s.whatsapp.net", "rode", 5_000, "jantar amanhã") };
-        store.apply_durable(messages([live])).await.unwrap();
-        let shared = store.storage().shared_writes - before;
+        // Where a sync takes no time, as on Linux CI's tmpfs, an inbox commit can be done before a
+        // live write comes, so a new one is written until one goes in an inbox group's commit.
+        let mut taken = None;
+        for k in 0..100 {
+            let before = store.storage().shared_writes;
+            let words = format!("jantar{k}x amanhã");
+            let live =
+                Message { live: true, ..text("351910000002@s.whatsapp.net", &format!("rode{k}"), 5_000 + k, &words) };
+            store.apply_durable(messages([live])).await.unwrap();
+            if store.storage().shared_writes - before == 1 {
+                taken = Some(k);
+                break;
+            }
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
         streaming.store(false, Ordering::Relaxed);
         feeder.join().unwrap();
-        assert_eq!(shared, 1, "the write went in an inbox group's commit");
+        let k = taken.expect("no live write went in an inbox group's commit");
         store.indexed().await.unwrap();
-        let found = query(&store, |db| read::search(db, "jantar", None, None, 10)).await;
+        let found = query(&store, move |db| read::search(db, &format!("jantar{k}x"), None, None, 10)).await;
         assert_eq!(found.hits.len(), 1, "{} still waiting in fts_backlog", store.count("fts_backlog").unwrap());
     }
 
