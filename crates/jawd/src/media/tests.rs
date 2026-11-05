@@ -1077,6 +1077,60 @@ async fn the_settle_wakes_only_once_previews_are_named_and_settles_them_within_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_named_while_its_file_downloads_is_settled_and_so_are_its_previews_named_later() {
+    let every = Duration::from_millis(100);
+    let rig = rig(Config { drive: Some(drive::Drive::stand_in(|_, _| Ok(()))), settle_every: every, ..quick() }).await;
+    until_checked(&rig).await;
+    rig.world.gate_downloads(true);
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0ALONE").await;
+    rig.until(ANA, "3EB0ALONE", "its thumbnail", |row| row["media"]["thumbnail"].is_string()).await;
+    until_settled(&rig, every + Duration::from_secs(5)).await;
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (1, 1), "the thumbnail alone, its file still downloading");
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0ALONE", "its previews", previewed).await;
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!(made, 2, "then its previews ({settled} settled)");
+    until_settled(&rig, every + Duration::from_secs(5)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_named_while_a_settle_is_under_way_are_settled_by_the_next_with_nothing_more_named() {
+    let order = std::sync::atomic::Ordering::SeqCst;
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Mutex::new(held);
+    let drive = {
+        let entered = entered.clone();
+        // Only a settle sends to the drive. The first push waits until the test lets it go, 30 s at
+        // most, so a failing test can't hang the binary.
+        drive::Drive::stand_in(move |_, _| {
+            if !entered.swap(true, order) {
+                let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(30));
+            }
+            Ok(())
+        })
+    };
+    let every = Duration::from_millis(100);
+    let rig = rig(Config { drive: Some(drive), settle_every: every, ..quick() }).await;
+    until_checked(&rig).await;
+    rig.world.gate_downloads(true);
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0DURING").await;
+    rig.until(ANA, "3EB0DURING", "its thumbnail", |row| row["media"]["thumbnail"].is_string()).await;
+    let began = std::time::Instant::now();
+    while !entered.load(order) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the thumbnail's settle never reached the drive");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0DURING", "its previews", previewed).await;
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (0, 2), "the previews named while the thumbnail's settle is held");
+    release.send(()).unwrap();
+    until_settled(&rig, every * 10 + Duration::from_secs(5)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_settle_that_fails_is_tried_again_every_settle_every_until_it_goes_through() {
     // More failures than the namings of a photo's previews and thumbnail could wake it for.
     let failing = Arc::new(std::sync::atomic::AtomicU32::new(3));

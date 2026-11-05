@@ -261,6 +261,38 @@ async fn a_disk_filling_at_up_to_fill_bytes_a_second_is_told_below_the_floor_wit
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_disk_filling_at_2_gb_a_second_from_200_gb_above_the_floor_is_told_below_it_within_ten_seconds() {
+    // The plan's numbers, not FILL's, so a FILL that strays from the plan shows.
+    let rate: u64 = 2_000_000_000;
+    let home = tempfile::tempdir().unwrap();
+    let (disk, fake) = Disk::faked(home.path(), config(), 2 * GB + 256 * MB + 200 * GB + MB, SIZE);
+    let (pushes, mut told) = broadcast::channel(8);
+    tokio::spawn(tell(disk.changes(), pushes));
+    disk.start();
+    let began = tokio::time::Instant::now();
+    let below = Arc::new(std::sync::Mutex::new(None));
+    let filling = tokio::spawn({
+        let (free, below) = (fake.free.clone(), below.clone());
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let left = free.fetch_sub(rate.min(free.load(Ordering::Relaxed)), Ordering::Relaxed);
+                if left.saturating_sub(rate) < 2 * GB {
+                    below.lock().unwrap().get_or_insert_with(tokio::time::Instant::now);
+                }
+            }
+        }
+    });
+    let push = tokio::time::timeout(Duration::from_secs(3_600), told.recv()).await.expect("told").unwrap();
+    let told_at = began.elapsed();
+    let went_below = below.lock().unwrap().expect("below the floor before it's told") - began;
+    filling.abort();
+    let notice = serde_json::from_value::<Notice>(push.params).unwrap();
+    assert_eq!(notice.tone, Tone::Warning, "{}", notice.text);
+    assert!(told_at <= went_below + Duration::from_secs(10), "below the floor at {went_below:?}, told at {told_at:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_ballast_given_up_is_made_again_within_ten_seconds_of_the_disk_having_room_however_far_off_the_look_was() {
     let home = tempfile::tempdir().unwrap();
     let ballast = home.path().join("ballast");
@@ -278,6 +310,19 @@ async fn a_ballast_given_up_is_made_again_within_ten_seconds_of_the_disk_having_
     fake.free.store(FAR, Ordering::Relaxed);
     tokio::time::sleep(EVERY + Duration::from_secs(1)).await;
     assert!(ballast.exists(), "made again within EVERY of the disk having room");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ballast_given_up_while_the_watchdog_isnt_waiting_has_it_look_again_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let (disk, fake) = Disk::faked(home.path(), config(), FAR + MB, SIZE);
+    assert_eq!(disk.tick().await, Duration::from_secs(100), "the ballast made, the next look 100 s off");
+    // Given up before the watchdog waits to be told, as it would be during a look.
+    disk.full();
+    disk.start();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fake.reads.load(Ordering::Relaxed), 3, "a look, the start's, and one at once for the ballast given up");
+    assert!(home.path().join("ballast").exists(), "made again");
 }
 
 #[tokio::test(start_paused = true)]
