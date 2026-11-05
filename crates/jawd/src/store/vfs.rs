@@ -11,6 +11,7 @@
 //! flushed in full too. Elsewhere fsync is durable, so every sync is SQLite's full one.
 
 use std::ffi::{CStr, c_int, c_void};
+#[cfg(any(target_os = "macos", test))]
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -149,6 +150,7 @@ fn fence(path: &CStr) -> c_int {
 }
 
 /// Whether `folder` is on `own`'s volume; no where it can't tell.
+#[cfg(any(target_os = "macos", test))]
 fn on_volume(own: &Path, folder: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let device = |path: &Path| std::fs::metadata(path).map(|m| m.dev()).ok();
@@ -486,6 +488,7 @@ pub mod noted {
         IN_FULL.lock().unwrap().push(named(folder));
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn flushed_in_full(folder: &Path) -> bool {
         IN_FULL.lock().unwrap().iter().any(|f| f == folder)
     }

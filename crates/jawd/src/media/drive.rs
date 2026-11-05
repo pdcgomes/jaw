@@ -117,6 +117,7 @@ fn all_on(own: &Path, jaw: &Path, folders: &[&Path]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use std::sync::Mutex;
 
     use super::*;
