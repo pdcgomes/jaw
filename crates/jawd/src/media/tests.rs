@@ -698,7 +698,6 @@ async fn the_cache_keeps_to_its_size_past_the_starred_files_it_cant_drop() {
         let (starred, bytes) = if n < 4 { (true, 300_000) } else { (false, 50_000) };
         let sha256 = vec![n + 1; 32];
         let path = format!("{FILES}/{}.jpg", to_hex(&sha256));
-        std::fs::write(rig.home.path().join(&path), vec![0u8; bytes]).unwrap();
         db.execute(
             "INSERT INTO messages (chat, id, at, t, kind, starred, v)
             VALUES ((SELECT n FROM chats WHERE id = ?1), ?2, ?3, ?3, 'image', ?4, 1)",
@@ -715,19 +714,24 @@ async fn the_cache_keeps_to_its_size_past_the_starred_files_it_cant_drop() {
             rusqlite::params![sha256, path, bytes as i64, i64::from(n)],
         )
         .unwrap();
+        // After its row, as the sweep jawd starts with removes a file no row names.
+        std::fs::write(rig.home.path().join(&path), vec![0u8; bytes]).unwrap();
     }
+    // The evictions are counted in memory and the cache's size read from jaw.db, so one status can
+    // have the first without the second; it waits for both, or for more evictions than it may make.
+    let end = (10, 4, 1_200_000);
     let mut status = rig.media.status();
-    for _ in 0..250 {
+    for _ in 0..3_000 {
         rig.media.inner.clean.notify_one();
         status = rig.media.status();
-        if status.evicted >= 10 {
+        if (status.evicted, status.cache_files, status.cache_bytes) == end || status.evicted > 10 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(
         (status.evicted, status.cache_files, status.cache_bytes),
-        (10, 4, 1_200_000),
+        end,
         "every file it may drop goes, though the starred ones it can't come first and fill it alone"
     );
     assert_eq!(std::fs::read_dir(rig.home.path().join(FILES)).unwrap().count(), 4);
@@ -2629,12 +2633,14 @@ async fn files_no_copy_names_past_a_page_that_jobs_hold_still_go() {
     for n in (0..64u8).chain([200]) {
         let sha256 = vec![n; 32];
         let path = format!("{FILES}/{}.bin", to_hex(&sha256));
-        std::fs::write(rig.home.path().join(&path), b"named by nothing").unwrap();
+        // Its row first: the sweep jawd starts with, which may still be going, removes a file no
+        // row names.
         db.execute(
             "INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (?1, ?2, 16, 1)",
             rusqlite::params![sha256, path],
         )
         .unwrap();
+        std::fs::write(rig.home.path().join(&path), b"named by nothing").unwrap();
         files.push(rig.home.path().join(&path));
         if n < 64 {
             held.push(rig.media.inner.claims.share(&sha256).await);
