@@ -14,7 +14,7 @@ The owner's jaw, jawd and jaw-engine run on the Mac the app is built on, against
 - **His folder is never touched.** Nothing opens, copies or reads `~/Library/Application Support/jaw` (`jaw.db`, `session.db`), and jaw-engine never runs on a folder holding a `session.db`.
 - **His processes are never touched.** No process is stopped by name (`pkill`, `killall`); only the PIDs a build started.
 - **Tests run in a folder of their own:** `JAW_HOME=$(mktemp -d) jawd --engine demo`, and benches on `jawd demo --folder <tmp>`. A debug build takes `JAW_HOME` or `--demo`, never the default folder.
-- **No agent opens a release Jaw on this Mac.** No build registers a LaunchAgent since parity step 1.2, and none takes over the terminal's agent. A release that `make mac` built from origin/main or a release's tag on it starts the jawd inside it on the owner's folder whenever his isn't answering, and main's jawd can upgrade jaw.db past what his checkout's jawd opens; a release from a branch starts none there, but does on any folder with no `session.db`. So release builds are tried on the build Mac's build user, or with `--home` on a folder of their own there, and a debug build starts no jawd but `--demo`'s.
+- **No agent opens a release Jaw on this Mac.** No build registers a LaunchAgent since parity step 1.2, and none takes over the terminal's agent. A release that `make mac` built from origin/main or a release's tag on it starts the jawd inside it on the owner's folder whenever his isn't answering, and main's jawd can upgrade jaw.db past what his checkout's jawd opens; a release from a branch starts none there, but does on any other folder with no `session.db`. So release builds are tried on the build Mac's build user, or with `--home` on a folder of their own there, and a debug build starts no jawd but `--demo`'s.
 - **A jawd change is a proposal for jawd's builders,** audited by the database expert before it lands (`.cursor/rules/data-integrity.mdc`).
 - **Land from the worktree the work was built in:** rebase onto `origin/main`, then push with the pre-push hook, never with `--no-verify`.
 
@@ -167,5 +167,5 @@ Redlamp's themes, the animations, the Mimic, linking, the app's own notification
 ## Alongside
 
 - **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7's typing now and its presence once jawd's M6 is on main, each drawn as soon as it's served; P8 (chat actions from jaw) now, on `chat-actions`, with the Mac's right-click menus; P9 (scheduled messages and reminders) with jawd's M7, its Mac screens on a branch beside it.
-- **The terminal's `jaw agent`** learns of the app's agent in Mac-M1, as step 3 needs.
+- **The terminal's `jaw agent`** learns of the app's agent in Mac-M1, as step 3 needed, only an earlier Jaw's since parity step 1.2.
 - **`scripts/sync-themes`** comes with Mac-M5's themes and runs in CI after it.

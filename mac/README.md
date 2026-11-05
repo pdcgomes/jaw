@@ -15,7 +15,7 @@ mac/scripts/build-mac test JawHarnessTests  # the harness: its catalog, flags, p
 mac/scripts/build-mac build jaw
 mac/scripts/build-mac release <folder>      # Jaw.app in Release, as the measurements take it, back here
 make mac                                    # Jaw.app with jawd, jaw-engine and jaw inside, signed, saying what it was built from
-make mac-test                               # the four suites above
+make mac-test                               # mac/scripts/test-built-from, then the four suites above
 ```
 
 The build Mac has no Rust or Go, so jawd, jaw and jaw-engine are built here and their binaries go with the checkout. `mise exec -- tuist generate --no-open` makes `Jaw.xcworkspace` for Xcode.

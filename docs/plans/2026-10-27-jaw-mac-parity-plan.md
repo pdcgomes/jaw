@@ -121,7 +121,7 @@ The terminal draws the waveform; Enter plays and pauses, the speeds and seeking 
 The terminal's Ctrl-R records with a live level; Enter sends, and Esc cancels.
 
 - **The Mac's** is Mac-M3's step 6, with the box design's microphone in Send's place when the box is empty: ⌘R, jawd's levels and time in the box, Enter to send, ⌘R to stop and listen, Esc to throw it away.
-- **Needs from jawd:** voice (M5), and jawd's identity for the microphone: macOS asks about jawd by its signature, which the Mac design lists as a risk to check here.
+- **Needs from jawd:** nothing more: jawd has recorded voice messages since 2 November. A jawd the app starts asks for the microphone in Jaw's name, and Jaw.app carries the usage string and the entitlement for it beside jawd's; one the terminal starts asks in the terminal app's (the Mac design's "The microphone, in Jaw's name", and its Risks). What's left is the Mac's own recording.
 - **The check:** `voice.record`, `voice.stop`, `voice.send`, `voice.cancel` and the `recording` push.
 
 ## Phase 3 · What's being built now, as it lands

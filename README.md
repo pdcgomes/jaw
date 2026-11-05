@@ -64,7 +64,7 @@ The Mac app isn't in the tap yet. `make mac` builds it, with Xcode and [mise](ht
 
 ### How jawd runs
 
-Run `jaw`. When nothing answers on jaw's socket it starts jawd, and keeps drawing while jawd starts; jawd runs the engine installed beside it, and goes on when jaw quits, so messages and notifications keep coming. The Mac app uses the jawd that's running, and when nothing answers, a release build starts the jawd inside it, as jaw does. To start jawd at login instead, `jaw agent install` installs it as a LaunchAgent (`jaw agent status` says how it is, `jaw agent uninstall` takes it out); there's no jawd at Login… in the Mac app.
+Run `jaw`. When nothing answers on jaw's socket it starts jawd, and keeps drawing while jawd starts; jawd runs the engine installed beside it, and goes on when jaw quits, so messages and notifications keep coming. The Mac app uses the jawd that's running, and when nothing answers, a release built from origin/main or a release's tag starts the jawd inside it, as jaw does. To start jawd at login instead, `jaw agent install` installs it as a LaunchAgent (`jaw agent status` says how it is, `jaw agent uninstall` takes it out); the Mac app doesn't start it at login.
 
 All three programs say one version (`jaw --version`), taken from `git describe`, and when the jawd still running after an upgrade is another build, jaw says so and how to stop it. Your chats stay in jaw's folder, `~/Library/Application Support/jaw`, whichever jaw you run.
 
