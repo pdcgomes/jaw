@@ -22,7 +22,7 @@
 1. **The terminal says what, the Mac design says how.** A gap is closed when the Mac does what the terminal does, in the Mac's way: its keys, its menus, its panes and its looks. Where the Mac design draws something differently, the design wins; where it says nothing, the terminal's behaviour and words are the reference.
 2. **Build ahead of jawd, against its branch.** The terminal built its screens against its made-up account, and the menus design builds folders against the `folders` branch's fixtures. Each Mac step starts as soon as jawd's branch has its protocol text and fixtures, and tests against them and `FakeJawd`. It lands on main once its tests pass, even before jawd's part does, saying what it waits on when chosen, as the terminal's do ("comes with M3"). It's tried end to end on `jawd demo` and by the owner once jawd's part is on main.
 3. **What jawd serves already, first.** It works on the owner's account the day it lands.
-4. **Then the terminal's screens, in the order jawd's parts land,** so each is tried end to end as soon as it can be: folders are through their second audit, media in is in its third, the library and media out are stacked on media in, and voice hasn't started in jawd.
+4. **Then the terminal's screens, in the order jawd's parts land,** so each is tried end to end as soon as it can be: folders are through their second audit, media in is in its third, and the library and media out are stacked on media in.
 5. **Then what's being built now, as each lands,** each step written when its branch's protocol is.
 6. **The Mac's own work waits for the gaps,** except what's in flight: the right-click menus (`mac-menus`), which carry folders, and the harness's first phase (`mac-harness`), which every step's screens are checked in. The viewer, Redlamp's themes, the animations, notifications with Reply, the Dock badge, accessibility and a notarized build come after (Phase 4).
 7. **Nothing the Mac leads on goes backwards.** Its 14 leads, the grid layouts, the emoji picker, the cards and the rest, stay as they are; they belong to a plan for the terminal, not this one.
@@ -113,7 +113,7 @@ The terminal's Ctrl-O has a picker and `send.media`, SD or HD, albums, progress 
 The terminal draws the waveform; Enter plays and pauses, the speeds and seeking go by key, and the next unplayed message follows. All of it goes through jawd's `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push, on the made-up account until jawd serves voice.
 
 - **The Mac's** is Mac-M2's step 3: the waveform's played part, play and pause, 1×, 1.5× and 2×, seeking by a click and by ← and →, the dot until it's played, the next unplayed after one ends, the playhead moving between jawd's pushes only while playing, and the small player in the status line.
-- **Needs from jawd:** voice, M5. `jaw-voice` is built and audited; wiring it into jawd hasn't started. Built against the protocol and `FakeJawd`'s `playback` pushes, as the terminal was against its made-up account.
+- **Needs from jawd:** voice, M5: jawd has served `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push since 2 November. Built against the protocol and `FakeJawd`'s `playback` pushes, as the terminal was against its made-up account.
 - **The check:** `voice.play`, `voice.pause`, `voice.seek`, `voice.speed` and the `playback` push.
 
 ### 2.7 Recording a voice message
