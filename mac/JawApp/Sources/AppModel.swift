@@ -82,7 +82,8 @@ final class AppModel {
     var saved: [String: URL] = [:]
     /// What the pick bench waits for: the chat list's update reaching the app, before it's applied.
     var listCame: (() -> Void)?
-    /// `JAW_TRACE=1` says each update drained, on standard error.
+    /// `JAW_TRACE=1` says each update drained and when, and what the window shows of jawd, on
+    /// standard error.
     let trace = ProcessInfo.processInfo.environment["JAW_TRACE"] != nil
     /// What the trace last said the window shows of jawd.
     var traced: String?
@@ -357,10 +358,10 @@ final class AppModel {
         situation.stateView(hasChats: !(window?.chatList.all.isEmpty ?? true) || folder != "all", hasPanes: grid != nil)
     }
 
-    /// With `JAW_TRACE`, says on standard error what the window shows of jawd each time that or the
-    /// window's visibility changes, once a frame with it is on screen, with the time since the process
-    /// started: the status line's state, what fills the panes' place by its case, and jawd's words when
-    /// it didn't start.
+    /// With `JAW_TRACE`, says on standard error what the window shows of jawd at launch and at each
+    /// update it drains, once a frame with it is drawn, with the time since the process started: the
+    /// status line's state, what fills the panes' place by its case, jawd's words when it didn't
+    /// start, and whether the window is hidden, when any of that has changed.
     func traceShown() {
         guard trace else { return }
         let place = stateView.map { kind in String("\(kind)".prefix { $0 != "(" }) } ?? "chats"

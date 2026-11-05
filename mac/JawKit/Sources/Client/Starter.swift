@@ -4,12 +4,13 @@ import Foundation
 /// `wire.rs` has them. When nothing answers at launch, a release starts the jawd inside it, in a
 /// process group of its own so it goes on when the app quits, and `--demo` the demo's, which the app
 /// stops. A jawd the app started has 15 s to answer, and one that stopped as it started says why from
-/// its log, unless another jawd held the folder, when it's started again a second later while nothing
-/// answers, whether or not the window is drawing. On an account's folder, jaw's own or one holding a
-/// `session.db`, only a Jaw built from origin/main or a release's tag starts one, and `--demo` none.
-/// On jaw's own folder such a Jaw then asks for the agent an earlier Jaw registered to be
-/// unregistered, never waiting on the answer, unless the terminal's agent holds the label, which it
-/// names with what removes it. The app carries out its steps and tells it what happens.
+/// its log, unless another jawd held the folder within 15 s of the first start, when it's started
+/// again a second later while nothing answers, whether or not the window is drawing. On an account's
+/// folder, jaw's own or one holding a `session.db`, only a Jaw built from origin/main or a release's
+/// tag starts one, and `--demo` none. On jaw's own folder such a Jaw then asks for the agent an
+/// earlier Jaw registered to be unregistered, never waiting on the answer, unless the terminal's
+/// agent holds the label, which it names with what removes it. The app carries out its steps and
+/// tells it what happens.
 public struct Starter: Sendable {
     /// What the app knows at launch.
     public struct Here: Equatable, Sendable {
@@ -135,7 +136,8 @@ public struct Starter: Sendable {
     }
 
     /// The jawd the app started stopped, with this wait status and these last words in its log: when
-    /// another jawd held the folder, the app waits before it's started again.
+    /// another jawd held the folder within 15 s of the first start, the app waits before it's started
+    /// again; past them, or when it stopped for another reason, the window says why.
     public mutating func exited(status: Int32, said: String, now: Date) -> [Step] {
         guard let since else { return [] }
         running = false
