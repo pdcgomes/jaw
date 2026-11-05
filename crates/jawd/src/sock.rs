@@ -1932,6 +1932,9 @@ mod tests {
     impl Lines {
         fn open(socket: &Path, client: &str) -> Lines {
             let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+            // A request jawd doesn't read for as long as an answer may take fails the test, as an
+            // answer that doesn't come does, rather than holding it up for good.
+            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
             let reader = BufReader::new(stream.try_clone().unwrap());
             let mut lines = Lines { reader, writer: stream, next: 1, pushes: Vec::new() };
             let hello = lines.call("hello", json!({ "protocol": PROTOCOL, "client": client, "version": "0" }));
@@ -1954,7 +1957,8 @@ mod tests {
         fn send(&mut self, method: &str, params: Value) -> u64 {
             let id = self.next;
             self.next += 1;
-            writeln!(self.writer, "{}", json!({ "id": id, "method": method, "params": params })).unwrap();
+            writeln!(self.writer, "{}", json!({ "id": id, "method": method, "params": params }))
+                .unwrap_or_else(|e| panic!("request {id}, {method}, wasn't read: {e}"));
             id
         }
 
