@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="jaw-engine, then Go's tests with -race and the Rust workspace's"
+#MISE alias="t"
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/../.."
+"$here/engine"
+(cd engine && "${GO:-go}" test -race ./...)
+"${CARGO:-cargo}" test --workspace

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="go vet, gofmt, rustfmt, and clippy with warnings as errors"
+#MISE alias="l"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+(cd engine && "${GO:-go}" vet ./...)
+unformatted="$(gofmt -l engine)"
+if [ -n "$unformatted" ]; then
+    echo "$unformatted"
+    echo "gofmt: the files above need formatting"
+    exit 1
+fi
+"${CARGO:-cargo}" fmt --all --check
+"${CARGO:-cargo}" clippy --workspace --all-targets -- -D warnings
