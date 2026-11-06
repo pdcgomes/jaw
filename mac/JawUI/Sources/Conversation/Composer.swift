@@ -5,6 +5,8 @@ import JawThemes
 @MainActor
 protocol ComposerDelegate: AnyObject {
     func composer(_ c: ComposerController, send text: String, key: String, reply: String?, mentions: [String])
+    /// The strip's files, what was typed being the first one's caption.
+    func composer(_ c: ComposerController, send files: [AttachedFile], caption: String, hd: Bool, key: String, reply: String?)
     func composer(_ c: ComposerController, edit message: String, text: String)
     func composer(_ c: ComposerController, draft text: String)
     func composer(_ c: ComposerController, typing state: TypingState)
@@ -17,6 +19,9 @@ protocol ComposerDelegate: AnyObject {
 /// The box, one per conversation, naming its chat. Enter sends, ⇧↩ and ⌥↩ add a line, ↑ from an
 /// empty box steps into the messages, `@` completes the group's members and `:` emoji. Drafts go to
 /// jawd once typing has paused for 1.5 s and on leaving; typing is said as the terminal says it.
+/// Files attached, picked, pasted or dropped, wait in the strip above the field and go with the next
+/// message, what's typed being the first one's caption: Tab switches them between SD and HD, and Esc
+/// takes them out.
 @MainActor
 public final class ComposerController: NSViewController, NSTextViewDelegate {
     weak var delegate: ComposerDelegate?
@@ -42,7 +47,30 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
                                       tone: .secondary) { [weak self] in self?.showEmoji() }
     lazy var gifButton = IconButton(symbol: "", label: "GIFs", shortcut: Shortcut("g", [.control, .command]), size: .small, tone: .secondary,
                                     title: "GIF") { [weak self] in self?.gif?() }
-    lazy var sendButton = IconButton(symbol: "arrow.up", label: "Send", shortcut: Shortcut("↩", [])) { [weak self] in self?.send() }
+    lazy var sendButton = IconButton(symbol: "arrow.up", label: "Send", shortcut: Shortcut("↩", [])) { [weak self] in
+        self?.send(hd: NSEvent.modifierFlags.contains(.option))
+    }
+
+    /// The files waiting to go with the next message, in the strip above the field.
+    public internal(set) var attachments = Attachments() {
+        didSet { showStrip() }
+    }
+
+    /// Whether files attached to an empty strip go in HD, as Settings has it.
+    public var hdByDefault = false
+    /// What jawd says sending videos, GIFs and audio files needs, when its `status` says it has no
+    /// ffmpeg; nil when it has it.
+    public var ffmpegMissing: String? {
+        didSet { showStrip() }
+    }
+
+    /// Where an image pasted or dropped that isn't a file, or a file another app promises, is put
+    /// before it's attached: the run's own folder, emptied as the app quits.
+    public var attachedFolder = Opened.folder.appending(path: "attached", directoryHint: .isDirectory)
+    let strip = AttachmentStrip()
+    /// What the box says in its bar until it changes, as why files were left out.
+    var said: String?
+    var stripTop: NSLayoutConstraint?
     /// The + button's menu: attachments, a poll, an event, a place.
     public var plusMenu: (() -> NSMenu?)? {
         didSet { plus.menuToOpen = plusMenu }
@@ -104,7 +132,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     }
 
     override public func loadView() {
-        let root = NSView()
+        let root = BoxView()
+        root.box = self
         root.wantsLayer = true
         view = root
         textView.delegate = self
@@ -131,7 +160,10 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         completions.picked = { [weak self] in self?.take($0) }
 
         sendButton.filled = true
-        for v in [bar, barClose, field, plus, chip, scroll, emojiButton, gifButton, sendButton, placeholder, completions] as [NSView] {
+        strip.isHidden = true
+        strip.removed = { [weak self] i in self?.takeOut(at: i) }
+        strip.switched = { [weak self] in self?.attachments.hd.toggle() }
+        for v in [bar, barClose, strip, field, plus, chip, scroll, emojiButton, gifButton, sendButton, placeholder, completions] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -145,6 +177,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             bar.trailingAnchor.constraint(equalTo: barClose.leadingAnchor, constant: -6),
             barClose.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             barClose.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            strip.leadingAnchor.constraint(equalTo: field.leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Space.m - 2),
             scrollTop,
             plus.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.m),
             plus.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
@@ -192,6 +226,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             b.roles = roles
         }
         completions.roles = roles
+        strip.roles = roles
     }
 
     // MARK: - What the box shows
@@ -204,17 +239,44 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         case let .replying(m): text = "↩ Replying to \(m.mine ? "yourself" : m.from?.name ?? "them"): \(Self.summary(m))"
         case .editing: text = "✎ Editing · Enter saves, Esc stops"
         }
+        if let said { text = said }
         if let why = unsentWhy { text = "Not sent: \(why)" }
         bar.stringValue = text ?? ""
         bar.isHidden = text == nil
-        scrollTop.isActive = false
-        scrollTop = text == nil
-            ? scroll.topAnchor.constraint(equalTo: view.topAnchor, constant: Space.s)
-            : scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: Space.xs)
-        scrollTop.isActive = true
-        barClose.isHidden = mode == .writing && unsentWhy == nil
+        placeField()
+        barClose.isHidden = mode == .writing && unsentWhy == nil && said == nil
         showChip()
         colour()
+    }
+
+    /// The field's top: under the strip while it shows, which goes under the bar while there's
+    /// something to say, or at the box's top.
+    func placeField() {
+        let top = bar.isHidden ? view.topAnchor : bar.bottomAnchor
+        let gap = bar.isHidden ? Space.s : Space.xs
+        stripTop?.isActive = false
+        scrollTop.isActive = false
+        if strip.isHidden {
+            scrollTop = scroll.topAnchor.constraint(equalTo: top, constant: gap)
+        } else {
+            let placed = strip.topAnchor.constraint(equalTo: top, constant: gap)
+            placed.isActive = true
+            stripTop = placed
+            scrollTop = scroll.topAnchor.constraint(equalTo: strip.bottomAnchor, constant: Space.s)
+        }
+        scrollTop.isActive = true
+    }
+
+    /// The strip as the files are: hidden with none, and saying when jawd can't send one of them.
+    func showStrip() {
+        guard isViewLoaded else { return }
+        let missing = attachments.needsFFmpeg ? ffmpegMissing : nil
+        strip.show(attachments, note: missing.map { "jawd has no ffmpeg, which \($0) needs (brew install ffmpeg)" })
+        if strip.isHidden != attachments.isEmpty {
+            strip.isHidden = attachments.isEmpty
+            placeField()
+        }
+        showSend()
     }
 
     func showChip() {
@@ -238,8 +300,9 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
 
     public func textDidChange(_: Notification) {
         changed()
-        if unsentWhy != nil {
+        if unsentWhy != nil || said != nil {
             unsentWhy = nil
+            said = nil
             showBar()
         }
         scheduleDraft()
@@ -253,11 +316,11 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         resize()
     }
 
-    /// Send shows while there's something to send; a microphone will take its place when the box
-    /// is empty, once jawd records voice (M5).
+    /// Send shows while there's something to send, words or files; a microphone will take its place
+    /// when the box is empty, once jawd records voice (M5).
     func showSend() {
         guard isViewLoaded, fieldToSend != nil else { return }
-        let something = !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let something = !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
         guard sendButton.isHidden == something || !(fieldToSend.isActive || fieldToEdge.isActive) else { return }
         sendButton.isHidden = !something
         fieldToEdge.isActive = !something
@@ -335,21 +398,33 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
 
     // MARK: - Sending
 
-    func send() {
+    /// Sends what's in the box: an edit saved, the strip's files waiting meanwhile; the strip's files,
+    /// what's typed the first one's caption, in HD when the strip says so or ⌥ is `held`; or the words.
+    func send(hd held: Bool = false) {
         let text = textView.string
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        switch mode {
-        case let .editing(m, draft):
-            delegate?.composer(self, edit: m.id, text: text)
-            textView.string = draft
-            mode = .writing
-        case let .replying(m):
-            delegate?.composer(self, send: text, key: Jawd.key(), reply: m.id, mentions: mentions(in: text))
+        let editing = if case .editing = mode { true } else { false }
+        if !editing, !attachments.isEmpty {
+            let reply: String? = if case let .replying(m) = mode { m.id } else { nil }
+            delegate?.composer(self, send: attachments.files, caption: text, hd: attachments.hd || held, key: Jawd.key(), reply: reply)
+            attachments = Attachments(hd: hdByDefault)
             textView.string = ""
+            said = nil
             mode = .writing
-        case .writing:
-            delegate?.composer(self, send: text, key: Jawd.key(), reply: nil, mentions: mentions(in: text))
-            textView.string = ""
+        } else {
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            switch mode {
+            case let .editing(m, draft):
+                delegate?.composer(self, edit: m.id, text: text)
+                textView.string = draft
+                mode = .writing
+            case let .replying(m):
+                delegate?.composer(self, send: text, key: Jawd.key(), reply: m.id, mentions: mentions(in: text))
+                textView.string = ""
+                mode = .writing
+            case .writing:
+                delegate?.composer(self, send: text, key: Jawd.key(), reply: nil, mentions: mentions(in: text))
+                textView.string = ""
+            }
         }
         draftSent = textView.string
         taken = [:]
@@ -369,6 +444,112 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         changed()
     }
 
+    // MARK: - Attaching
+
+    /// Puts files in the strip after those there, to go with the next message, as many as fit; while
+    /// a message is being edited they're turned down, since files go with a new one.
+    public func attach(_ files: [AttachedFile]) {
+        guard !files.isEmpty else { return }
+        if case .editing = mode {
+            Self.discard(files)
+            return say("files go with a new message: Esc stops editing first")
+        }
+        var more = attachments
+        if more.isEmpty { more.hd = hdByDefault }
+        let left = more.add(files)
+        attachments = more
+        if left > 0 {
+            Self.discard(files.filter { !attachments.files.contains($0) })
+            say("\(SendMedia.filesMost) files at most at once: \(left) left out")
+        }
+        view.window?.makeFirstResponder(textView)
+    }
+
+    /// Files jawd turned down come back to the strip, before any attached since, with what was typed
+    /// and why.
+    public func unsent(files: [AttachedFile], caption: String, why: String) {
+        var back = Attachments(hd: attachments.isEmpty ? hdByDefault : attachments.hd)
+        back.add(files)
+        back.add(attachments.files)
+        attachments = back
+        if caption.isEmpty {
+            unsentWhy = why
+            showBar()
+        } else {
+            unsent(text: caption, why: why)
+        }
+    }
+
+    /// The strip's × on the file at `i`.
+    func takeOut(at i: Int) {
+        guard attachments.files.indices.contains(i) else { return }
+        Self.discard([attachments.files[i]])
+        attachments.remove(at: i)
+    }
+
+    /// Says `words` in the bar until the box changes.
+    func say(_ words: String) {
+        said = words
+        showBar()
+    }
+
+    /// Files the app wrote for a paste or a drop, gone from the strip unsent: each in a folder of its
+    /// own, which goes with it.
+    static func discard(_ files: [AttachedFile]) {
+        for file in files where file.written {
+            try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
+        }
+    }
+
+    /// What ⌘V brings, attached when it's files or an image; false for words, which the field pastes.
+    func attachPasted(from board: NSPasteboard) -> Bool {
+        guard let files = Pasted.attachments(from: board, into: attachedFolder) else { return false }
+        attach(files)
+        return true
+    }
+
+    /// What's dropped on the box, attached when it's files, files another app promises, or an image;
+    /// false for words, which the field takes.
+    func attachDropped(from board: NSPasteboard) -> Bool {
+        if let files = Pasted.files(board) {
+            attach(files)
+            return true
+        }
+        let promises = board.readObjects(forClasses: [NSFilePromiseReceiver.self]) as? [NSFilePromiseReceiver] ?? []
+        if !promises.isEmpty {
+            receive(promises)
+            return true
+        }
+        guard !Pasted.hasText(board), let image = Pasted.image(board, into: attachedFolder) else { return false }
+        attach([image])
+        return true
+    }
+
+    /// Files another app promises, as Photos and browsers drag theirs out: each received into a
+    /// folder of its own and attached as it comes.
+    func receive(_ promises: [NSFilePromiseReceiver]) {
+        let take: @MainActor (AttachedFile) -> Void = { [weak self] in self?.attach([$0]) }
+        let refused: @MainActor (String) -> Void = { [weak self] in self?.say("a file dropped didn't come: \($0)") }
+        for promise in promises {
+            let folder = attachedFolder.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { continue }
+            promise.receivePromisedFiles(atDestination: folder, options: [:], operationQueue: Self.receiving) { url, error in
+                let why = error?.localizedDescription
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        if let why { refused(why) } else { take(AttachedFile(url: url, written: true)) }
+                    }
+                }
+            }
+        }
+    }
+
+    static let receiving: OperationQueue = {
+        let q = OperationQueue()
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+
     func reply(to m: MessageRow) {
         mode = .replying(m)
         view.window?.makeFirstResponder(textView)
@@ -386,6 +567,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         if unsentWhy != nil {
             unsentWhy = nil
         }
+        said = nil
         if case let .editing(_, draft) = mode {
             textView.string = draft
             changed()
@@ -421,9 +603,17 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         case 126 where textView.string.isEmpty && flags.isEmpty:
             delegate?.composerStepIntoMessages(self)
             return true
+        case 48 where flags.isEmpty && attachments.showsQuality:
+            attachments.hd.toggle()
+            return true
         case 53:
-            if mode != .writing || unsentWhy != nil {
+            if mode != .writing || unsentWhy != nil || said != nil {
                 dropMode()
+                return true
+            }
+            if !attachments.isEmpty {
+                Self.discard(attachments.files)
+                attachments.removeAll()
                 return true
             }
             return false
@@ -513,7 +703,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     }
 }
 
-/// The box's text view: its keys go to the box first.
+/// The box's text view: its keys go to the box first, and what's pasted or dropped on it that's files
+/// or an image goes to the strip.
 final class BoxTextView: NSTextView {
     weak var box: ComposerController?
 
@@ -522,12 +713,68 @@ final class BoxTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    override func paste(_ sender: Any?) {
+        if box?.attachPasted(from: .general) == true { return }
+        super.paste(sender)
+    }
+
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
+        let words = super.acceptableDragTypes
+        return words + BoxView.dropped.filter { !words.contains($0) }
+    }
+
+    override func dragOperation(for info: any NSDraggingInfo, type: NSPasteboard.PasteboardType) -> NSDragOperation {
+        BoxView.attaches(info.draggingPasteboard) ? .copy : super.dragOperation(for: info, type: type)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if BoxView.attaches(sender.draggingPasteboard), box?.attachDropped(from: sender.draggingPasteboard) == true { return true }
+        return super.performDragOperation(sender)
+    }
+
     var focused: (() -> Void)?
 
     override func becomeFirstResponder() -> Bool {
         let took = super.becomeFirstResponder()
         if took { focused?() }
         return took
+    }
+}
+
+/// The box's own view, which takes files, files promised and images dropped on it around the field,
+/// as the field does.
+final class BoxView: NSView {
+    weak var box: ComposerController?
+
+    static let dropped: [NSPasteboard.PasteboardType] = [.fileURL, .png, .tiff]
+        + NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) }
+
+    /// Whether a drag brings what the strip takes, rather than words.
+    static func attaches(_ board: NSPasteboard) -> Bool {
+        Pasted.files(board) != nil || board.canReadObject(forClasses: [NSFilePromiseReceiver.self], options: nil)
+            || !Pasted.hasText(board) && board.availableType(from: [.png, .tiff]) != nil
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes(Self.dropped)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        Self.attaches(sender.draggingPasteboard) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        Self.attaches(sender.draggingPasteboard) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        box?.attachDropped(from: sender.draggingPasteboard) ?? false
     }
 }
 

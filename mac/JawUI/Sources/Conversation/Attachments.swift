@@ -91,20 +91,34 @@ public struct Attachments: Hashable, Sendable {
     }
 }
 
-/// What a paste or a drop brings, read as files: files from the Finder, as they are, folders left
-/// out; or an image that isn't a file, as a screenshot copied, written as a PNG into `folder`; or nil
-/// for anything else, which is text.
+/// What a paste or a drop brings, read as files.
 public enum Pasted {
+    /// What a paste brings: files from the Finder, as they are; or words, which are the field's, so
+    /// nil, though a picture of them comes too, as a spreadsheet's copied cells bring one; or an
+    /// image that isn't a file, as a screenshot copied, written as a PNG into `folder`.
     public static func attachments(from pasteboard: NSPasteboard, into folder: URL) -> [AttachedFile]? {
+        if let files = files(pasteboard) { return files }
+        if hasText(pasteboard) { return nil }
+        return image(pasteboard, into: folder).map { [$0] }
+    }
+
+    /// The files it holds, folders left out; nil when it holds none.
+    public static func files(_ pasteboard: NSPasteboard) -> [AttachedFile]? {
         let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        if !urls.isEmpty {
-            let files = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == false }
-            return files.isEmpty ? nil : files.map { AttachedFile(url: $0) }
-        }
+        let files = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == false }
+        return files.isEmpty ? nil : files.map { AttachedFile(url: $0) }
+    }
+
+    public static func hasText(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.availableType(from: [.string]) != nil
+    }
+
+    /// Its image, written as a PNG into `folder`; nil when it has none.
+    public static func image(_ pasteboard: NSPasteboard, into folder: URL) -> AttachedFile? {
         guard pasteboard.availableType(from: [.png, .tiff]) != nil, let png = png(pasteboard),
               let written = try? write(png, named: "Pasted image.png", into: folder)
         else { return nil }
-        return [AttachedFile(url: written, written: true)]
+        return AttachedFile(url: written, written: true)
     }
 
     /// The pasteboard's image as PNG: as it is when it's one, or made from its TIFF.

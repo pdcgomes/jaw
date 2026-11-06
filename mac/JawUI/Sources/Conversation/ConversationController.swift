@@ -38,10 +38,14 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, startChat phone: String, name: String)
     /// A message of several contact cards, clicked or opened: the sheet of them.
     func conversation(_ c: ConversationController, cardsOf message: MessageRow)
+    /// The box's files, with the key it made for them, what was typed being the first one's caption.
+    func conversation(_ c: ConversationController, send files: [AttachedFile], caption: String, hd: Bool, key: String, reply: String?)
 }
 
 public extension ConversationHost {
     func conversationLibrary(_: ConversationController) {}
+
+    func conversation(_: ConversationController, send _: [AttachedFile], caption _: String, hd _: Bool, key _: String, reply _: String?) {}
 
     func conversation(_: ConversationController, media _: MediaOffer.Act, _: [MediaOffer], at _: Int, of _: MessageRow) {}
 
@@ -1288,6 +1292,16 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         composer.unsent(text: text, why: why)
     }
 
+    /// Files jawd refused go back to the strip, with what was typed and jawd's reason.
+    public func unsent(files: [AttachedFile], caption: String, why: String) {
+        composer.unsent(files: files, caption: caption, why: why)
+    }
+
+    /// Files picked or dropped for this chat, into its box's strip.
+    public func attach(_ files: [AttachedFile]) {
+        composer.attach(files)
+    }
+
     public func focusBox() {
         view.window?.makeFirstResponder(composer.textView)
     }
@@ -1302,6 +1316,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 extension ConversationController: ComposerDelegate {
     func composer(_: ComposerController, send text: String, key: String, reply: String?, mentions: [String]) {
         host?.conversation(self, send: text, key: key, reply: reply, mentions: mentions)
+    }
+
+    func composer(_: ComposerController, send files: [AttachedFile], caption: String, hd: Bool, key: String, reply: String?) {
+        host?.conversation(self, send: files, caption: caption, hd: hd, key: key, reply: reply)
     }
 
     func composer(_: ComposerController, edit message: String, text: String) {
