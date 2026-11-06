@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="jaw-engine in target/engine/, stamped with the version jaw and jawd say (scripts/version)"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+version="$(sh scripts/version)"
+cd engine
+"${GO:-go}" build -trimpath -ldflags "-X main.version=$version" -o ../target/engine/jaw-engine ./cmd/jaw-engine

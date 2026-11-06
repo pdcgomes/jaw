@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="jaw-engine, then the Rust workspace: target/engine/jaw-engine, target/debug/jawd and target/debug/jaw"
+#MISE alias="b"
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$here/engine"
+"$here/rust"
