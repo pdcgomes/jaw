@@ -43,7 +43,7 @@ public struct MediaOffer: Sendable, Hashable {
     /// never keeps.
     public static func of(_ m: MessageRow, item: Int? = nil) -> MediaOffer? {
         guard !m.deleted, !m.viewOnce else { return nil }
-        let sending = m.mine && m.status == .pending, outbox = m.mine && (m.status == .pending || m.status == .failed)
+        let sending = m.onItsWay, outbox = m.fromOutbox
         if m.kind == .album {
             guard let items = m.album?.items, !items.isEmpty else { return nil }
             let i = min(max(item ?? 0, 0), items.count - 1)

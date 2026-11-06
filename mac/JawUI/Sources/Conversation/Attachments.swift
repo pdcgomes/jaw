@@ -3,17 +3,24 @@ import JawKit
 import UniformTypeIdentifiers
 
 /// A file waiting in the box's strip to be sent: where it is, what it goes as (nil for what it is,
-/// as jawd decides; a document for one picked with Document…), and whether the app wrote it, for an
-/// image pasted or dropped that wasn't a file, to go once jawd has its own copy.
+/// as jawd decides; a document for one picked with Document…), and the folder the app made for it,
+/// for an image pasted or dropped that wasn't a file or a file another app promised, which goes once
+/// jawd has its own copy.
 public struct AttachedFile: Hashable, Sendable {
     public let url: URL
     public let kind: MediaKind?
-    public let written: Bool
+    /// The app's own folder holding it alone; nil for a file of yours, which is never removed.
+    public let folder: URL?
 
-    public init(url: URL, kind: MediaKind? = nil, written: Bool = false) {
+    public init(url: URL, kind: MediaKind? = nil, folder: URL? = nil) {
         self.url = url
         self.kind = kind
-        self.written = written
+        self.folder = folder
+    }
+
+    /// Whether the app wrote it.
+    public var written: Bool {
+        folder != nil
     }
 
     public var name: String {
@@ -37,11 +44,11 @@ public struct AttachedFile: Hashable, Sendable {
         return type.conforms(to: .movie) || type.conforms(to: .gif) || type.conforms(to: .audio)
     }
 
-    /// The files the app wrote among `files`, gone from the strip or kept by jawd: each is in a folder
-    /// of its own, which goes with it.
+    /// The files the app wrote among `files`, gone from the strip or kept by jawd: each one's own
+    /// folder goes, and nothing else.
     public static func discard(_ files: [AttachedFile]) {
-        for file in files where file.written {
-            try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
+        for case let folder? in files.map(\.folder) {
+            try? FileManager.default.removeItem(at: folder)
         }
     }
 }
@@ -130,7 +137,7 @@ public enum Pasted {
         guard pasteboard.availableType(from: [.png, .tiff]) != nil, let png = png(pasteboard),
               let written = try? write(png, named: "Pasted image.png", into: folder)
         else { return nil }
-        return AttachedFile(url: written, written: true)
+        return AttachedFile(url: written, folder: written.deletingLastPathComponent())
     }
 
     /// The pasteboard's image as PNG: as it is when it's one, or made from its TIFF.

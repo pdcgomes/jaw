@@ -125,9 +125,62 @@ func type(_ text: String, in c: ComposerController) {
     c.send()
     #expect(stub.files.count == 1 && c.attachments.isEmpty)
     c.attach([file("notes.pdf", kind: .document)])
-    c.unsent(files: stub.files[0].files, caption: "the lake", why: "swim.mov can't go as image")
+    c.unsent(files: stub.files[0].files, caption: "the lake", why: "swim.mov can't go as image", hd: false)
     #expect(c.attachments.files.map(\.name) == ["lake.jpg", "swim.mov", "notes.pdf"])
     #expect(c.textView.string == "the lake" && c.bar.stringValue == "Not sent: swim.mov can't go as image" && !c.strip.isHidden)
+}
+
+@MainActor @Test func `files turned down come back in the quality they went in, and sending again clears what the bar said`() {
+    let (c, stub) = box()
+    c.attach([file("lake.jpg")])
+    c.send(hd: true)
+    c.unsent(files: stub.files[0].files, caption: "", why: "40 wait to send, 2 failed; it can go once some have", hd: true)
+    #expect(c.attachments.hd && c.strip.quality.title == "HD", "HD, as ⌥ on Send made it")
+    #expect(!c.bar.isHidden)
+    _ = c.key(key("\r", code: 36))
+    #expect(stub.files.map(\.hd) == [true, true] && c.bar.isHidden, "sent again in HD, and Not sent gone")
+
+    type("on my way", in: c)
+    c.unsent(text: "on my way", why: "no connection")
+    #expect(c.key(key("\r", code: 36)) && c.bar.isHidden, "words sent again clear it too")
+}
+
+@MainActor @Test func `a GIF sent as a document is a file's tile, with no picture made for it`() {
+    let (c, _) = box()
+    var made: [String] = []
+    c.thumbnail = { url, _, done in
+        made.append(url.lastPathComponent)
+        done(nil)
+    }
+    c.attach([file("dance.gif", kind: .document), file("dance2.gif"), file("lake.jpg")])
+    #expect(made == ["dance2.gif", "lake.jpg"], "a GIF going as what it is and a photo, not the GIF going as a document")
+}
+
+@MainActor @Test func `files that come back before the box is drawn show once it is`() {
+    let c = ComposerController(chat: Samples.direct)
+    c.unsent(files: [file("lake.jpg")], caption: "", why: "no connection", hd: false)
+    c.view.frame = NSRect(x: 0, y: 0, width: 640, height: 200)
+    #expect(!c.strip.isHidden && c.strip.tiles.map(\.name) == ["lake.jpg"])
+}
+
+@MainActor @Test func `what's dropped on the box attaches files and images, and words are the field's`() throws {
+    let (c, _) = box()
+    let board = NSPasteboard(name: .init("jaw-test-\(UUID().uuidString)"))
+    defer { board.releaseGlobally() }
+    try inFolder { folder in
+        c.attachedFolder = folder
+        let notes = folder.appending(path: "notes.pdf")
+        try Data([1]).write(to: notes)
+        board.clearContents()
+        board.writeObjects([notes as NSURL])
+        #expect(c.attachDropped(from: board) && c.attachments.files.map(\.name) == ["notes.pdf"])
+        board.clearContents()
+        board.writeObjects([NSImage(size: NSSize(width: 2, height: 2), flipped: false) { _ in true }])
+        #expect(c.attachDropped(from: board) && c.attachments.files.last?.written == true)
+        board.clearContents()
+        board.setString("the lake", forType: .string)
+        #expect(!c.attachDropped(from: board) && c.attachments.files.count == 2)
+    }
 }
 
 @MainActor @Test func `attaching while editing is turned down, and the edit stays`() throws {

@@ -359,10 +359,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             }
         }
         if !sending.isEmpty {
-            let going = rows.filter { $0.mine && $0.status == .pending }
+            let going = rows.filter(\.onItsWay)
             let held = Set(going.flatMap { [$0.id] + ($0.album?.items.map(\.id) ?? []) })
             sending = sending.filter { held.contains($0.key) }
-            for i in rows.indices where rows[i].mine && rows[i].status == .pending {
+            for i in rows.indices where rows[i].onItsWay {
                 cs[i].sending = sending(in: rows[i])
             }
         }
@@ -371,17 +371,20 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     /// The files of yours on their way in `m`, by message: its own, or its album's items'.
     func sending(in m: MessageRow) -> [String: Sending] {
-        guard m.mine, m.status == .pending else { return [:] }
+        guard m.onItsWay else { return [:] }
         let ids = [m.id] + (m.album?.items.map(\.id) ?? [])
         return sending.filter { ids.contains($0.key) }
     }
 
     /// How far a copy of a file of yours has got, as jawd's job says: the row it's in laid out again
-    /// and drawn when that changes what it shows. A copy uploaded is done, its tick saying the rest;
-    /// a download's job, or one for a message the window doesn't hold, changes nothing.
+    /// and drawn when that changes what it shows, its layout at the progress before let go. A copy
+    /// uploaded is done, its tick saying the rest. An HD copy's job, which names its SD message, is
+    /// left out, so the ring follows the SD copy alone; so is a download's, and one for a message
+    /// the window doesn't hold or that isn't on its way, as one stopped.
     public func took(_ job: Job) {
-        guard job.kind == .transcode || job.kind == .upload,
-              let i = rows.firstIndex(where: { $0.id == job.message || $0.album?.items.contains { $0.id == job.message } == true })
+        guard job.kind == .transcode || job.kind == .upload, job.variant != .hd,
+              let i = rows.firstIndex(where: { $0.id == job.message || $0.album?.items.contains { $0.id == job.message } == true }),
+              rows[i].onItsWay
         else { return }
         let now = job.kind == .upload && job.progress >= 1 ? nil : Sending(job)
         guard sending[job.message] != now else { return }
@@ -389,7 +392,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         contexts[i].sending = sending(in: rows[i])
         let m = rows[i]
         layouts.prepare([(m, contexts[i])], width: layoutWidth, spec: spec) { [weak self] in
-            guard let self, !reloading, let at = rows.firstIndex(where: { $0.id == m.id }) else { return }
+            guard let self, let at = rows.firstIndex(where: { $0.id == m.id }) else { return }
+            layouts.keep(m.id, only: contexts[at], width: layoutWidth, spec: spec)
+            guard !reloading else { return }
             table.reloadData(forRowIndexes: [at], columnIndexes: [0])
         }
     }
@@ -1329,9 +1334,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         composer.unsent(text: text, why: why)
     }
 
-    /// Files jawd refused go back to the strip, with what was typed and jawd's reason.
-    public func unsent(files: [AttachedFile], caption: String, why: String) {
-        composer.unsent(files: files, caption: caption, why: why)
+    /// Files jawd refused go back to the strip, in the quality they went in, with what was typed and
+    /// jawd's reason.
+    public func unsent(files: [AttachedFile], caption: String, why: String, hd: Bool) {
+        composer.unsent(files: files, caption: caption, why: why, hd: hd)
     }
 
     /// Files picked or dropped for this chat, into its box's strip.

@@ -276,7 +276,7 @@ final class MessageView: NSView {
         let who = m.mine ? "You" : (m.from?.name ?? "")
         let reactions = m.reactions.map { "\($0.n) \($0.emoji)" }.joined(separator: ", ")
         let hd = m.media?.hd == true ? "HD" : ""
-        let outgoing = m.mine && (m.status == .pending || m.status == .failed)
+        let outgoing = m.fromOutbox
         let file = m.media.flatMap { Self.said($0, sending: sending[m.id], outgoing: outgoing) } ?? ""
         let items = m.album?.items ?? []
         let tiles = items.enumerated().compactMap { i, item in

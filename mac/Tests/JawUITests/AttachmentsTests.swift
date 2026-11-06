@@ -56,6 +56,19 @@ func inFolder<T>(_ body: (URL) throws -> T) throws -> T {
     #expect(a.params(caption: " \n\t").map(\.caption) == [nil, nil])
 }
 
+@Test func `discarding takes only the folder the app made for a file, and never a file from the Finder`() throws {
+    try inFolder { folder in
+        let finder = folder.appending(path: "lake.jpg")
+        try Data([1]).write(to: finder)
+        let made = try Pasted.write(Data([2]), named: "Pasted image.png", into: folder)
+        let written = AttachedFile(url: made, folder: made.deletingLastPathComponent())
+        AttachedFile.discard([AttachedFile(url: finder), written])
+        #expect(FileManager.default.fileExists(atPath: finder.path), "the Finder's file stays where it is")
+        #expect(!FileManager.default.fileExists(atPath: made.deletingLastPathComponent().path), "the app's own folder goes")
+        #expect(FileManager.default.fileExists(atPath: folder.path), "and nothing above it")
+    }
+}
+
 @MainActor @Test func `a pasteboard of files gives them, folders left out, one of an image writes it as a PNG, and one of text gives nothing`() throws {
     let board = NSPasteboard(name: .init("jaw-test-\(UUID().uuidString)"))
     defer { board.releaseGlobally() }

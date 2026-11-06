@@ -92,6 +92,52 @@ func laid(_ m: MessageRow, sending: [String: Sending]) -> Laid {
     #expect(tile.sending && tile.stateAct! == (.stop, "Stop Sending"), "an album's item of yours too")
 }
 
+@Test func `a forward of yours on its way, which jawd doesn't upload, is drawn and offered as any file, its download among it`() throws {
+    var forward = outgoing()
+    forward.forwarded = 1
+    let offer = try #require(MediaOffer.of(forward))
+    #expect(!offer.sending && !offer.outbox && offer.stateAct! == (.fetch, "Download"))
+    #expect(laid(forward, sending: ["OUT": Sending(step: .uploading, percent: 70)]).regions.contains { $0.1 == .media(item: nil) })
+    #expect(rings(laid(forward, sending: ["OUT": Sending(step: .uploading, percent: 70)])).isEmpty, "no job of jawd's is a forward's")
+}
+
+/// A pane of `rows`, once they're in its table.
+@MainActor
+func pane(_ rows: [MessageRow], layouts: Layouts = Layouts()) async -> ConversationController {
+    let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: layouts, place: .newest(100))
+    c.view.frame = NSRect(x: 0, y: 0, width: 640, height: 900)
+    await withCheckedContinuation { done in
+        c.drawn = { done.resume() }
+        c.apply(Update(seq: 1, upsert: rows, total: UInt64(rows.count), older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0)))
+    }
+    return c
+}
+
+@MainActor @Test func `an HD copy's jobs, which name its SD message, are left out, and a job for a file stopped isn't kept`() async throws {
+    let c = await pane([outgoing(id: "OUT1")])
+    c.took(Job(id: "upload:1", kind: .upload, message: "OUT1", variant: .sd, progress: 0.3))
+    c.took(Job(id: "transcode:2", kind: .transcode, message: "OUT1", variant: .hd, progress: 0.8))
+    #expect(c.sending["OUT1"] == Sending(step: .uploading, percent: 30), "the SD copy's progress, not the HD one's")
+    var stopped = outgoing(id: "OUT1", status: .failed)
+    stopped.v = 2
+    c.apply(Update(seq: 2, upsert: [stopped], total: 1, older: false, newer: 0, moved: nil))
+    c.took(Job(id: "upload:1", kind: .upload, message: "OUT1", variant: .sd, progress: 0.4))
+    #expect(c.sending.isEmpty, "a job that comes after it's stopped is left out, so Send Again starts from nothing")
+}
+
+@MainActor @Test func `each step of a file's progress takes its message's place in the layouts kept, rather than adding one`() async throws {
+    let layouts = Layouts()
+    let c = await pane([outgoing(id: "OUT1")], layouts: layouts)
+    let kept = layouts.count
+    for step in 1 ... 19 {
+        c.took(Job(id: "upload:1", kind: .upload, message: "OUT1", progress: Double(step) / 20))
+    }
+    // Every layout asked for made, then each one's completion on the main queue run.
+    layouts.queue.sync(flags: .barrier) {}
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(layouts.count == kept, "\(layouts.count) layouts kept for one message, from \(kept)")
+}
+
 @MainActor @Test func `a pane puts each job in its row's context, lays out only that row again, and forgets a copy once it's uploaded`() async throws {
     let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
     c.view.frame = NSRect(x: 0, y: 0, width: 640, height: 900)

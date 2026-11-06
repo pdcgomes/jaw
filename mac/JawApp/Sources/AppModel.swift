@@ -69,7 +69,7 @@ final class AppModel {
     let contactsSent = ContactFormsSent()
     /// Files sent from a box and not yet answered for, by key, so those jawd turns down go back to
     /// their strip, and those the app wrote go once jawd has its own copy.
-    var filesSent: [String: (chat: String, files: [AttachedFile], caption: String)] = [:]
+    var filesSent: [String: (chat: String, files: [AttachedFile], caption: String, hd: Bool)] = [:]
     /// What jawd says sending videos, GIFs and audio files needs, when its status says it has no
     /// ffmpeg.
     var ffmpegMissing: String?
@@ -161,7 +161,9 @@ final class AppModel {
         savePanes()
         jawd?.close()
         agent.stop()
-        Opened.leave()
+        // A file written for a send jawd hasn't answered for may still be being kept: the next
+        // start's sweep takes the run's folder instead.
+        if !filesSent.values.contains(where: { $0.files.contains(where: \.written) }) { Opened.leave() }
     }
 
     // MARK: - Draining
@@ -1266,6 +1268,7 @@ extension AppModel {
         case .look, .open, .openWith:
             guard offer.isHere else {
                 // A file of yours from the outbox is jawd's own copy, being made: it's waited for, never fetched.
+                if offer.outbox, row.status == .failed { return say("\(offer.name) wasn't sent, and jawd kept no copy of it to open") }
                 if !offer.outbox, offer.media.state != .downloading, offer.media.state != .waitingForPhone {
                     jawd.fetch(chat: offer.chat, message: offer.message)
                 }

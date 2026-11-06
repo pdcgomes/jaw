@@ -91,6 +91,15 @@ public final class Layouts: Sendable {
         }
     }
 
+    /// Keeps only `context`'s layout of message `id` at this width and spec, so a file's progress,
+    /// which lays it out again each step, doesn't keep a layout for every step.
+    public func keep(_ id: String, only context: MessageContext, width: CGFloat, spec: LayoutSpec) {
+        let w = Int(width)
+        cache.withLock { cache in
+            cache = cache.filter { $0.key.id != id || $0.key.context == context && $0.key.width == w && $0.key.spec == spec }
+        }
+    }
+
     public var count: Int {
         cache.withLock { $0.count }
     }

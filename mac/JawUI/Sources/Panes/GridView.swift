@@ -125,7 +125,8 @@ public final class GridView: NSView {
     }
 
     override public func draggingEntered(_ info: any NSDraggingInfo) -> NSDragOperation {
-        draggingUpdated(info)
+        bringsFiles = Self.files(info) && BoxView.attaches(info.draggingPasteboard)
+        return draggingUpdated(info)
     }
 
     /// Whether a drag brings files rather than a chat from the list.
@@ -133,15 +134,18 @@ public final class GridView: NSView {
         info.draggingPasteboard.availableType(from: [.jawChat]) == nil
     }
 
+    /// Whether the drag brings what a box's strip takes, worked out as it comes in.
+    var bringsFiles = false
+
     /// Files a pane stages in its chat's box: only while ⌥ is held, so a plain drop on a pane stays
     /// a chat from the list.
-    static func staging(_ info: any NSDraggingInfo) -> Bool {
-        files(info) && NSEvent.modifierFlags.contains(.option) && BoxView.attaches(info.draggingPasteboard)
+    func staging(_ info: any NSDraggingInfo) -> Bool {
+        Self.files(info) && bringsFiles && NSEvent.modifierFlags.contains(.option)
     }
 
     override public func draggingUpdated(_ info: any NSDraggingInfo) -> NSDragOperation {
         let files = Self.files(info)
-        guard let (_, zone, rect) = target(info), !files || Self.staging(info) else {
+        guard let (_, zone, rect) = target(info), !files || staging(info) else {
             dropHint.isHidden = true
             return []
         }
@@ -159,7 +163,7 @@ public final class GridView: NSView {
         dropHint.isHidden = true
         guard let (id, zone, _) = target(info) else { return false }
         if Self.files(info) {
-            guard Self.staging(info) else { return false }
+            guard staging(info) else { return false }
             droppedFiles?(info.draggingPasteboard, id)
             return true
         }

@@ -30,6 +30,20 @@ public struct Sending: Sendable, Hashable {
     }
 }
 
+extension MessageRow {
+    /// Yours, sent from here and in the outbox, waiting or failed: its file is jawd's own copy, made
+    /// or being made, never one to download, which its row reads as before its copy is made, having
+    /// no state. A forward's file isn't uploaded, so a forward isn't.
+    var fromOutbox: Bool {
+        mine && forwarded == 0 && (status == .pending || status == .failed)
+    }
+
+    /// Yours from the outbox, waiting to send: its file being made or uploaded, as jawd's jobs say.
+    var onItsWay: Bool {
+        mine && forwarded == 0 && status == .pending
+    }
+}
+
 /// What a message's lines depend on beyond the message: whether its sender's name and its time
 /// show, the day above it, whether a long one is unfolded, and how far its files of yours on their
 /// way have got.

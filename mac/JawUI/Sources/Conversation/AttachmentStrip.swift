@@ -85,7 +85,7 @@ public final class AttachmentStrip: NSView {
             tiles = files.enumerated().map { i, file in
                 let tile = AttachmentTile(file: file) { [weak self] in self?.removed?(i) }
                 tile.roles = roles
-                if file.isVisual || file.type?.conforms(to: .gif) == true { picture(for: tile) }
+                if tile.square { picture(for: tile) }
                 return tile
             }
             for tile in tiles {
@@ -122,11 +122,12 @@ public final class AttachmentStrip: NSView {
         }
     }
 
-    /// Quick Look's picture of the file, made off the main thread at the screen's scale.
+    /// Quick Look's picture of the file, made off the main thread at the screen's scale; Quick Look
+    /// calls back on a queue of its own, so the handler is `@Sendable` and hops to the main queue.
     public static func quickLook(_ url: URL, _ size: CGSize, _ done: @escaping @MainActor (CGImage?) -> Void) {
         let request = QLThumbnailGenerator.Request(fileAt: url, size: size, scale: NSScreen.main?.backingScaleFactor ?? 2,
                                                    representationTypes: .thumbnail)
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { made, _ in
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { @Sendable made, _ in
             let image = made?.cgImage
             DispatchQueue.main.async { MainActor.assumeIsolated { done(image) } }
         }

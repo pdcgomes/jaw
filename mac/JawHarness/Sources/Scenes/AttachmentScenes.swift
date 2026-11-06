@@ -55,7 +55,7 @@ private struct AttachmentStripScene: View {
                 box.thumbnail = { url, _, done in done(SamplePictures.attached(url.lastPathComponent)) }
                 box.hdByDefault = hd
                 box.ffmpegMissing = ffmpeg
-                if let refused { box.unsent(files: files, caption: "the lake on Sunday", why: refused) } else { box.attach(files) }
+                if let refused { box.unsent(files: files, caption: "the lake on Sunday", why: refused, hd: hd) } else { box.attach(files) }
                 return BoxSpecimen(box)
             }
             .frame(width: 640, height: 150)

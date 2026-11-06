@@ -39,7 +39,7 @@ extension AppModel {
     }
 
     func conversation(_ c: ConversationController, send files: [AttachedFile], caption: String, hd: Bool, key: String, reply: String?) {
-        filesSent[key] = (c.chat.id, files, caption)
+        filesSent[key] = (c.chat.id, files, caption, hd)
         jawd.sendMedia(chat: c.chat.id, files: Attachments.params(files, caption: caption), quality: hd ? .hd : .sd, reply: reply, key: key)
     }
 
@@ -54,7 +54,7 @@ extension AppModel {
     func filesUnsent(chat: String, key: String, files: [SendMedia.File], why: String) {
         let sent = filesSent.removeValue(forKey: key)
         if let c = panes[chat], let sent {
-            c.unsent(files: sent.files, caption: sent.caption, why: why)
+            c.unsent(files: sent.files, caption: sent.caption, why: why, hd: sent.hd)
         } else {
             AttachedFile.discard(sent?.files ?? [])
             say("\(files.count == 1 ? "the file wasn't" : "the files weren't") sent: \(why)", warn: true)

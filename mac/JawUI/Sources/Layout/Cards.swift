@@ -355,7 +355,7 @@ extension MessageLayout.Builder {
         } else {
             slots.append(PictureSlot(rect: r, radius: round, fit: m.kind == .sticker ? .fit : .fill, source: source, message: m.id))
             let here = m.media.map { $0.state == .local } ?? true
-            if [.video, .gif, .videoNote].contains(m.kind), here { play(in: r, size: m.kind == .videoNote ? 40 : 44) }
+            if [.video, .gif, .videoNote].contains(m.kind), here, sending(item: nil) == nil { play(in: r, size: m.kind == .videoNote ? 40 : 44) }
             if let label = posterLabel, !label.isEmpty {
                 if m.kind == .videoNote {
                     let l = line(label, fonts.small, roles.text)
@@ -375,16 +375,15 @@ extension MessageLayout.Builder {
         }
     }
 
-    /// Whether the message is yours from the outbox, waiting to send or failed, so its file is drawn as
-    /// one sent from here, never as one to download: before its copy is made, jawd's row says no state.
+    /// Whether the message is yours from the outbox, so its file is drawn as one sent from here.
     var outgoing: Bool {
-        m.mine && (m.status == .pending || m.status == .failed)
+        m.fromOutbox
     }
 
     /// How far your file, or your album's item `item`'s, has got on its way while it waits to send,
     /// as the last job for it said; nil before its first and once it's uploaded.
     func sending(item: Int?) -> Sending? {
-        guard m.mine, m.status == .pending else { return nil }
+        guard m.onItsWay else { return nil }
         let items = m.album?.items ?? []
         let id = item.flatMap { items.indices.contains($0) ? items[$0].id : nil } ?? m.id
         return context.sending[id]
@@ -659,7 +658,7 @@ extension MessageLayout.Builder {
                 let more = line("+\(items.count - 3)", fonts.emoji, roles.text)
                 let w = width(of: more)
                 put(.line(more, CGPoint(x: (tile.midX - w / 2).rounded(), y: (tile.midY + ascent(fonts.emoji) / 2 - 4).rounded())))
-            } else if item.kind == "video", !source.isEmpty, (item.media?.state ?? .local) == .local {
+            } else if item.kind == "video", !source.isEmpty, (item.media?.state ?? .local) == .local, sending(item: i) == nil {
                 play(in: tile, size: 34)
             }
             if !(i == 3 && items.count > 4) { coming(tile, item.media, item: i, small: true) }

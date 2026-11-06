@@ -216,6 +216,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             textView.string = draft
             draftSent = draft
         }
+        showStrip()
         showBar()
         changed()
     }
@@ -437,6 +438,9 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         draftSent = textView.string
         taken = [:]
         lastTyping = nil
+        said = nil
+        unsentWhy = nil
+        showBar()
         changed()
     }
 
@@ -473,12 +477,13 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         view.window?.makeFirstResponder(textView)
     }
 
-    /// Files jawd turned down come back to the strip, before any attached since, with what was typed
-    /// and why.
-    public func unsent(files: [AttachedFile], caption: String, why: String) {
-        var back = Attachments(hd: attachments.isEmpty ? hdByDefault : attachments.hd)
+    /// Files jawd turned down come back to the strip, in the quality they went in, before any attached
+    /// since, as many of those as fit, with what was typed and why.
+    public func unsent(files: [AttachedFile], caption: String, why: String, hd: Bool) {
+        var back = Attachments(hd: hd)
         back.add(files)
         back.add(attachments.files)
+        AttachedFile.discard(attachments.files.filter { !back.files.contains($0) })
         attachments = back
         if caption.isEmpty {
             unsentWhy = why
@@ -525,23 +530,39 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         return true
     }
 
-    /// Files another app promises, as Photos and browsers drag theirs out: each received into a
-    /// folder of its own and attached as it comes.
+    /// Files another app promises, as Photos and browsers drag theirs out: received into one folder
+    /// for the drag, as AppKit asks of every promise in it, then each moved into a folder of its own,
+    /// so taking one out takes nothing beside it, and attached as it comes. AppKit calls the reader on
+    /// `receiving`, never the main actor's, so it's `@Sendable` and hops to the main queue itself.
     func receive(_ promises: [NSFilePromiseReceiver]) {
+        let root = attachedFolder
+        let landing = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        guard (try? FileManager.default.createDirectory(at: landing, withIntermediateDirectories: true)) != nil else {
+            return say("the files dropped couldn't be taken in")
+        }
         let take: @MainActor (AttachedFile) -> Void = { [weak self] in self?.attach([$0]) }
         let refused: @MainActor (String) -> Void = { [weak self] in self?.say("a file dropped didn't come: \($0)") }
         for promise in promises {
-            let folder = attachedFolder.appending(path: UUID().uuidString, directoryHint: .isDirectory)
-            guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { continue }
-            promise.receivePromisedFiles(atDestination: folder, options: [:], operationQueue: Self.receiving) { url, error in
-                let why = error?.localizedDescription
+            promise.receivePromisedFiles(atDestination: landing, options: [:], operationQueue: Self.receiving) { @Sendable url, error in
+                let moved = error == nil ? Self.alone(url, in: root) : nil
+                let why = error?.localizedDescription ?? "it couldn't be put in place"
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        if let why { refused(why) } else { take(AttachedFile(url: url, written: true)) }
+                        if let moved { take(moved) } else { refused(why) }
                     }
                 }
             }
         }
+    }
+
+    /// A file received, moved into a folder of its own in `root`.
+    nonisolated static func alone(_ url: URL, in root: URL) -> AttachedFile? {
+        let own = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let to = own.appending(path: url.lastPathComponent)
+        guard (try? FileManager.default.createDirectory(at: own, withIntermediateDirectories: true)) != nil,
+              (try? FileManager.default.moveItem(at: url, to: to)) != nil
+        else { return nil }
+        return AttachedFile(url: to, folder: own)
     }
 
     static let receiving: OperationQueue = {
@@ -723,12 +744,20 @@ final class BoxTextView: NSTextView {
         return words + BoxView.dropped.filter { !words.contains($0) }
     }
 
+    /// Whether the drag over it brings what the strip takes, worked out as it comes in.
+    var bringsFiles = false
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        bringsFiles = BoxView.attaches(sender.draggingPasteboard)
+        return super.draggingEntered(sender)
+    }
+
     override func dragOperation(for info: any NSDraggingInfo, type: NSPasteboard.PasteboardType) -> NSDragOperation {
-        BoxView.attaches(info.draggingPasteboard) ? .copy : super.dragOperation(for: info, type: type)
+        bringsFiles ? .copy : super.dragOperation(for: info, type: type)
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        if BoxView.attaches(sender.draggingPasteboard), box?.attachDropped(from: sender.draggingPasteboard) == true { return true }
+        if bringsFiles, box?.attachDropped(from: sender.draggingPasteboard) == true { return true }
         return super.performDragOperation(sender)
     }
 
@@ -765,16 +794,20 @@ final class BoxView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// Whether the drag over it brings what the strip takes, worked out as it comes in.
+    var bringsFiles = false
+
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        Self.attaches(sender.draggingPasteboard) ? .copy : []
+        bringsFiles = Self.attaches(sender.draggingPasteboard)
+        return bringsFiles ? .copy : []
     }
 
-    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        Self.attaches(sender.draggingPasteboard) ? .copy : []
+    override func draggingUpdated(_: any NSDraggingInfo) -> NSDragOperation {
+        bringsFiles ? .copy : []
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        box?.attachDropped(from: sender.draggingPasteboard) ?? false
+        bringsFiles && box?.attachDropped(from: sender.draggingPasteboard) == true
     }
 }
 
