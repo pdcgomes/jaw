@@ -96,3 +96,15 @@
 ### Task 8: end to end, review, and landing
 
 `make mac-test`; a snapshot run on the demo from attaching to sent; a review of the branch; the owner trying it on his account. It lands on main once he says so.
+
+## Amended in the build
+
+Tasks 1 to 7 were built in this order, each test first. What changed from the plan as it was written:
+
+- **A paste's words come before its image:** files, then words, then an image, since a spreadsheet's copied cells bring a picture of themselves beside their words, which would otherwise have been attached; a drop takes files, then files promised, then words, then an image.
+- **What's in the way is said in the box's bar,** where you're looking, rather than the status line: 30 at most, how many were left out, and that files go with a new message while one is being edited. Typing or Esc clears it.
+- **Files in the strip wait while an edit is saved,** rather than going with the edited words.
+- **A file of yours from the outbox is never drawn as one to download.** jawd's row for it has no state until its copy is made, which JawKit reads as remote, so without this it would have shown ↓ and Download; looking at or opening it waits for its copy rather than asking jawd for it.
+- **The box's bar kept its × in its middle,** stretched across the room its words left, since both hugged alike; this showed on main whenever the bar did, and now keeps its size at the box's edge.
+- **`AttachedFile`, not `Attachment`,** since Swift Testing has one of its own that every test file sees.
+- **The demo's uploads are done at once,** so a file's progress is seen in the harness's upload-states, not end to end; the snapshot's `rows` shows a send pending, then delivered and read. Two hooks serve the harness: a pane can be given how far its files have got all at once, and a box its tiles' pictures.

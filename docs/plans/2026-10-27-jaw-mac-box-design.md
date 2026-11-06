@@ -50,11 +50,11 @@ Each is a sheet over the window, keys first: Tab moves, Return sends, Esc cancel
 
 | Method | What it does | Status |
 | --- | --- | --- |
-| `send.media` | files by path, kind, caption, quality, reply | in the protocol, not served on main (M4) |
-| `send.poll` | question, options, max | in the protocol, not served on main (M2) |
-| `send.event` | name, description, start, end, place, call link | proposed in the protocol's Composing (M2) |
-| `send.contact` | cards, each a name and a vCard | in the protocol's Sending, served from `send-contact` (M4) |
-| `send.location` | latitude, longitude, name, address | proposed in the protocol's Composing (M2) |
+| `send.media` | files by path, kind, caption, quality, reply | served on main, and sent by the Mac since 6 November |
+| `send.poll` | question, options, max | served on main, and sent by the Mac |
+| `send.event` | name, description, start, end, place, call link | served on main; the Mac's form is B3's |
+| `send.contact` | cards, each a name and a vCard | served on main, and sent by the Mac |
+| `send.location` | latitude, longitude, name, address | served on main; the Mac's form is B3's |
 | `gif.search` | query (empty for trending), limit; answers with ids, sizes and preview paths | proposed in the protocol's Composing (after M4); jawd asks Giphy |
 | `send.gif` | a GIF from `gif.search` by its id: jawd fetches its MP4 and sends it as a GIF | proposed in the protocol's Composing (after M4) |
 
@@ -63,6 +63,6 @@ Until jawd serves one, the app makes the request anyway and says what jawd answe
 ## Build order
 
 1. **B1:** the box's row (+, Emoji, GIF, Send), the + menu, and the emoji picker.
-2. **B2:** attachments: pasting, dropping, Photos & Videos and Document, the strip, `send.media`.
+2. **B2:** attachments: pasting, dropping, Photos & Videos and Document, the strip, `send.media`. Built on 6 November, as [the attachments plan](2026-11-06-jaw-mac-attachments-plan.md) has it, with Tab in the box switching SD and HD, as the terminal's does, beside ⌥ on Send and the setting.
 3. **B3:** the forms: poll, event, contact, location, Continuity Camera.
 4. **B4:** the GIF picker, on `gif.search` and `send.gif`.
