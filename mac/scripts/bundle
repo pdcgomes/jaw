@@ -42,7 +42,7 @@ if ssh -o BatchMode=yes -o ConnectTimeout=5 "${JAW_BUILD_MAC:-build-mac}" true 2
     mac/scripts/build-mac release "$out"
 else
     echo "==> the build Mac doesn't answer; building here"
-    (cd mac && mise exec -- tuist generate --no-open >/dev/null &&
+    (cd mac && mise trust -q "$repo/mise.toml" && mise exec -- tuist generate --no-open >/dev/null &&
         xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release \
             -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet)
     ditto mac/build/DerivedData-release/Build/Products/Release/Jaw.app "$app"

@@ -62,7 +62,7 @@ if [ -x "$here/target/debug/jawd" ]; then
     rsync -a -e "ssh -o BatchMode=yes" "$here/target/debug/jawd" "$host:$remote/target/debug/jawd"
 fi
 
-run() { ssh_ "cd ~/$remote/mac && export PATH=/opt/homebrew/bin:\$PATH && mise trust -q . >/dev/null 2>&1; mise exec -- tuist generate --no-open >/dev/null && caffeinate -i $*"; }
+run() { ssh_ "cd ~/$remote/mac && export PATH=/opt/homebrew/bin:\$PATH && mise trust -q ../mise.toml >/dev/null 2>&1; mise exec -- tuist generate --no-open >/dev/null && caffeinate -i $*"; }
 
 case "$what" in
     test|build)
