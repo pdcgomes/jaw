@@ -61,6 +61,15 @@ public enum SamplePictures {
         "media/previews/\(name).instant.png"
     }
 
+    /// The picture drawn here that an attached file named `name` shows in the box's strip, by its
+    /// name without the extension: lake.jpg as the lake; nil for one drawn as its icon.
+    public static func attached(_ name: String) -> CGImage? {
+        guard let data = files[preview((name as NSString).deletingPathExtension, 256)],
+              let source = CGImageSourceCreateWithData(data as CFData, nil)
+        else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
     /// The original's size of a picture drawn here.
     public static func size(_ name: String) -> (w: Int, h: Int) {
         drawn.first { $0.name == name }.map { ($0.w, $0.h) } ?? (512, 512)

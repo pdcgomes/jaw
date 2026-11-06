@@ -68,6 +68,12 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     /// before it's attached: the run's own folder, emptied as the app quits.
     public var attachedFolder = Opened.folder.appending(path: "attached", directoryHint: .isDirectory)
     let strip = AttachmentStrip()
+    /// How the strip's tiles get their pictures: Quick Look's, or the harness's own.
+    public var thumbnail: @MainActor (URL, CGSize, @escaping @MainActor (CGImage?) -> Void) -> Void {
+        get { strip.thumbnail }
+        set { strip.thumbnail = newValue }
+    }
+
     /// What the box says in its bar until it changes, as why files were left out.
     var said: String?
     var stripTop: NSLayoutConstraint?

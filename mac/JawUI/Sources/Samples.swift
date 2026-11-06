@@ -353,6 +353,44 @@ public enum Samples {
         return (try? JSONDecoder().decode([MessageRow].self, from: Data("[\(json.joined(separator: ","))]".utf8))) ?? []
     }
 
+    // MARK: - Files attached and sent
+
+    /// Files attached to a box, by name, from folders of their own so the same name can come twice;
+    /// a picture drawn here for each photo's and video's tile, and those named in `documents` sent
+    /// as documents.
+    public static func attached(_ names: [String], documents: Set<String> = []) -> [AttachedFile] {
+        names.enumerated().map { i, name in
+            AttachedFile(url: URL(fileURLWithPath: "/Users/me/Pictures/\(i)/\(name)"), kind: documents.contains(name) ? .document : nil)
+        }
+    }
+
+    /// Files of yours on their way, as jawd's rows have them: a photo uploading, one whose copy is
+    /// being made, before which its row has no previews, a video uploading, an album whose items are
+    /// each at a place of their own, a document uploading, and a photo you stopped, failed.
+    public static var uploadStates: [MessageRow] {
+        let at = now - 120_000
+        let album = #"{"items":[{"id":"U4-0","kind":"image","media":\#(here("lake"))},{"id":"U4-1","kind":"image","media":\#(here("wall"))},{"id":"U4-2","kind":"image","media":\#(here("ridge"))},{"id":"U4-3","kind":"image","media":\#(here("rope"))}]}"#
+        let rows: [(String, String, String, String, String)] = [
+            ("U1", "image", "pending", #"[{"t":"text","s":"the lake, on its way"}]"#, #""media":\#(here("lake"))"#),
+            ("U2", "image", "pending", "[]", #""media":{"w":3024,"h":4032,"mime":"image/jpeg"}"#),
+            ("U3", "video", "pending", "[]", #""media":\#(here("poster", kind: "video", seconds: 42, bytes: 12_500_000))"#),
+            ("U4", "album", "pending", #"[{"t":"text","s":"four from Sunday"}]"#, #""album":\#(album)"#),
+            ("U5", "document", "pending", #"[{"t":"text","s":"notes.pdf"}]"#, #""media":{"name":"notes.pdf","mime":"application/pdf","bytes":480000,"pages":3}"#),
+            ("U6", "image", "failed", "[]", #""media":\#(here("rope"))"#),
+        ]
+        let json = rows.enumerated().map { i, r in
+            #"{"id":"\#(r.0)","v":1,"sort":"\#(at + Int64(i) * 1000)~\#(String(format: "%06d", 500 + i))","chat":"\#(direct.id)","at":\#(at + Int64(i) * 1000),"mine":true,"status":"\#(r.2)","kind":"\#(r.1)","spans":\#(r.3),\#(r.4)}"#
+        }
+        return (try? JSONDecoder().decode([MessageRow].self, from: Data("[\(json.joined(separator: ","))]".utf8))) ?? []
+    }
+
+    /// How far each of those has got, as jawd's last job for it said: the album's first item uploaded
+    /// already, its last waiting its turn.
+    public static let uploadSending: [String: Sending] = [
+        "U1": Sending(step: .uploading, percent: 70), "U2": Sending(step: .making, percent: 40), "U3": Sending(step: .uploading, percent: 25),
+        "U4-1": Sending(step: .uploading, percent: 60), "U4-2": Sending(step: .making, percent: 10), "U5": Sending(step: .uploading, percent: 55),
+    ]
+
     /// The window update a watch of those messages returns.
     public static var update: Update<MessageRow> {
         update(of: messages)

@@ -15,6 +15,8 @@ enum BuiltInScenes {
         catalog.register(.polls)
         catalog.register(.pictures)
         catalog.register(.downloadStates)
+        catalog.register(.uploadStates)
+        catalog.register(.attachmentStrip)
         catalog.register(.contactCards)
         catalog.register(.libraryGrid)
         catalog.register(.libraryRows)

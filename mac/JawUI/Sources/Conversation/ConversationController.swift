@@ -1350,6 +1350,12 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         sending[message]
     }
 
+    /// How far its files of yours on their way have got, given all at once before their rows come,
+    /// as the harness draws them; jawd's come a job at a time, through `took`.
+    public func show(sending: [String: Sending]) {
+        self.sending = sending
+    }
+
     public func focusBox() {
         view.window?.makeFirstResponder(composer.textView)
     }
