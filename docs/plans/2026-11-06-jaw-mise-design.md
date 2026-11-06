@@ -30,12 +30,14 @@ swiftformat = { version = "0.62.1", os = ["macos"] }
 swiftlint = { version = "0.65.0", os = ["macos"] }
 
 [env]
-# Signing and identity. Override per machine in mise.local.toml if needed.
+# Signing and identity. Override per machine in .mise.local.toml if needed.
 JAW_TEAM_ID = "3JP75Z3F98"
 JAW_BUNDLE_ID = "dev.badcoffee.jaw"
 # notarytool's keychain profile for the team's Apple ID, which Redlamp shares with Drift Station.
 JAW_NOTARY_PROFILE = "driftstation-notarize"
 ```
+
+`.gitignore` gains `.mise.local.toml`, as Redlamp's has it.
 
 Checked on 6 November with mise 2026.9.7 on this Mac: a tool marked for another system is neither listed nor installed, and one marked `macos` is; a task run from a subfolder runs at the repository's root, with these settings; and `mise run` runs the tasks of a checkout whose `mise.toml` was never trusted, as a new worktree's is, settings and all, while `mise exec`, `mise ls` and `mise install` refuse it until it's trusted, asking in a terminal and failing in an agent's shell. So the two scripts that run Tuist through `mise exec` trust their own checkout's `mise.toml` first: `mac/scripts/bundle` when it builds the app here, and `mac/scripts/build-mac` on the build Mac, which trusts `mac/mise.toml` today and trusts the root's instead.
 
@@ -123,6 +125,10 @@ The records keep what they say: `docs/audits/`, `docs/reviews/`, `docs/releases/
 
 14 of the mentions are in six of the data layer's files, as `scripts/check-data-audit.py` lists them: jawd's `engine/go.rs` (8), `main.rs` (2), `sock.rs` and `store/write/outbox.rs`, the engine's `cmd/jaw-engine/main.go`, and `proto/engine/engine.proto`. They're messages and comments, and nothing that writes, acknowledges or reads data changes; the data-integrity rule still has the database expert audit them, so they go in a commit of their own, with the trailer naming its note. (`store/vfs.rs`'s one match is a function called `make`, and stays.)
 
+### What jawd is built from
+
+Added while planning, on 6 November. `mac/scripts/built-from` calls a Jaw `changed`, so that its jawd never starts on an account's folder, when anything jawd and the engine are built from has uncommitted changes, and it counts the makefiles among those inputs (`Makefile GNUmakefile makefile`): `make engine` defined the engine's build, and a stray `GNUmakefile` would have changed it. Their place goes to mise's tasks and settings, any of which can change the build or the environment `mise run mac` builds in: `mise.toml`, `mise.local.toml`, `.mise.toml`, `.mise.local.toml`, `mise/` (whose `tasks/engine` builds the engine), `.mise/`, `.config/mise.toml`, `.config/mise/` and `.tool-versions`. A `.mise.local.toml` makes a build `changed` though git ignores it, as an untracked Cargo or go setting does. `mac/scripts/test-built-from` follows: its checkout has `mise.toml` and `mise/tasks/engine` where it had a Makefile; a new file of each of mise's kinds says `changed` where a new `GNUmakefile` did; and `mise.toml` and `mise/tasks/engine` changed say `changed` where the Makefile did. built-from's header names mise's tasks and settings where it named the makefiles.
+
 ## How it lands
 
 - **Built** on the branch `mise`, in `~/src/jaw-mise`, from origin/main.
@@ -132,8 +138,8 @@ The records keep what they say: `docs/audits/`, `docs/reviews/`, `docs/releases/
 
 ## Checks
 
-- Every task runs in the branch's worktree and does what its target did: `build`, `engine`, `rust`, `test`, `lint`, `fmt` (leaving nothing changed), `perf -- --quick`, `proto`, `sync-protos`, `check-generated`, `check-audit`, `check-parity` with and without `-- --table`, `mac`, `mac-test`, `prune-builds -- --dry-run`, `release` at a scratch tag in a scratch clone, and `setup` in a scratch clone.
-- `install` into a scratch prefix, through `mise run` and as a plain script with no mise on the PATH, then the formula's test by hand against what it installed: the three say the version, and `jawd --engine demo` on a scratch home has `jaw snapshot` draw Lisbon Climbing; then `uninstall` leaves the prefix as it was.
+- Every task runs in the branch's worktree and does what its target did: `build`, `engine`, `rust`, `test`, `lint`, `fmt` (leaving nothing changed), `perf -- --small` (which checks the harness on 50,000 messages, not the budgets), `proto`, `sync-protos`, `check-generated`, `check-audit`, `check-parity` with and without `-- --table`, `mac`, `mac-test`, `prune-builds -- --dry-run`, `release` at a scratch tag in a scratch clone, and `setup` in a scratch clone.
+- `install` into a scratch prefix, through `mise run` and as a plain script with no mise on the PATH, then the formula's test by hand against what it installed: the three say the version, and `jawd --engine demo` on a scratch home has `jaw snapshot` draw Lisbon Climbing; then `uninstall` takes out the three and `libexec/jaw/`.
 - The release's tarball, made by `mise run release` in a scratch clone, unpacked and installed with `mise/tasks/install` and no mise on the PATH, as Homebrew does: `jaw --version` says the version.
 - `install` into a folder only root can write asks for sudo for the copy alone: checked once by the owner, since an agent's shell can't answer sudo.
 - CI on Linux fails nowhere main doesn't (on 5 November main's test job failed at `lint`, which `linux-ci` was fixing).
