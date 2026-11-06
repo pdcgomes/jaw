@@ -64,12 +64,17 @@ func scratchPreferences(_ name: String) throws -> Preferences {
     #expect(!window.performKeyEquivalent(with: try key("z", .command)) && window.isVisible,
             "⌘Z stays undo on a layout whose Z is where a US keyboard has W")
     #expect(window.performKeyEquivalent(with: try key("w", .command)) && !window.isVisible)
+    for typed in ["w", "W"] {
+        window.orderFront(nil)
+        #expect(window.performKeyEquivalent(with: try key(typed, [.command, .capsLock])) && !window.isVisible,
+                "\(typed) with Caps Lock on, as the menu bar matches ⌘W whatever Caps Lock says")
+    }
     window.orderFront(nil)
     #expect(window.performKeyEquivalent(with: try key("ц", .command)) && !window.isVisible,
             "on a layout with no W, the key where a US keyboard has it, as the menu bar matches ⌘W")
 }
 
-@MainActor @Test func `⌘W that Settings' window passes on, as on a Hebrew layout, reaches the menu bar's Close Pane, which closes Settings when the key was pressed in it`() throws {
+@MainActor @Test func `Settings' window passes on ⌘ with Hebrew's W key, which types ', and says it was pressed there, and not for another window's key, a click, no event or once it's closed`() throws {
     let window = SettingsWindow(contentViewController: SettingsTabs(preferences: try scratchPreferences("settings-close-pane"), showing: .panes))
     window.styleMask = [.titled, .closable]
     window.isReleasedWhenClosed = false

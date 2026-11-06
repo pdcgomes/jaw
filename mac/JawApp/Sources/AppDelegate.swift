@@ -49,8 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.stop()
     }
 
-    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { window.showWindow(nil) }
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {
+        if window.window?.isVisible != true { window.showWindow(nil) }
         return true
     }
 }

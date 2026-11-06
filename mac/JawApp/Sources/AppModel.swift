@@ -596,8 +596,8 @@ final class AppModel {
     /// window, which passes ⌘W on to the menu bar where its W key types something else, as on a
     /// Hebrew layout (`SettingsWindow.pressed(_:)`).
     func closeFocusedPane() {
-        if let settings = settings?.window as? SettingsWindow, settings.pressed(NSApp.currentEvent) {
-            settings.performClose(nil)
+        if let shown = settings?.window as? SettingsWindow, shown.pressed(NSApp.currentEvent) {
+            shown.performClose(nil)
             return
         }
         guard let grid, let at = focusedSlot, grid.slots.count > 1 else {

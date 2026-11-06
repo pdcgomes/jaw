@@ -77,13 +77,13 @@ public final class SettingsTabs: NSTabViewController {
 
 /// Settings' window, which ⌘W closes, as it closes a window elsewhere. jaw's ⌘W is the menu bar's
 /// Close Pane, the main window's, and AppKit offers a key equivalent to the key window before the
-/// menu bar, so this takes it first. On a layout with no W, as a Cyrillic one, the key where a US
-/// keyboard has W is taken, as the menu bar takes it there.
+/// menu bar, so this takes it first, whatever Caps Lock says. On a layout with no W, as a Cyrillic
+/// one, the key where a US keyboard has W is taken, as the menu bar takes it there.
 public final class SettingsWindow: NSWindow {
     override public func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let typed = event.charactersIgnoringModifiers ?? ""
+        let typed = event.charactersIgnoringModifiers?.lowercased() ?? ""
         let w = typed == "w" || (!typed.allSatisfy(\.isASCII) && event.keyCode == 13)
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, w {
+        if event.modifierFlags.intersection(MenuBar.modifiers) == .command, w {
             performClose(nil)
             return true
         }
