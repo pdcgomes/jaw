@@ -27,17 +27,17 @@ Redlamp, the reference, opens Settings with ⌘, as a SwiftUI `Settings` scene (
 - **A window of its own, made by AppKit's tab view controller** (Default): an `NSTabViewController` in its toolbar style, each tab a SwiftUI pane. SwiftUI's `Settings` scene, Redlamp's way, exists only in a SwiftUI `App`, and Jaw is an AppKit app (`main.swift`, `AppDelegate`, a menu bar made from `Commands`); moving its life cycle to SwiftUI's for one window would reach into launch, which has a 250 ms budget, the menus and every window. The tab view controller draws the toolbar of icon tabs the Mac's own apps have, and the panes stay SwiftUI, where the Mac design puts settings.
 - **500 points wide, each pane its own height, nothing to confirm** (Default): Redlamp's width. ⌘, opens it or brings it to the front, on the pane last shown; its close button or ⌘W closes it; every change is drawn and kept as it's made, as today, so Done goes with the sheet.
 - **The system's look** (Default): the window is drawn in the system's forms and controls, in the app's appearance, as Redlamp's Settings is; the themes show in the gallery's cards and in the main window beside it.
-- **The gallery shows one slot's themes at a time** (Default; the canvas's question 2): the slot being chosen for decides which half of each theme its card shows, and themes only of the other mode are left out.
-- **A theme with both halves fills both slots** (Default; question 1): Tokyo Night and Redlamp's families fill both, one of Omarchy's fills the slot of its mode, and ⌥-click fills only the slot chosen for.
+- **The gallery shows one slot's themes at a time** (Owner, 6 Nov): the slot being chosen for decides which half of each theme its card shows, and themes only of the other mode are left out.
+- **A theme with both halves fills both slots** (Owner, 6 Nov): Tokyo Night and Redlamp's families fill both, one of Omarchy's fills the slot of its mode, and ⌥-click fills only the slot chosen for.
 - **Every theme shown, under its source** (Default): Jaw's, Omarchy's and Redlamp's sections, each theme as its source names it, so three Tokyo Nights show, each in its section; a theme named outside its section carries its source ("Nord, Redlamp's").
-- **Omarchy's, by theme.rs's rule, held on both grounds the Mac draws on** (Default): the terminal's mapping ported to Swift as it is, then each colour also held at 3:1 against the surface, where the Mac draws their bubbles and its chat list.
+- **Omarchy's, by theme.rs's rule, held on both grounds the Mac draws on** (Owner, 6 Nov): the terminal's mapping ported to Swift as it is, then each colour also held at 3:1 against the surface, where the Mac draws their bubbles and its chat list.
 - **A role for links** (Default): the Mac's roles gain `link`, links and read ticks, from Omarchy's `cyan` as `theme.rs` takes it, where the Mac draws them in the accent today.
-- **Redlamp's, by the Mac design's table, held by the same bands** (Default), so a family made for a photo editor's panels reads in a chat as Omarchy's do.
+- **Redlamp's, by the Mac design's table, held by the same bands** (Owner, 6 Nov), so a family made for a photo editor's panels reads in a chat as Omarchy's do.
 - **The chosen themes' colours remembered** (Default): with the slots in the app's preferences, so the first frame is drawn in them before jawd answers, and a Jaw whose jawd can't be reached keeps them.
 - **Kept by the app, not jawd** (Default): the Mac's look stays in its own preferences (Owner, 27 Oct); jawd keeps no settings domain for `jaw-mac`.
-- **The copy stays under the MPL 2.0** (Default; question 4): the copied file keeps Redlamp's notice, and jaw ships the licence's text beside Omarchy's.
+- **Redlamp's catalog relicensed for jaw under jaw's MIT** (Owner, 6 Nov): in his words, "I own redlamp, MIT is fine." Its owner relicenses Redlamp's catalog for jaw, as the Mac design allowed ("or the owner, who holds both, relicenses them for jaw"), so the copy carries jaw's licence with one line saying it's Redlamp's catalog, relicensed by its owner for jaw, and there's no `docs/licenses/redlamp.txt`.
 - **`scripts/sync-themes` runs where a Redlamp checkout is** (Default): Redlamp's repository is private, so not in CI, where the Mac plan had it.
-- **Tint, translucency, native controls and the palette's own theme stay in Mac-M5** (Default; question 3).
+- **Tint, translucency, native controls and the palette's own theme stay in Mac-M5** (Owner, 6 Nov).
 
 ## How it works
 
@@ -108,7 +108,7 @@ From the top:
 
 ### Redlamp's families, copied
 
-- **What's copied,** from Redlamp's main at 9fa9d91, whose catalog hasn't changed since 001d98a on 30 September: `ThemeCatalog.swift`'s families in their slot order, each with its ID, its name and the ten HSL colours of each half; `ThemePalette` and `PrimaryRoles`; the HSL parser; and from `Brand.swift` the nine colours the Redlamp family is made of. About 200 lines, in one file of JawThemes with Redlamp's notice. Redlamp's tokens and `ThemeMapping` aren't copied: they're a photo editor's, and jaw maps the ten colours onto its own roles in a file of its own.
+- **What's copied,** from Redlamp's main at 9fa9d91, whose catalog hasn't changed since 001d98a on 30 September: `ThemeCatalog.swift`'s families in their slot order, each with its ID, its name and the ten HSL colours of each half; `ThemePalette` and `PrimaryRoles`; the HSL parser; and from `Brand.swift` the nine colours the Redlamp family is made of. About 200 lines, in one file of JawThemes under jaw's licence, with one line saying it's Redlamp's catalog, relicensed by its owner for jaw. Redlamp's tokens and `ThemeMapping` aren't copied: they're a photo editor's, and jaw maps the ten colours onto its own roles in a file of its own.
 - **Mapped** by the Mac design's table:
 
 | The Mac's role | From a family's half |
@@ -131,7 +131,7 @@ From the top:
 - **Redlamp** keeps its red to the accent, as its `primaryRoles` keeps the brand's red to one place: its accent and links are the safelight's red, and its selection and your bubbles come from its neutral grey, `ring` in dark and `steel` in light.
 - **Neutral** is Redlamp's own grey, authored as its standard tokens (greys at alphas over its panel) rather than ten colours, with its accent left to the system's. jaw takes its greys from those tokens' values, the system's accent for its accent, links and your bubbles, the system's orange, green and red for mentions, online and failed, held as above, and its senders' hues from the accent's; it's drawn again when the system's accent changes.
 - **`scripts/sync-themes`** pins Redlamp's commit, as `scripts/omarchy-themes` pins Omarchy's. It copies the data again from a Redlamp checkout at that commit (`~/src/darkroom`, or the folder `REDLAMP` names), and `--check` says what differs between jaw's copy and the pinned commit's, and what Redlamp's main has changed since. Redlamp's repository is private, so it runs where a checkout is, on the owner's Mac, and CI skips it, saying so.
-- **The licence:** Redlamp is under the MPL 2.0, which applies file by file. The copied file keeps Redlamp's notice and stays under it, jaw's own files stay MIT, `docs/licenses/redlamp.txt` holds the licence's text, and the README's licence names it beside Omarchy's. The owner, who holds both, may relicense the copy under jaw's MIT instead (question 4).
+- **The licence** (Owner, 6 Nov): Redlamp is under the MPL 2.0, and its owner, who holds both, relicenses its catalog for jaw under jaw's MIT ("I own redlamp, MIT is fine"). The copied file is under jaw's MIT, as the rest of jaw is, with one line saying it's Redlamp's catalog, relicensed by its owner for jaw; there's no `docs/licenses/redlamp.txt`.
 
 ### Jaw's own
 
@@ -147,19 +147,19 @@ Jaw's Tokyo Night stays as it is: ooze's palette with Tokyo Night Day as its lig
 
 ## What changes, part by part
 
-- **JawThemes:** `Roles` gains `link`. `Theme` takes the place of `ThemeFamily`: an ID, a name, its source, and a dark half, a light half or both, as `Roles`. Omarchy's mapping, `theme.rs`'s rule ported, with the Mac's roles and the surface's hold; a reader of Omarchy's `colors.toml` as jaw-proto reads it, with `orange` and `brown` where a theme leaves them out, for the tests and the harness, which ask jawd for nothing. Redlamp's copy (MPL 2.0), and jaw's mapping of it with Neutral's greys (MIT). The `Catalog`: Jaw's own, Redlamp's 22, and Omarchy's as jawd or the remembered copy gives them, looked up by ID with the fallbacks above. The slots and how a choice fills them, as a value.
+- **JawThemes:** `Roles` gains `link`. `Theme` takes the place of `ThemeFamily`: an ID, a name, its source, and a dark half, a light half or both, as `Roles`. Omarchy's mapping, `theme.rs`'s rule ported, with the Mac's roles and the surface's hold; a reader of Omarchy's `colors.toml` as jaw-proto reads it, with `orange` and `brown` where a theme leaves them out, for the tests and the harness, which ask jawd for nothing. Redlamp's copy, under jaw's MIT, and jaw's mapping of it with Neutral's greys. The `Catalog`: Jaw's own, Redlamp's 22, and Omarchy's as jawd or the remembered copy gives them, looked up by ID with the fallbacks above. The slots and how a choice fills them, as a value.
 - **JawKit:** `themes()`, and its answer typed (`Themes`, each theme its ID, name, mode and colours); `themes.result.json` decodes into it and `themes.request.json` is what it writes, in `FixtureTests`; `FakeJawd` answers it from the fixture; a jawd that doesn't know `themes` reads as one that serves none. The protocol doesn't change: `themes` is served as it has it.
 - **JawUI:** `SettingsView`, its segmented control and Done go. `AppearancePane` (the appearance, the slots, the gallery and its states), the card, `MessagesPane` and `PanesPane` take their place, the last two the forms as built with their explanations as section footers. `Preferences` holds the slots and their remembered colours in place of `theme`, with the migration, and `style(dark:)` takes the slot's theme. Links and read ticks are drawn in `link` where they're drawn in the accent now (the cards, the message layout and the library's drawing among them).
 - **The app:** `SettingsWindowController`, its frame and its pane kept. `MainWindowController.showSettings()` and its sheet go; the `settings` command opens the window, and "Choose a theme" joins the palette's actions. `AppModel` asks `themes` after each hello, gives the answer to the catalog and the window, and restyles when a slot's theme's colours change. The `--keys` step `settings` opens the window, `settings:appearance`, `settings:messages` and `settings:panes` on a pane, and `--snapshot` draws the Settings window once such a step has opened it.
 - **The harness:** its Theme condition lists every theme by section, with `--theme jaw`, `--theme omarchy:<id>` and `--theme redlamp:<id>`, Omarchy's read from `protocol/themes/`, copied into the harness as it's built. New scenes draw the three panes at the window's width, the dark slot's gallery and the light one's, a card in each of its states (filling a slot, the slot chosen for, under the pointer), and the Omarchy section while jawd starts, can't be reached and is older; the Roles scene draws any theme's roles with their contrast, as it does Jaw's.
-- **Scripts and licences:** `scripts/sync-themes`, `docs/licenses/redlamp.txt`, and the README's licence.
+- **Scripts:** `scripts/sync-themes`.
 - **`mac/parity.toml`** keeps its rows: the terminal reads Omarchy's themes from jaw-proto and never sends `themes`, so the Mac sending it is no gap, and `settings.set` and the `settings` push stay with step 3.5's other half.
 - **The docs:** the Mac design's decisions, "The UI stack" (Settings in a window of its own) and "Themes" (Redlamp's copied now, the slots, Omarchy's mapping and its hold on the surface, `link` in the roles' table, the Appearance pane); the Mac plan's Mac-M5 (step 1 left with tint, translucency, native controls and the palette's own theme; step 6 with the panes still to come; `sync-themes` out of CI); the parity plan's step 3.5 (both sets now, Owner, 6 Nov) and Phase 4; the parity canvas's Themes and settings rows, and the board's steps 3.5 and 4.3; and the Mac README's `--keys`, preferences by argument and the harness's `--theme`.
 
 ## What it doesn't do
 
 - **The settings jawd keeps,** what downloads by itself, the cache's size and notifications (P5): parity step 3.5's other half, with the panes they come in.
-- **Tint, translucency, native controls in the theme's accent, and the palette in a theme of its own:** Redlamp has them around its families, and Mac-M5's step 1 keeps them (question 3).
+- **Tint, translucency, native controls in the theme's accent, and the palette in a theme of its own:** Redlamp has them around its families, and Mac-M5's step 1 keeps them (Owner, 6 Nov).
 - **The Mac's theme kept by jawd,** or following the terminal's: the Mac's look is its own (Owner, 27 Oct), and a frontend reading another's settings is the settings design's Later.
 - **Senders at 4.5:1 in every theme,** which the Mac design's Accessibility asks: Jaw's Tokyo Night Day's red reads at 3.2:1 on their bubble today. Omarchy's are held at 3:1, as the terminal's are, Jaw's read at 3.2:1 or more, and Redlamp's derived hues at 4.5:1, as the Mac design has them; the rest is Mac-M5's accessibility step, with Increase Contrast.
 - **Changes to jawd, the protocol or the terminal.** Nothing touches the data layer's paths, so no audit is needed.
@@ -181,5 +181,5 @@ Jaw's Tokyo Night stays as it is: ooze's palette with Tokyo Night Day as its lig
 3. **Preferences:** the slots, the remembered colours and the migration; `link` drawn where links and read ticks are.
 4. **The window:** `SettingsWindowController`, the panes moved into it, the sheet and Done gone, ⌘, and the palette's "Choose a theme".
 5. **The Appearance pane:** the slots, the gallery, the cards and the states.
-6. **The harness's scenes and pictures,** `scripts/sync-themes`, and the licence.
+6. **The harness's scenes and pictures,** and `scripts/sync-themes`.
 7. **The docs and canvases** above, and the owner's look on a real screen.
