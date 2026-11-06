@@ -160,6 +160,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         completions.picked = { [weak self] in self?.take($0) }
 
         sendButton.filled = true
+        // The bar's words take its room; its × keeps its own size at the box's edge.
+        barClose.setContentHuggingPriority(.required, for: .horizontal)
         strip.isHidden = true
         strip.removed = { [weak self] i in self?.takeOut(at: i) }
         strip.switched = { [weak self] in self?.attachments.hd.toggle() }
