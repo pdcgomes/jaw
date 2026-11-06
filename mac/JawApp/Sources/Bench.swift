@@ -113,7 +113,8 @@ enum Bench {
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
                 || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:") || key == "roster"
-                || key == "card" || key.hasPrefix("card:") || contacts
+                || key == "card" || key.hasPrefix("card:") || contacts || key.hasPrefix("attach") || key == "rows"
+            if key.hasPrefix("attach:") || key.hasPrefix("attach-doc:") { attachStep(key, model: model) }
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
@@ -199,6 +200,10 @@ enum Bench {
                     FileHandle.standardError.write(Data("roster: \(roster.said.joined(separator: " | "))\n".utf8))
                 } else if contacts {
                     FileHandle.standardError.write(Data("\(key): \(newestCard(model))\n".utf8))
+                } else if key.hasPrefix("attach") {
+                    FileHandle.standardError.write(Data("\(key): \(stripSaid(model))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
+                } else if key == "rows" {
+                    FileHandle.standardError.write(Data("rows: \(rowsSaid(model))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in
@@ -285,6 +290,38 @@ enum Bench {
             if let card = ContactForm.card(contact) { form.add(card) }
         }
         if step.hasPrefix("contact:") { model.send(form) } else { model.window?.showContactForm(form) }
+    }
+
+    /// Files staged in the focused pane's box as Photos & Videos… stages them, `attach:<path>|<path>`,
+    /// or as Document… does, `attach-doc:<path>`, each path whole or from where the app started.
+    static func attachStep(_ key: String, model: AppModel) {
+        guard let c = model.conversation else { return model.say("no pane to attach to") }
+        let document = key.hasPrefix("attach-doc:")
+        let paths = key.drop { $0 != ":" }.dropFirst().split(separator: "|").map(String.init)
+        c.attach(paths.map { AttachedFile(url: URL(fileURLWithPath: $0).standardizedFileURL, kind: document ? .document : nil) })
+    }
+
+    /// The focused pane's strip for the snapshot's log: its files, SD or HD, and whether jawd's lack
+    /// of ffmpeg is in their way.
+    static func stripSaid(_ model: AppModel) -> String {
+        guard let c = model.conversation else { return "no pane" }
+        let a = c.composer.attachments
+        guard !a.isEmpty else { return "nothing attached" }
+        return "attached " + a.files.map(\.name).joined(separator: ", ") + (a.showsQuality ? " · \(a.hd ? "HD" : "SD")" : "")
+            + (a.needsFFmpeg && c.composer.ffmpegMissing != nil ? " · jawd has no ffmpeg" : "")
+    }
+
+    /// The focused pane's newest rows for the snapshot's log: each one's kind, whose, its tick, its
+    /// file's state, its words, and how far it has got on its way.
+    static func rowsSaid(_ model: AppModel) -> String {
+        guard let c = model.conversation else { return "no pane" }
+        return c.window.list.suffix(5).map { m in
+            var said = m.kind.rawValue + (m.mine ? " yours" : "") + (m.status.map { " \($0.rawValue)" } ?? "")
+            if let media = m.media { said += " · \(media.state.rawValue)\(media.path == nil ? "" : ", here")" }
+            if !m.plain.isEmpty { said += " \"\(m.plain.prefix(24))\"" }
+            if let going = c.sending(of: m.id) { said += " · \(going.words)" }
+            return said
+        }.joined(separator: " | ")
     }
 
     /// The focused pane's newest contact card as jawd's row has it, for the snapshot's log.

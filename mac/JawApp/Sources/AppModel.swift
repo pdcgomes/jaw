@@ -67,6 +67,12 @@ final class AppModel {
     var voting: [String: (chat: String, message: String)] = [:]
     /// The contact forms whose cards are on their way, so one jawd turns down opens again.
     let contactsSent = ContactFormsSent()
+    /// Files sent from a box and not yet answered for, by key, so those jawd turns down go back to
+    /// their strip, and those the app wrote go once jawd has its own copy.
+    var filesSent: [String: (chat: String, files: [AttachedFile], caption: String)] = [:]
+    /// What jawd says sending videos, GIFs and audio files needs, when its status says it has no
+    /// ffmpeg.
+    var ffmpegMissing: String?
     let contactPicking = ContactPicking()
     var notice: (text: String, until: Date, warn: Bool)?
     var infoFor: MessageRow?
@@ -185,6 +191,7 @@ final class AppModel {
             window?.chatList.root = w.root
             window?.sidebar.roster.root = w.root
             pictures.files = .folder(w.root)
+            jawd.status(shown: false)
         case let .unreachable(why, retryIn):
             reach = Reach(agent.unreachable(), why: why, retry: Int(retryIn / .seconds(1)))
         case let .connection(c):
@@ -316,7 +323,17 @@ final class AppModel {
             if let row, let filing { folderAct(.add(item: filing.id, to: row.id), name: filing.name) }
         case let .notNamed(why):
             window?.sidebar.notNamed(why)
-        case .push, .chats, .layout, .folders, .roster, .mediaSent, .mediaUnsent, .job, .statusRead:
+        case let .mediaSent(key, _, _):
+            filesTaken(key)
+        case let .mediaUnsent(chat, key, files, why):
+            filesUnsent(chat: chat, key: key, files: files, why: why)
+        case let .job(job):
+            for c in panes.values {
+                c.took(job)
+            }
+        case let .statusRead(status):
+            read(status)
+        case .push, .chats, .layout, .folders, .roster:
             break
         }
     }
@@ -332,6 +349,7 @@ final class AppModel {
         for c in panes.values {
             c.spec = spec
             c.applyTheme()
+            c.composer.hdByDefault = preferences.sendHD
         }
         for l in libraries.values {
             l.style = style
@@ -441,6 +459,8 @@ final class AppModel {
             }
         }
         c.composer.gif = { [weak self] in self?.command("box.gif")?.run() }
+        c.composer.hdByDefault = preferences.sendHD
+        c.composer.ffmpegMissing = ffmpegMissing
         c.paneMenu = { [weak self, weak c] in
             guard let self, let c else { return nil }
             return paneMenu(for: c)
@@ -1245,7 +1265,10 @@ extension AppModel {
         switch act {
         case .look, .open, .openWith:
             guard offer.isHere else {
-                if offer.media.state != .downloading, offer.media.state != .waitingForPhone { jawd.fetch(chat: offer.chat, message: offer.message) }
+                // A file of yours from the outbox is jawd's own copy, being made: it's waited for, never fetched.
+                if !offer.outbox, offer.media.state != .downloading, offer.media.state != .waitingForPhone {
+                    jawd.fetch(chat: offer.chat, message: offer.message)
+                }
                 pending = PendingOpen(act, offer, of: row)
                 return say(offer.waitingWords)
             }
@@ -1275,7 +1298,7 @@ extension AppModel {
             jawd.fetch(chat: offer.chat, message: offer.message)
         case .stop:
             if pending?.message == offer.message { pending = nil }
-            jawd.cancel(chat: offer.chat, message: offer.message)
+            jawd.cancel(chat: offer.chat, message: offer.message, what: offer.sending ? "stopping it" : "stopping the download")
         case .look, .open, .openWith:
             break
         }

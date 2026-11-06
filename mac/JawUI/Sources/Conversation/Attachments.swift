@@ -36,6 +36,14 @@ public struct AttachedFile: Hashable, Sendable {
         guard kind != .document, let type else { return false }
         return type.conforms(to: .movie) || type.conforms(to: .gif) || type.conforms(to: .audio)
     }
+
+    /// The files the app wrote among `files`, gone from the strip or kept by jawd: each is in a folder
+    /// of its own, which goes with it.
+    public static func discard(_ files: [AttachedFile]) {
+        for file in files where file.written {
+            try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
+        }
+    }
 }
 
 /// What's attached to a box: its files in the order they came, each once and as many as one
@@ -84,6 +92,10 @@ public struct Attachments: Hashable, Sendable {
     /// The files as `send.media` takes them: what's typed is the first one's caption, its end
     /// trimmed, and none when it's blank.
     public func params(caption: String) -> [SendMedia.File] {
+        Self.params(files, caption: caption)
+    }
+
+    public static func params(_ files: [AttachedFile], caption: String) -> [SendMedia.File] {
         let trimmed = String(caption.reversed().drop(while: \.isWhitespace).reversed())
         return files.enumerated().map { i, a in
             SendMedia.File(path: a.url.path, kind: a.kind, caption: i == 0 && !trimmed.isEmpty ? trimmed : nil)

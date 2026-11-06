@@ -96,9 +96,9 @@ extension AppModel {
         let later = { (what: String) -> @MainActor @Sendable () -> Void in { [weak self] in self?.say(what) } }
         let plus: [(String, String, String, String, String, Shortcut?, @MainActor @Sendable () -> Void)] = [
             ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o"),
-             later("sending photos and videos comes later")),
+             { [weak self] in self?.attach(.photos) }),
             ("attach.document", "Document…", "Send a document", "any file", "doc", Shortcut("o", [.command, .shift]),
-             later("sending documents comes later")),
+             { [weak self] in self?.attach(.documents) }),
             ("attach.camera", "Camera…", "Take a photo with the iPhone", "Continuity Camera", "camera", nil, later("the camera comes later")),
             ("attach.contact", "Contact…", "Send a contact", "from Contacts", "person.crop.circle", nil, { [weak self] in self?.composeContact() }),
             ("compose.poll", "Poll…", "New poll", "a question and its options", "chart.bar.xaxis", nil, { [weak self] in self?.composePoll() }),

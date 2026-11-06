@@ -71,6 +71,8 @@ public final class Preferences {
     /// Whether the focused pane is outlined, and in what colour: nil for the theme's accent.
     public var paneOutline: Bool { didSet { save() } }
     public var paneOutlineColour: RGBA? { didSet { save() } }
+    /// Whether photos and videos attached go in HD unless Tab says otherwise.
+    public var sendHD: Bool { didSet { save() } }
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored public var changed: [() -> Void] = []
@@ -90,6 +92,7 @@ public final class Preferences {
         paneDim = defaults.object(forKey: "paneDim") == nil ? 0.18 : min(max(defaults.double(forKey: "paneDim"), 0), 0.6)
         paneOutline = defaults.object(forKey: "paneOutline") == nil ? true : defaults.bool(forKey: "paneOutline")
         paneOutlineColour = defaults.object(forKey: "paneOutlineColour") == nil ? nil : RGBA(UInt32(truncatingIfNeeded: defaults.integer(forKey: "paneOutlineColour")))
+        sendHD = defaults.bool(forKey: "sendHD")
     }
 
     func save() {
@@ -102,6 +105,7 @@ public final class Preferences {
         defaults.set(paneDim, forKey: "paneDim")
         defaults.set(paneOutline, forKey: "paneOutline")
         if let c = paneOutlineColour { defaults.set(Int(c.hex), forKey: "paneOutlineColour") } else { defaults.removeObject(forKey: "paneOutlineColour") }
+        defaults.set(sendHD, forKey: "sendHD")
         for change in changed {
             change()
         }

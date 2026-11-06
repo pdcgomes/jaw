@@ -23,6 +23,9 @@ public final class GridView: NSView {
     var dragging: PaneGrid.Line?
     /// A chat dropped on a pane: on its middle to put it there, on an edge to split that way.
     public var dropped: ((String, Int, DropZone) -> Void)?
+    /// Files dropped on a pane while ⌥ is held, for its chat's box: what the drag brings, and the
+    /// pane's slot.
+    public var droppedFiles: ((NSPasteboard, Int) -> Void)?
     let dropHint = NSView()
 
     /// Where a dropped chat goes in a pane.
@@ -64,7 +67,7 @@ public final class GridView: NSView {
     override public init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        registerForDraggedTypes([.jawChat])
+        registerForDraggedTypes([.jawChat] + BoxView.dropped)
         dropHint.wantsLayer = true
         dropHint.layer?.cornerRadius = Radius.control
         dropHint.layer?.borderWidth = Stroke.focus
@@ -125,15 +128,27 @@ public final class GridView: NSView {
         draggingUpdated(info)
     }
 
+    /// Whether a drag brings files rather than a chat from the list.
+    static func files(_ info: any NSDraggingInfo) -> Bool {
+        info.draggingPasteboard.availableType(from: [.jawChat]) == nil
+    }
+
+    /// Files a pane stages in its chat's box: only while ⌥ is held, so a plain drop on a pane stays
+    /// a chat from the list.
+    static func staging(_ info: any NSDraggingInfo) -> Bool {
+        files(info) && NSEvent.modifierFlags.contains(.option) && BoxView.attaches(info.draggingPasteboard)
+    }
+
     override public func draggingUpdated(_ info: any NSDraggingInfo) -> NSDragOperation {
-        guard let (_, zone, rect) = target(info) else {
+        let files = Self.files(info)
+        guard let (_, zone, rect) = target(info), !files || Self.staging(info) else {
             dropHint.isHidden = true
             return []
         }
-        dropHint.frame = Self.hint(zone, in: rect).insetBy(dx: Space.xs, dy: Space.xs)
+        dropHint.frame = Self.hint(files ? .middle : zone, in: rect).insetBy(dx: Space.xs, dy: Space.xs)
         addSubview(dropHint, positioned: .above, relativeTo: nil)
         dropHint.isHidden = false
-        return .move
+        return files ? .copy : .move
     }
 
     override public func draggingExited(_: (any NSDraggingInfo)?) {
@@ -142,7 +157,13 @@ public final class GridView: NSView {
 
     override public func performDragOperation(_ info: any NSDraggingInfo) -> Bool {
         dropHint.isHidden = true
-        guard let (id, zone, _) = target(info), let chat = info.draggingPasteboard.string(forType: .jawChat) else { return false }
+        guard let (id, zone, _) = target(info) else { return false }
+        if Self.files(info) {
+            guard Self.staging(info) else { return false }
+            droppedFiles?(info.draggingPasteboard, id)
+            return true
+        }
+        guard let chat = info.draggingPasteboard.string(forType: .jawChat) else { return false }
         dropped?(chat, id, zone)
         return true
     }

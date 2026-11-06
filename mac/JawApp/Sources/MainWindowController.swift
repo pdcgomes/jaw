@@ -77,6 +77,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         detail.panes.close = { [weak model] slot in model?.close(slot: slot) }
         detail.panes.pick = { [weak model] slot in model?.focus(slot: slot) }
         detail.panes.dropped = { [weak model] chat, slot, zone in model?.drop(chat, on: slot, zone) }
+        detail.panes.droppedFiles = { [weak model] board, slot in model?.dropFiles(board, on: slot) }
         detail.panes.paneMenu = { [weak model] slot in
             guard let model else { return nil }
             model.focus(slot: slot)

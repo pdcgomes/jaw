@@ -81,6 +81,9 @@ public struct SettingsView: View {
                 Picker("Font", selection: $preferences.font) {
                     ForEach(MessageFont.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
+                Toggle("Send photos and videos in HD", isOn: $preferences.sendHD)
+                Text("A sharper copy of each goes as well, as WhatsApp's HD sends it. Tab in the box switches what's there; ⌥ as you click Send sends HD.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
         default:

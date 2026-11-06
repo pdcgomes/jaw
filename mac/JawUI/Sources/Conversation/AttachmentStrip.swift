@@ -138,10 +138,13 @@ public final class AttachmentStrip: NSView {
 @MainActor
 public final class AttachmentTile: NSView {
     public let file: AttachedFile
-    let picture = CALayer()
+    /// The picture, a view under the rest so its × stays over it.
+    let picture = NSView()
+    /// A disc behind the × over a picture, as the pills over a message's pictures have.
+    let scrim = NSView()
     let icon = NSImageView()
     let label = Labels.make("", .caption)
-    lazy var close = IconButton(symbol: "xmark.circle.fill", label: "Take out \(file.name)", size: .small, tone: .secondary)
+    lazy var close = IconButton(symbol: "xmark.circle.fill", label: "Take out \(file.name)", size: .small, tone: .primary)
     { [weak self] in self?.removed() }
     let removed: () -> Void
     var roles: Roles? {
@@ -164,32 +167,47 @@ public final class AttachmentTile: NSView {
         wantsLayer = true
         layer?.cornerRadius = Radius.small
         layer?.masksToBounds = true
-        picture.contentsGravity = .resizeAspectFill
+        picture.wantsLayer = true
+        picture.layer?.contentsGravity = .resizeAspectFill
         picture.isHidden = true
-        layer?.addSublayer(picture)
         icon.image = NSWorkspace.shared.icon(forFile: file.url.path)
         icon.imageScaling = .scaleProportionallyUpOrDown
         label.stringValue = file.name
         label.lineBreakMode = .byTruncatingMiddle
         label.isHidden = square
-        for v in [icon, label, close] as [NSView] {
+        let disc: CGFloat = 16
+        scrim.wantsLayer = true
+        scrim.layer?.cornerRadius = disc / 2
+        scrim.isHidden = !square
+        for v in [picture, icon, label, scrim, close] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        NSLayoutConstraint.activate([
+            scrim.widthAnchor.constraint(equalToConstant: disc),
+            scrim.heightAnchor.constraint(equalToConstant: disc),
+            scrim.centerXAnchor.constraint(equalTo: close.centerXAnchor),
+            scrim.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+        ])
         let side = AttachmentStrip.side
         NSLayoutConstraint.activate([
+            picture.topAnchor.constraint(equalTo: topAnchor),
+            picture.bottomAnchor.constraint(equalTo: bottomAnchor),
+            picture.leadingAnchor.constraint(equalTo: leadingAnchor),
+            picture.trailingAnchor.constraint(equalTo: trailingAnchor),
             heightAnchor.constraint(equalToConstant: side),
             widthAnchor.constraint(equalToConstant: square ? side : 168),
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            square ? icon.centerXAnchor.constraint(equalTo: centerXAnchor) : icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            close.topAnchor.constraint(equalTo: topAnchor, constant: Space.xxs),
+            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.xxs),
+        ] + (square ? [icon.centerXAnchor.constraint(equalTo: centerXAnchor)] : [
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Space.s),
             label.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -Space.xxs),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            close.topAnchor.constraint(equalTo: topAnchor, constant: Space.xxs),
-            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.xxs),
-        ])
+        ]))
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(file.name)
@@ -201,17 +219,9 @@ public final class AttachmentTile: NSView {
     }
 
     func show(_ image: CGImage) {
-        picture.contents = image
+        picture.layer?.contents = image
         picture.isHidden = false
         icon.isHidden = true
-    }
-
-    override public func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        picture.frame = bounds
-        CATransaction.commit()
     }
 
     override public var wantsUpdateLayer: Bool {
@@ -229,6 +239,7 @@ public final class AttachmentTile: NSView {
         guard let roles else { return }
         Labels.style(label, .primary, roles: roles)
         close.roles = roles
+        scrim.layer?.backgroundColor = roles.ground.opacity(0.72).cgColor
         needsDisplay = true
     }
 }

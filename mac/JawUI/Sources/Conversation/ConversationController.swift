@@ -1339,6 +1339,17 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         composer.attach(files)
     }
 
+    /// What's dropped on the pane, into its box's strip when it's files or an image.
+    @discardableResult
+    public func attachDropped(from board: NSPasteboard) -> Bool {
+        composer.attachDropped(from: board)
+    }
+
+    /// How far a file of yours on its way in this chat has got, by its message.
+    public func sending(of message: String) -> Sending? {
+        sending[message]
+    }
+
     public func focusBox() {
         view.window?.makeFirstResponder(composer.textView)
     }

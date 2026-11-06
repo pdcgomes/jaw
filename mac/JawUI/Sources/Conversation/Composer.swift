@@ -451,7 +451,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     public func attach(_ files: [AttachedFile]) {
         guard !files.isEmpty else { return }
         if case .editing = mode {
-            Self.discard(files)
+            AttachedFile.discard(files)
             return say("files go with a new message: Esc stops editing first")
         }
         var more = attachments
@@ -459,7 +459,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         let left = more.add(files)
         attachments = more
         if left > 0 {
-            Self.discard(files.filter { !attachments.files.contains($0) })
+            AttachedFile.discard(files.filter { !attachments.files.contains($0) })
             say("\(SendMedia.filesMost) files at most at once: \(left) left out")
         }
         view.window?.makeFirstResponder(textView)
@@ -483,7 +483,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     /// The strip's × on the file at `i`.
     func takeOut(at i: Int) {
         guard attachments.files.indices.contains(i) else { return }
-        Self.discard([attachments.files[i]])
+        AttachedFile.discard([attachments.files[i]])
         attachments.remove(at: i)
     }
 
@@ -491,14 +491,6 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     func say(_ words: String) {
         said = words
         showBar()
-    }
-
-    /// Files the app wrote for a paste or a drop, gone from the strip unsent: each in a folder of its
-    /// own, which goes with it.
-    static func discard(_ files: [AttachedFile]) {
-        for file in files where file.written {
-            try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
-        }
     }
 
     /// What ⌘V brings, attached when it's files or an image; false for words, which the field pastes.
@@ -612,7 +604,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
                 return true
             }
             if !attachments.isEmpty {
-                Self.discard(attachments.files)
+                AttachedFile.discard(attachments.files)
                 attachments.removeAll()
                 return true
             }
