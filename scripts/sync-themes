@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Keeps jaw's copy of Redlamp's theme catalog in step with Redlamp's own.
+
+    scripts/sync-themes            # copy the catalog's data from Redlamp at the commit pinned below
+    scripts/sync-themes --check    # say what differs, failing if jaw's copy isn't the pinned commit's
+
+mac/JawThemes/Sources/RedlampCatalog.swift holds the data of Redlamp's catalog, its owner having
+relicensed it for jaw under jaw's MIT licence on 6 November 2026: between its `// sync-themes: <region>`
+markers, line for line as Redlamp has it, its families' ten HSL colours (`families`), the Redlamp
+family's two palettes (`redlamp`) and the brand's nine colours they're made of (`brand`). Redlamp's
+repository is private, so this reads a checkout of it, ~/src/darkroom or the folder REDLAMP names, with
+`git show` at REDLAMP_COMMIT, never checking anything out, fetching or writing there; with no checkout,
+as in CI, it says so and checks nothing. --check also says what the checkout's own main has changed in
+those files since the pinned commit, Neutral's tokens in Tokens/Palette.swift among them, which jaw's
+RedlampRoles.neutral is written from by hand. To move to a newer Redlamp, change REDLAMP_COMMIT, run
+this and look at what changed: a family added or gone changes the gallery and the tests that list
+Redlamp's families.
+"""
+
+import argparse
+import difflib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+REDLAMP_COMMIT = "9fa9d915540782ce600ee6e4854dc3f2ccd15250"
+ROOT = Path(__file__).resolve().parent.parent
+COPY = ROOT / "mac" / "JawThemes" / "Sources" / "RedlampCatalog.swift"
+CATALOG = "packages/RedlampDesign/Sources/Themes/ThemeCatalog.swift"
+BRAND = "packages/RedlampDesign/Sources/Tokens/Brand.swift"
+PALETTE = "packages/RedlampDesign/Sources/Tokens/Palette.swift"
+REGIONS = ("families", "redlamp", "brand")
+MARKED = r"(^[ ]*// sync-themes: {}\n)(.*?)(^[ ]*// sync-themes: end$)"
+
+
+def checkout() -> Path:
+    return Path(os.environ.get("REDLAMP") or Path.home() / "src" / "darkroom")
+
+
+def show(where: Path, rev: str, path: str) -> str:
+    """A file of Redlamp's at `rev`, read without touching the checkout; a checkout without `rev`
+    stops this, saying what to fetch there, which this never does itself."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(where), "show", f"{rev}:{path}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        ).stdout
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"sync-themes: {where} has no {path} at {rev}, so fetch {rev} there first ({e.stderr.strip()})")
+
+
+def families(catalog: str) -> list[str]:
+    """The families' lines, from omoi-station's classic palettes to the last of its originals."""
+    lines = catalog.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == "// omoi-station classic palettes"), None)
+    end = next(
+        (i for i, line in enumerate(lines) if start is not None and i > start and line.strip() == "// swiftlint:enable line_length"),
+        None,
+    )
+    if start is None or end is None:
+        sys.exit("sync-themes: Redlamp's catalog doesn't have its families where it did")
+    return lines[start:end]
+
+
+def palettes(catalog: str) -> list[str]:
+    """The Redlamp family's two palettes, as written, with a blank line between them."""
+    blocks = re.findall(r"^    static let redlamp(?:Dark|Light) = ThemePalette\(\n.*?^    \)$", catalog, re.S | re.M)
+    if len(blocks) != 2:
+        sys.exit("sync-themes: Redlamp's catalog doesn't have the Redlamp family's two palettes where it did")
+    return "\n\n".join(blocks).splitlines()
+
+
+def brand(text: str) -> list[str]:
+    """The brand's colours, one line each, as jaw's copy nests them."""
+    return [f"        static let {name} = {value}" for name, value in re.findall(r"static let (\w+) = (RGBA\(red: [^)]*\))", text)]
+
+
+def neutral(palette: str) -> Optional[str]:
+    """Redlamp's standard tokens, dark and light, which Neutral is; None where they aren't written as
+    they were, so a reshaped Palette.swift isn't read as Neutral unchanged."""
+    found = re.search(
+        r"public static let standard = PaletteTokens\(.*?\n    \)\n\n.*?public static let standardLight = PaletteTokens\(.*?\n    \)",
+        palette,
+        re.S,
+    )
+    return found.group(0) if found else None
+
+
+def wanted(where: Path, rev: str) -> dict[str, list[str]]:
+    catalog = show(where, rev, CATALOG)
+    return {"families": families(catalog), "redlamp": palettes(catalog), "brand": brand(show(where, rev, BRAND))}
+
+
+def present(copy: str) -> dict[str, list[str]]:
+    out = {}
+    for name in REGIONS:
+        found = re.search(MARKED.format(name), copy, re.S | re.M)
+        if not found:
+            sys.exit(f"sync-themes: {COPY.relative_to(ROOT)} has no `// sync-themes: {name}` region")
+        out[name] = found.group(2).rstrip("\n").splitlines()
+    return out
+
+
+def written(copy: str, regions: dict[str, list[str]]) -> str:
+    for name, lines in regions.items():
+        copy = re.sub(
+            MARKED.format(name),
+            lambda m, lines=lines: m.group(1) + "\n".join(lines) + "\n" + m.group(3),
+            copy,
+            count=1,
+            flags=re.S | re.M,
+        )
+    return copy
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="say what differs; fail if jaw's copy isn't the pinned commit's")
+    args = parser.parse_args()
+    where = checkout()
+    if not (where / ".git").exists():
+        print(f"sync-themes: no checkout of Redlamp at {where}, so nothing is checked (REDLAMP names another)")
+        return
+    pinned = wanted(where, REDLAMP_COMMIT)
+    copy = COPY.read_text()
+    if not args.check:
+        COPY.write_text(written(copy, pinned))
+        print(f"sync-themes: {COPY.relative_to(ROOT)} has Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
+        return
+    have = present(copy)
+    differs = [name for name in REGIONS if have[name] != pinned[name]]
+    for name in differs:
+        print(f"sync-themes: {name} differs from Redlamp's at {REDLAMP_COMMIT[:9]}:")
+        sys.stdout.writelines(difflib.unified_diff([l + "\n" for l in pinned[name]], [l + "\n" for l in have[name]], "redlamp", "jaw"))
+    moved = wanted(where, "main")
+    for name in REGIONS:
+        if moved[name] != pinned[name]:
+            print(f"sync-themes: Redlamp's main has changed {name} since {REDLAMP_COMMIT[:9]}: move REDLAMP_COMMIT to take it")
+    now, then = neutral(show(where, "main", PALETTE)), neutral(show(where, REDLAMP_COMMIT, PALETTE))
+    if now is None or then is None:
+        print("sync-themes: Neutral's tokens aren't written in Redlamp's Tokens/Palette.swift as they were: look at RedlampRoles.neutral")
+    elif now != then:
+        print(f"sync-themes: Redlamp's main has changed Neutral's tokens since {REDLAMP_COMMIT[:9]}: look at RedlampRoles.neutral")
+    if not differs:
+        print(f"sync-themes: jaw's copy is Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
+    sys.exit(1 if differs else 0)
+
+
+if __name__ == "__main__":
+    main()
