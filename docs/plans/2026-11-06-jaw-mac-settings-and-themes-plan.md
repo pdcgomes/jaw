@@ -1,0 +1,3804 @@
+# Settings and themes on the Mac (the design of 6 November)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** [The Mac's Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md), settled with the owner on 6 November, built: Settings leaves its sheet for a window of its own whose panes are icon tabs in its toolbar, as Redlamp's are, opened with ⌘, and with no Done; and the Appearance pane gets a slot for dark and one for light, filled from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd's `themes` and Redlamp's 22 families, each drawn as a small chat in its colours. Omarchy's are mapped onto the Mac's roles as `crates/jaw/src/theme.rs` maps them onto the terminal's and held readable on both grounds the Mac draws on; Redlamp's are copied into jaw, relicensed by their owner under jaw's MIT, kept in step by `scripts/sync-themes` and held by the same bands; and the slots' themes' colours are remembered, so the first frame never waits on jawd.
+
+**Architecture:** JawThemes gains the theme model, free of AppKit and tested on its own: `Contrast`, `theme.rs`'s rule ported as it is onto `0xRRGGBB` colours, so the Mac lands on the terminal's; `Omarchy`, which maps a theme's colours by Omarchy's keys and reads a `colors.toml` as jaw-proto does; Redlamp's catalog, copied (`RedlampCatalog.swift`) and mapped (`RedlampRoles`); and `Theme`, `Slot`, `Slots`, `OmarchyTheme` and `SystemAccent`, with the catalog's list of every theme and the roles a slot draws. JawKit asks `themes` once a connection and hands the answer up as `JawUpdate.themes`. JawUI's `Preferences` keeps the slots, jawd's themes and the remembered copies, and works out the roles the app draws in; `SettingsTabs`, an `NSTabViewController` in its toolbar style, hosts the three SwiftUI panes; and the Appearance pane draws the slots and the gallery from `ThemeCard`s. The app keeps only `SettingsWindowController` and the wiring: ⌘, and the palette's Choose a theme, asking jawd on each hello, and the bench's `--keys settings`.
+
+**Tech Stack:** Swift 6 (AppKit, SwiftUI, Swift Testing), Tuist, xcodebuild on the build Mac through `mac/scripts/build-mac`; Python 3 and git for `scripts/sync-themes`.
+
+## Global Constraints
+
+- The spec is the design, `docs/plans/2026-11-06-jaw-mac-settings-and-themes-design.md`, with the owner's answers of 6 November marked "Owner, 6 Nov" there and the Defaults he left as they are; the wireframes canvas (`mac-settings-themes-wireframes.canvas.tsx` in the project's canvases) draws it. Where this plan and the design differ, the design wins, except where the Decisions below say this plan departs from it on purpose: stop and say so.
+- The branch is `mac-settings-themes`, in its own worktree, `/Users/pedrogomes/src/jaw-mac-settings`, made from main at d4ca8bca; it holds the design, the owner's answers and this plan. Work only there. origin/main has moved since, to 25375008, whose one commit changes `mac/JawHarness/Sources/Fixtures/Screens.swift`, the Three panes band of `ScreenScenes.swift` and `GridView`: none of it what this plan changes but `ScreenScenes.swift`'s lines. Before Task 1, and again before the final report, run `git fetch origin && git log --oneline HEAD..origin/main`; if main has moved, rebase (`git rebase origin/main`), which carries this branch's commits over unchanged. Line numbers below are d4ca8bca's: once rebased, find each place by the symbol or the text quoted.
+- Never push, never pass `--no-verify`, never rewrite commits that aren't yours. Never edit, build in, check out in, or run a git command that changes anything in another agent's worktree or in the owner's checkout, `/Users/pedrogomes/src/jaw`; only read them. Redlamp's checkout, `/Users/pedrogomes/src/darkroom`, is read only: `scripts/sync-themes` reads it with `git show` and `GIT_OPTIONAL_LOCKS=0`, never checks anything out and never fetches, and nothing else runs a command there.
+- Build and test only on the build Mac with `mac/scripts/build-mac`: `test JawKit`, `test JawThemes`, `test JawUITests`, `test JawHarnessTests`, `build` (the `jaw` app), `shot` and `sweep` (the harness's pictures), `snapshot` (the app's picture, `--demo` on a folder of its own there, which it removes) and `references` (the reference pictures the tests wrote there, copied back here). `mac/scripts/check` exits 1 when a build or the tests fail, so both a run's exit status and its printed `** BUILD SUCCEEDED **` / `** TEST SUCCEEDED **` and `Test run with …` lines count. For the whole log: `ssh -o BatchMode=yes build-mac 'tail -150 ~/src/build-mac/jaw/jaw-mac-settings/mac/build/check.log'`. Before each run, check that the build Mac answers: `ssh -o BatchMode=yes -o ConnectTimeout=5 build-mac true`. If it doesn't, or `build-mac` prints `doesn't answer; running here` and falls back to building on this Mac, stop (interrupt the run you started) and ask the controller. Never build or test on this Mac.
+- Never build Rust or Go. JawKit's live tests need `target/debug/jawd` in this worktree, which `build-mac` copies to the build Mac with the checkout: it's there, jawd at 660701c5, which serves `themes`. Leave it as it is.
+- Never run jawd, the Go engine or the app on this Mac, and nothing here names `~/Library/Application Support/jaw`. On the build Mac, jawd runs only in JawKit's live tests (`--engine demo`, each in a folder of its own) and in `snapshot`'s `--demo`; the Go engine never runs anywhere. Never stop a process by name.
+- Swift 6 language mode, macOS 26, warnings are errors. `mac/scripts/check-components`, which every build runs, refuses a font, a corner radius or a line width set by hand outside `JawUI/Sources/Components`: the code here takes them from `TextStyle`, `Space`, `Radius` and `Stroke`, and uses SwiftUI's semantic fonts and colours (`.callout`, `.secondary`, `Color.accentColor`) only where the system's own look is meant. `mac/scripts/check-harness` refuses a view or a view controller defined in the app target, which is why `SettingsTabs` is JawUI's, and `Jawd` or `Client` named in the harness.
+- Every commit passes `make check-parity`. The Mac sending `themes`, which the terminal never sends (it reads Omarchy's themes from jaw-proto), is no gap; `mac/parity.toml`'s rows for step 3.5, `settings.set` and the `settings` push, stay, since they're its other half, the settings jawd keeps, which comes after this.
+- No audit: nothing here is on jaw's data paths. `scripts/check-data-audit.py`'s `DATA_PATHS` name paths under `crates/`, `engine/` and `proto/engine/` and none under `mac/`, `scripts/`, `protocol/` or `docs/`, which is everything this plan changes; the app never opens jaw.db, and `themes` only reads what jawd serves. `make check-audit` passes on every commit, as there's nothing for it to find.
+- Commit messages are one long sentence in the project's voice (read `git log -5`), with no prefixes, each with the trailer `Co-authored-by: Cursor <cursoragent@cursor.com>`, as `git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>"` writes it. Code matches its surroundings: doc comments in plain sentences, British spelling, no comments that narrate a change, 4-space indentation, and trailing commas in multi-line argument lists.
+- Scratch goes in the worktree's ignored `mac/build/settings/` (pictures to look at with the Read tool) and the build Mac's copy of the checkout. Before the final report, run `rm -rf mac/build/settings` and `make prune-builds`. Once the branch has landed and its worktree is removed, its copy on the build Mac goes too: `ssh -o BatchMode=yes build-mac 'rm -rf ~/src/build-mac/jaw/jaw-mac-settings'`.
+- **Overlaps.** Three open Mac branches touch files this plan changes: `mac-menus` (AppModel, Bench, Commands, MainWindowController, the harness), `mac-panes` (AppModel and JawKit's `Incoming.swift` and `Jawd.swift`) and `mac-perf` (AppModel, Bench, MainWindowController, `Jawd.swift`, the Mac README). None has had a commit since 31 October. If one lands first, rebase and keep both sides: their cases beside this plan's in `Expect`, `Reply`, `Asked`, `JawUpdate` and `AppModel.apply`, their steps beside `settings:` in `Bench.press`; then run every test again and `make check-parity`.
+
+## Decisions
+
+The design's decisions hold: the owner's of 6 November and its Defaults he left as they are ("Decisions" there). These are this plan's own, where the design leaves the how to it; four depart from the design on purpose, each saying where and why: `ThemeFamily` kept beside `Theme`, the harness's pictures not compared with references, the budgets measured after this plan, and the board left to the parity workstream.
+
+- **The window comes first** (the plan's). It answers the owner's first words on its own ("the done button and the top segmented controls are not looking great"), and every later task changes only the Appearance pane inside it. Until Task 6 brings the gallery, the pane chooses with menus: the one theme menu there is now (Task 1), then a menu for each slot (Tasks 4 and 5), which Task 6 replaces.
+- **`ThemeFamily` and `Catalog.jaw` stay as they are** (the plan's). The design has `Theme` take `ThemeFamily`'s place; about thirty places, nearly all tests, read `Catalog.jaw.dark`, `.light` and `.roles(dark:)`, so `Theme` comes beside it instead, and `Catalog.jawTheme` is Jaw's Tokyo Night as a `Theme`. `Catalog.families` and `Catalog.family(_:)` stay for the harness until Task 7 moves it to every theme.
+- **`SettingsTabs` is JawUI's** (the plan's). An `NSTabViewController` subclass is a view controller, which `check-harness` keeps out of the app target, and it needs one: to size the window as its tab is chosen and title it. The app keeps `SettingsWindowController`, a window controller, which the check allows. Its `transitionOptions` are none, so a tab shows at once while the window's frame moves.
+- **⌘W closes Settings** (the plan's). The design closes it with ⌘W, which jaw's menu bar gives to Close Pane, the main window's, enabled while there are several panes. `SettingsWindow`, JawUI's, takes ⌘W before the menu bar does, as AppKit offers a key equivalent to the key window first, and closes; ⇧⌘W stays the menu's Close Window.
+- **Each pane has a fixed size, and the window takes it from its content view** (the plan's). Appearance is 500 by 640 points (180 with Task 1's one menu and 230 with Task 4's two, until Task 6 gives it the gallery), Messages 500 by 260 and Panes 500 by 220, as the design has them, each the pane's `preferredContentSize` with the hosting controller's own sizing off. Choosing a tab grows or shrinks the window by the difference between its content view and the pane, keeping its top edge, which holds whatever height the toolbar has. A form taller than its pane scrolls, as a grouped form does; if the snapshots show one cut, raise its height in `SettingsPane.size`.
+- **The cards take the grouped form's width** (the plan's). The design's 144 points is three across 460; a grouped form's insets leave about 440 in a 500-point window, so the gallery's grid has three flexible columns, each about 136 points, and a card is as wide as its column and 104 points tall. The reference pictures draw them 144 wide, three across, as the design does.
+- **Colours by Omarchy's keys, in two types** (the plan's). JawKit and JawThemes don't depend on each other, so JawKit decodes `themes` into its own `ServedTheme` (`id`, `name`, `mode`, `colors` as `[String: String]`), mirroring jaw-proto, and the app hands each to JawThemes as an `OmarchyTheme` (`id`, `name`, `dark`, `colours`). Both keep the colours as jawd sends them, `#rrggbb` by key, which is also how the app remembers them and how `Omarchy.file` reads a `colors.toml`.
+- **The slots' Omarchy themes remembered as dictionaries** (the plan's). `themeDarkColours` and `themeLightColours` each hold that theme's colours by Omarchy's keys, with its ID under `id` and its name under `name`, which no colour's key is, so `defaults read dev.badcoffee.jaw` shows them as they are. A copy is read only while its slot holds its ID, written each time jawd serves the slot's theme, and dropped when jawd serves themes without it, so the next launch draws what this one does from its first frame.
+- **What the app draws is worked out once until something it rests on changes** (the plan's). `Preferences` keeps each appearance's roles and the list of every theme until the slots, jawd's themes or the system's accent change, since `AppModel.style` is read on every layout. The system's accent is read in both appearances (`SystemAccent`), for Neutral's two halves, and again when AppKit says the system's colours changed (`NSColor.systemColorsDidChangeNotification`), which the app now listens for beside the appearance's.
+- **What the Omarchy section says** (the plan's). `OmarchyState` adds `asking`, from hello to jawd's answer, which jawd gives at once, and covers the app still connecting: neither says anything, so the section never says jawd isn't answering while it is. A jawd the app couldn't start is said as one that isn't answering, and a refusal other than an unknown method in jawd's words. A theme jawd served stays served after jawd goes away, as its answer still holds.
+- **Neutral's colours** (the plan's). Its mention, online and failed colours are the system's orange, green and red as macOS draws them in each appearance (`#FF9F0A`, `#30D158` and `#FF453A` dark; `#FF9500`, `#34C759` and `#FF3B30` light), held as a family's are; its separator is Redlamp's divider as authored, white at 7% or black at 9%, as every family's border is as authored.
+- **`scripts/sync-themes` reads three regions** (the plan's): the families' lines, from `// omoi-station classic palettes` to the last of its originals; the Redlamp family's two palettes; and the brand's nine colours they're made of. jaw's copy holds each between `// sync-themes: <region>` and `// sync-themes: end`, line for line as Redlamp has it, so the comparison is of text. `--check` also says when Redlamp's checkout's own `main` has changed those files since the pinned commit, Neutral's tokens in `Tokens/Palette.swift` included, which `RedlampRoles.neutral` is written from by hand. With no checkout, as in CI, it says so and passes.
+- **Pictures** (the plan's). JawUITests compare two reference pictures, `theme-gallery-dark` and `theme-gallery-light`, every theme's card for each slot, so a change to any mapping shows. The design has the harness's scenes compared with references too; this plan has the harness draw the panes, the galleries and their states for review (`shot`, `sweep`) and test them as its other scenes are tested (as wide as they say, with notes, the same picture twice), not against references, since the panes are the system's controls in the system's accent, which a reference would pin to one build Mac's macOS and accent. The app's `--snapshot` with `--keys settings:<pane>` pictures the window with its toolbar, which only AppKit draws, to look at.
+- **The budgets are measured after this plan** (the plan's). The design's Testing asks for `--bench launch` within its 250 ms p99 with `themes` asked and `--bench idle` with Settings open. `build-mac` has no bench step, and these constraints keep jawd on the build Mac to the live tests and `snapshot`'s `--demo`, so the final report leaves both to the controller, measured as `mac/README.md`'s are, with a Release build on the build Mac. What holds them meanwhile: `themes` is asked in `.hello`, after the first frame, and answered at once; the roles are worked out once until something they rest on changes; and an open Settings draws only when what it observes changes.
+- **Settings isn't over the window any more** (the plan's). The harness's With overlays scene loses its Settings band, and `ScreenSpecimen.Overlay` its `settings`, as Task 1 makes Settings a window of its own; Task 7 gives the harness a Settings section with scenes of their own. The harness draws Neutral in macOS's own blue (`SystemAccent.blue`), so its pictures don't depend on the build Mac's accent.
+- **The palette's Choose a theme has no key and no menu** (the plan's), as the terminal's palette offers Change the theme: it opens Settings on Appearance.
+- **The arrows in the gallery** (the plan's): ← and → go to the theme before or after in the gallery's order, across its sections; ↑ and ↓ three before or after, a row of three; past either end nothing moves.
+- **What a slot's tile says when it draws Tokyo Night** (the plan's). The design words one case, "Gruvbox isn't among jawd's themes", once jawd has served its themes; before it has, with no copy, the tile says "Gruvbox, once jawd serves it"; a theme without the slot's half, "Tokyo Night, as Gruvbox has no light half"; and an ID no source has, "Tokyo Night, as no source has <id>". A card is ticked when it's the theme of the slot chosen for, and a card under the pointer is ringed in the secondary label colour.
+- **The slot the gallery chooses for is `Preferences.choosing`** (the plan's): not kept, nil for the slot in use, and set back to nil each time Settings opens, so the pane opens on the slot in use and the harness can draw either gallery.
+- **The parity canvas's words, not the board** (the plan's). The design's list of docs names the parity canvas's Themes and Settings rows and the board's steps 3.5 and 4.3. The board (`ws-mac-parity.canvas.tsx`) and the canvas's states are kept by the parity workstream, which rewrites them as main moves, so Task 8 changes only the words of the canvas's two Mac cells, saying what's on this branch, and leaves their states and the board for that workstream to move when this lands.
+
+## File structure
+
+New:
+
+- `mac/JawUI/Sources/Settings/SettingsPane.swift`: Settings' panes, each its name, its SF Symbol and its size.
+- `mac/JawUI/Sources/Settings/SettingsTabs.swift`: the panes as the toolbar's icon tabs, the window sized and titled as a tab is chosen.
+- `mac/JawUI/Sources/Settings/Panes.swift`: the Appearance, Messages and Panes forms.
+- `mac/JawUI/Sources/Settings/ThemeCard.swift`: a theme's half as a small chat, and a card with its name in the gallery (Task 6).
+- `mac/JawUI/Sources/Settings/Gallery.swift`: the gallery's sections for a slot, where the arrows go, and what a slot's tile says (Task 6).
+- `mac/JawUI/Sources/Settings/OmarchyState.swift`: what the Omarchy section says while jawd's themes aren't in (Task 5).
+- `mac/JawApp/Sources/SettingsWindowController.swift`: the window: closable, in the app's appearance, on the pane last shown, where it was left.
+- `mac/JawThemes/Sources/Contrast.swift`: WCAG's contrast and `theme.rs`'s straight line, on `0xRRGGBB`.
+- `mac/JawThemes/Sources/Omarchy.swift`: Omarchy's themes mapped onto the Mac's roles; a `colors.toml` read.
+- `mac/JawThemes/Sources/RedlampCatalog.swift`: Redlamp's catalog, copied, under jaw's MIT by its owner.
+- `mac/JawThemes/Sources/RedlampRoles.swift`: jaw's roles from Redlamp's ten colours, and Neutral's.
+- `mac/JawThemes/Sources/Theme.swift`: a theme to choose, its source and its slot, Omarchy's as jawd serves them, the system's accent, the catalog's list and a slot's roles.
+- `mac/JawThemes/Sources/Slots.swift`: the theme in each slot, and how a choice fills them.
+- `mac/JawKit/Sources/Protocol/Themes.swift`: `themes`' answer.
+- `mac/JawHarness/Sources/Fixtures/Themes.swift`: every theme, Omarchy's read from the harness's bundle (Task 7).
+- `mac/JawHarness/Sources/Scenes/SettingsScenes.swift`: the panes, the galleries and their states (Task 7).
+- `scripts/sync-themes`: jaw's copy of Redlamp's catalog kept in step.
+- Tests: `mac/Tests/JawUITests/SettingsTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`, `mac/Tests/JawUITests/GalleryTests.swift`, `mac/Tests/JawThemesTests/OmarchyTests.swift`, `mac/Tests/JawThemesTests/RedlampTests.swift`, `mac/Tests/JawThemesTests/ThemeTests.swift`, and the reference pictures `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png`.
+
+Changed:
+
+- `mac/JawThemes/Sources/Roles.swift`: `link` (Task 2); `Catalog.families` and `Catalog.family(_:)` go (Task 7).
+- `mac/JawUI/Sources/Style/Preferences.swift`: the slots, jawd's themes, the remembered copies, the system's accent, and the roles worked out once (Tasks 4 and 5).
+- `mac/JawUI/Sources/Layout/MessageLayout.swift`, `mac/JawUI/Sources/Components/Glyphs.swift`, `mac/JawUI/Sources/Library/LibraryDrawing.swift`: links and read ticks in `link` (Task 2).
+- `mac/JawKit/Sources/Client/Incoming.swift`, `mac/JawKit/Sources/Client/Jawd.swift`: `themes` (Task 5).
+- `mac/JawApp/Sources/AppModel.swift`, `Commands.swift`, `MainWindowController.swift`, `Bench.swift`, `AppDelegate.swift`: the window, Choose a theme, `--keys settings:<pane>`, asking for `themes`, the system's colours.
+- `mac/JawHarness/Sources/Specimen.swift`, `Scenes/ScreenScenes.swift` (Task 1); `HarnessScene.swift`, `HarnessLaunch.swift`, `ConditionsControls.swift`, `BuiltInScenes.swift`, `Scenes/FoundationScenes.swift` (Tasks 2 and 7); `mac/Project.swift`, the harness's resources (Task 7).
+- Tests: `mac/Tests/JawThemesTests/RolesTests.swift`, `mac/Tests/JawKitTests/FixtureTests.swift`, `ClientTests.swift`, `LiveTests.swift`, `mac/Tests/JawUITests/LinkPreviewTests.swift`, `mac/Tests/JawUITests/SettingsTests.swift` (Task 4), `mac/Tests/JawHarnessTests/ScenesTests.swift`, `LaunchTests.swift`, `CatalogTests.swift`.
+- Docs (Task 8): `docs/plans/2026-10-26-jaw-mac-design.md`, `docs/plans/2026-10-26-jaw-mac-plan.md`, `docs/plans/2026-10-27-jaw-mac-parity-plan.md`, `mac/README.md`.
+
+Deleted: `mac/JawUI/Sources/Settings/SettingsView.swift` (Task 1).
+
+Scratch, never committed: `mac/build/settings/`, the pictures each task looks at.
+
+---
+
+### Task 1: Settings in a window of its own, its panes the toolbar's icon tabs
+
+**Files:**
+- Create: `mac/JawUI/Sources/Settings/SettingsPane.swift`, `mac/JawUI/Sources/Settings/SettingsTabs.swift`, `mac/JawUI/Sources/Settings/Panes.swift`, `mac/JawApp/Sources/SettingsWindowController.swift`
+- Delete: `mac/JawUI/Sources/Settings/SettingsView.swift`
+- Modify: `mac/JawApp/Sources/AppModel.swift` (after `let glance = Glance()` at line 60, `restyle()` at 330, after `say(_:warn:)` at 324-328), `mac/JawApp/Sources/Commands.swift` (lines 19-20), `mac/JawApp/Sources/MainWindowController.swift` (line 36 and `showSettings()` at 368-379), `mac/JawApp/Sources/Bench.swift` (lines 112, 142 and 486-487), `mac/JawHarness/Sources/Specimen.swift` (`ScreenSpecimen` at 70-96, `SettingsOver` at 146-182), `mac/JawHarness/Sources/Scenes/ScreenScenes.swift` (`screensOverlays` at 93-101, `OverlaysScene`'s comment at 329-330 and its Settings band at 351-355)
+- Test: `mac/Tests/JawUITests/SettingsTests.swift`
+
+**Interfaces:**
+- Consumes: JawUI's `Preferences` as it is (`appearance`, `theme`, `look`, `density`, `textSize`, `font`, `paneDim`, `paneOutline`, `paneOutlineColour`, `style(dark:)`, `nsAppearance`), and `Motion.reduced`.
+- Produces, in JawUI:
+  - `public enum SettingsPane: String, CaseIterable, Sendable`: `.appearance`, `.messages`, `.panes`, each with `title: String`, `symbol: String` and `size: NSSize`.
+  - `@MainActor public final class SettingsTabs: NSTabViewController`, with `public init(preferences: Preferences, showing pane: SettingsPane)`, `public var chose: (SettingsPane) -> Void`, `public var pane: SettingsPane`, `public func show(_ pane: SettingsPane)` and `public func fit(_ pane: SettingsPane, animated: Bool)`.
+  - `public final class SettingsWindow: NSWindow`, which closes on ⌘W.
+  - `public struct AppearancePane: View`, `public struct MessagesPane: View` and `public struct PanesPane: View`, each with `public init(preferences: Preferences)`.
+  - `extension RGBA { init(_ colour: NSColor) }`, internal, moved from `SettingsView.swift`.
+- Produces, in the app: `SettingsWindowController(preferences:keeps:)` with `show(_ pane: SettingsPane?, over main: NSWindow?)`; `AppModel.settings: SettingsWindowController?` and `AppModel.showSettings(_ pane: SettingsPane? = nil)`; the palette's `theme` command, Choose a theme; and the bench's `--keys` steps `settings` and `settings:<pane>`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawUITests/SettingsTests.swift`:
+
+```swift
+import AppKit
+import JawThemes
+@testable import JawUI
+import Testing
+
+/// Settings as a window of its own: its panes the toolbar's icon tabs, in order, each its name over
+/// its symbol, the window taking each pane's size as its tab is chosen, keeping its top edge, and ⌘W
+/// closing it.
+
+/// A `Preferences` on defaults of the test's own, emptied first, so it starts from the app's defaults.
+@MainActor
+func scratchPreferences(_ name: String) throws -> Preferences {
+    let suite = "jaw.tests.\(name)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    return Preferences(defaults: defaults)
+}
+
+@MainActor @Test func `Settings' panes are the toolbar's icon tabs, each its name over its symbol, in the toolbar's order`() throws {
+    let tabs = SettingsTabs(preferences: try scratchPreferences("settings-tabs"), showing: .messages)
+    #expect(tabs.tabStyle == .toolbar)
+    #expect(tabs.tabViewItems.map(\.label) == ["Appearance", "Messages", "Panes"])
+    #expect(tabs.tabViewItems.map { $0.identifier as? String } == ["appearance", "messages", "panes"])
+    #expect(tabs.tabViewItems.map { $0.image?.accessibilityDescription } == ["Appearance", "Messages", "Panes"],
+            "each its SF Symbol, named for VoiceOver")
+    #expect(SettingsPane.allCases.map(\.symbol) == ["paintpalette", "text.bubble", "rectangle.split.2x1"])
+    #expect(SettingsPane.allCases.allSatisfy { $0.size.width == 500 }, "500 points wide, as Redlamp's")
+    #expect(tabs.pane == .messages, "it opens on the pane it's asked to")
+}
+
+@MainActor @Test func `choosing a pane sizes the window to it, keeping its top edge, titles the window and says which`() throws {
+    let tabs = SettingsTabs(preferences: try scratchPreferences("settings-fit"), showing: .appearance)
+    let window = NSWindow(contentViewController: tabs)
+    window.styleMask = [.titled, .closable]
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    tabs.fit(.appearance, animated: false)
+    #expect(window.contentView?.frame.size == SettingsPane.appearance.size)
+    let top = window.frame.maxY
+    var chosen: [SettingsPane] = []
+    tabs.chose = { chosen.append($0) }
+    for pane in [SettingsPane.panes, .messages, .appearance] {
+        tabs.show(pane)
+        #expect(window.contentView?.frame.size == pane.size, "\(pane)")
+        #expect(window.frame.maxY == top, "\(pane): its top edge stays where it was")
+        #expect(window.title == pane.title, "\(pane)")
+    }
+    #expect(chosen == [.panes, .messages, .appearance] && tabs.pane == .appearance)
+}
+
+@MainActor @Test func `⌘W closes Settings' window before the menu bar's Close Pane, the main window's, can take it`() throws {
+    let window = SettingsWindow(contentViewController: SettingsTabs(preferences: try scratchPreferences("settings-close"), showing: .panes))
+    window.styleMask = [.titled, .closable]
+    window.isReleasedWhenClosed = false
+    window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+    window.orderFront(nil)
+    defer { window.close() }
+    func key(_ characters: String, _ modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
+        try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                                      windowNumber: window.windowNumber, context: nil, characters: characters,
+                                      charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 13))
+    }
+    #expect(!window.performKeyEquivalent(with: try key("w", [.command, .shift])) && window.isVisible, "⇧⌘W is the menu's Close Window")
+    #expect(window.performKeyEquivalent(with: try key("w", .command)))
+    #expect(!window.isVisible)
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, with `error: cannot find 'SettingsTabs' in scope` from `SettingsTests.swift`.
+
+- [ ] **Step 3: Write the panes and their tabs**
+
+Create `mac/JawUI/Sources/Settings/SettingsPane.swift`:
+
+```swift
+import AppKit
+
+/// Settings' panes, in the toolbar's order: each its name, the SF Symbol its tab shows over it, and
+/// its size, 500 points wide as Redlamp's are and as tall as its form, which the window takes as its
+/// tab is chosen.
+public enum SettingsPane: String, CaseIterable, Sendable {
+    case appearance, messages, panes
+
+    public var title: String {
+        switch self {
+        case .appearance: "Appearance"
+        case .messages: "Messages"
+        case .panes: "Panes"
+        }
+    }
+
+    /// Appearance's is Redlamp's; Panes' is Split Across's, in the Panes menu.
+    public var symbol: String {
+        switch self {
+        case .appearance: "paintpalette"
+        case .messages: "text.bubble"
+        case .panes: "rectangle.split.2x1"
+        }
+    }
+
+    public var size: NSSize {
+        switch self {
+        case .appearance: NSSize(width: 500, height: 180)
+        case .messages: NSSize(width: 500, height: 260)
+        case .panes: NSSize(width: 500, height: 220)
+        }
+    }
+}
+```
+
+Create `mac/JawUI/Sources/Settings/SettingsTabs.swift`:
+
+```swift
+import AppKit
+import SwiftUI
+
+/// Settings' panes as the Mac's own Settings windows show them: each an icon over its name in the
+/// window's toolbar, its SwiftUI form hosted at its pane's size, and the window taking that size as
+/// its tab is chosen, keeping its top edge where it is. Every change in a pane is kept as it's made,
+/// so there's nothing to confirm.
+@MainActor
+public final class SettingsTabs: NSTabViewController {
+    /// Told each pane chosen, so the next Settings opens on it.
+    public var chose: (SettingsPane) -> Void = { _ in }
+
+    public init(preferences: Preferences, showing pane: SettingsPane) {
+        super.init(nibName: nil, bundle: nil)
+        tabStyle = .toolbar
+        transitionOptions = []
+        for each in SettingsPane.allCases {
+            let host = NSHostingController(rootView: Self.form(each, preferences))
+            host.sizingOptions = []
+            host.preferredContentSize = each.size
+            host.title = each.title
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = each.rawValue
+            item.label = each.title
+            item.image = NSImage(systemSymbolName: each.symbol, accessibilityDescription: each.title)
+            addTabViewItem(item)
+        }
+        show(pane)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// The pane on show.
+    public var pane: SettingsPane {
+        SettingsPane.allCases[max(selectedTabViewItemIndex, 0)]
+    }
+
+    /// Shows `pane`, as a click on its tab does.
+    public func show(_ pane: SettingsPane) {
+        selectedTabViewItemIndex = SettingsPane.allCases.firstIndex(of: pane) ?? 0
+    }
+
+    override public func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        guard let pane = (tabViewItem?.identifier as? String).flatMap(SettingsPane.init(rawValue:)) else { return }
+        view.window?.title = pane.title
+        fit(pane, animated: view.window?.isVisible == true)
+        chose(pane)
+    }
+
+    /// Sizes the window so its content is `pane`'s size, keeping the window's top edge where it is,
+    /// whatever height its title bar and toolbar have.
+    public func fit(_ pane: SettingsPane, animated: Bool) {
+        guard let window = view.window, let content = window.contentView else { return }
+        var frame = window.frame
+        let taller = pane.size.height - content.frame.height
+        frame.origin.y -= taller
+        frame.size.height += taller
+        frame.size.width += pane.size.width - content.frame.width
+        window.setFrame(frame, display: true, animate: animated && !Motion.reduced())
+    }
+
+    static func form(_ pane: SettingsPane, _ preferences: Preferences) -> AnyView {
+        switch pane {
+        case .appearance: AnyView(AppearancePane(preferences: preferences))
+        case .messages: AnyView(MessagesPane(preferences: preferences))
+        case .panes: AnyView(PanesPane(preferences: preferences))
+        }
+    }
+}
+
+/// Settings' window, which ⌘W closes, as it closes a window elsewhere. jaw's ⌘W is the menu bar's
+/// Close Pane, the main window's, and AppKit offers a key equivalent to the key window before the
+/// menu bar, so this takes it first.
+public final class SettingsWindow: NSWindow {
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.charactersIgnoringModifiers == "w" {
+            performClose(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+```
+
+Create `mac/JawUI/Sources/Settings/Panes.swift`, the three forms as the sheet had them, each a grouped form at its pane's size, its explanation its section's footer:
+
+```swift
+import AppKit
+import JawThemes
+import SwiftUI
+
+/// Settings › Appearance: dark, light or the system's, and the theme.
+public struct AppearancePane: View {
+    @Bindable var preferences: Preferences
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    public var body: some View {
+        Form {
+            Section {
+                Picker("Appearance", selection: $preferences.appearance) {
+                    Text("The system's").tag(Appearance.system)
+                    Text("Dark").tag(Appearance.dark)
+                    Text("Light").tag(Appearance.light)
+                }
+                .pickerStyle(.inline)
+                Picker("Theme", selection: $preferences.theme) {
+                    ForEach(Catalog.families) { family in
+                        Text(family.name == "jaw" ? "Jaw (Tokyo Night)" : family.name).tag(family.id)
+                    }
+                }
+            } footer: {
+                Text("Redlamp's themes come in a later version.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
+    }
+}
+
+/// Settings › Messages: bubbles or lines, comfortable or compact, the text size and the font.
+public struct MessagesPane: View {
+    @Bindable var preferences: Preferences
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    public var body: some View {
+        Form {
+            Section {
+                Picker("Messages look like", selection: $preferences.look) {
+                    ForEach(Look.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(preferences.look == .bubbles
+                    ? "Theirs on the left, yours on the right."
+                    : "The terminal's layout: names on the left, yours from a third of the way across.")
+            }
+            Section {
+                Picker("Spacing", selection: $preferences.density) {
+                    ForEach(Density.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                LabeledContent("Text size") {
+                    HStack {
+                        Slider(value: $preferences.textSize, in: Preferences.textSizes, step: 1)
+                        Text("\(Int(preferences.textSize)) pt").monospacedDigit().frame(width: 40, alignment: .trailing)
+                    }
+                }
+                Picker("Font", selection: $preferences.font) {
+                    ForEach(MessageFont.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.messages.size.width, height: SettingsPane.messages.size.height)
+    }
+}
+
+/// Settings › Panes: how much the panes without the keys are dimmed, and the focused pane's outline.
+public struct PanesPane: View {
+    @Bindable var preferences: Preferences
+    @Environment(\.colorScheme) private var scheme
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    /// The theme's accent in the appearance Settings is drawn in, the outline's colour unless one's picked.
+    var accent: RGBA {
+        preferences.style(dark: scheme == .dark).roles.accent
+    }
+
+    public var body: some View {
+        Form {
+            Section {
+                LabeledContent("Dim the other panes") {
+                    HStack {
+                        Slider(value: $preferences.paneDim, in: Preferences.paneDims)
+                        Text("\(Int((preferences.paneDim * 100).rounded())) %").monospacedDigit().frame(width: 40, alignment: .trailing)
+                    }
+                }
+                Toggle("Outline the focused pane", isOn: $preferences.paneOutline)
+                LabeledContent("Outline colour") {
+                    HStack {
+                        ColorPicker("", selection: Binding(
+                            get: { (preferences.paneOutlineColour ?? accent).color },
+                            set: { preferences.paneOutlineColour = RGBA(NSColor($0)) },
+                        ), supportsOpacity: false)
+                            .labelsHidden()
+                        Button("The theme's accent") { preferences.paneOutlineColour = nil }
+                            .disabled(preferences.paneOutlineColour == nil)
+                    }
+                }
+                .disabled(!preferences.paneOutline)
+            } footer: {
+                Text("With more than one pane, the one with the keys is outlined inside its edge, and the others dimmed, as iTerm does.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.panes.size.width, height: SettingsPane.panes.size.height)
+    }
+}
+
+extension RGBA {
+    /// From a colour picked, in sRGB.
+    init(_ colour: NSColor) {
+        let c = colour.usingColorSpace(.sRGB) ?? colour
+        self.init(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))
+    }
+}
+```
+
+Then delete the sheet's view: `git rm mac/JawUI/Sources/Settings/SettingsView.swift`.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 0, `** TEST SUCCEEDED **`, with three more tests than before. The scheme builds JawUI and its tests alone, so the app and the harness, which still name `SettingsView`, don't build yet; the next two steps change them.
+
+- [ ] **Step 5: The app opens the window**
+
+Create `mac/JawApp/Sources/SettingsWindowController.swift`:
+
+```swift
+import AppKit
+import JawUI
+
+/// Settings, in a window of its own beside the chats: its panes the toolbar's icon tabs
+/// (`SettingsTabs`), closable and nothing else, in the app's appearance, opened on the pane last
+/// shown, centred over the main window the first time and where it was left after.
+@MainActor
+final class SettingsWindowController: NSWindowController {
+    let tabs: SettingsTabs
+    /// Whether the window has its place: kept from an earlier run, or given it as it first opened.
+    var placed = false
+
+    /// `keeps` is false for a snapshot, which takes nothing from the last run and leaves nothing for
+    /// the next.
+    init(preferences: Preferences, keeps: Bool) {
+        let kept = keeps ? UserDefaults.standard.string(forKey: "settingsPane").flatMap(SettingsPane.init(rawValue:)) : nil
+        let pane = kept ?? .appearance
+        tabs = SettingsTabs(preferences: preferences, showing: pane)
+        let window = SettingsWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        window.appearance = preferences.nsAppearance
+        window.title = pane.title
+        super.init(window: window)
+        if keeps {
+            window.setFrameAutosaveName("jaw.settings")
+            placed = window.frame.origin != .zero
+            tabs.chose = { UserDefaults.standard.set($0.rawValue, forKey: "settingsPane") }
+        }
+        tabs.fit(pane, animated: false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Shows the window, or brings it to the front, on `pane` when one's asked for; the first time,
+    /// centred over `main`.
+    func show(_ pane: SettingsPane?, over main: NSWindow?) {
+        guard let window else { return }
+        if let pane { tabs.show(pane) }
+        if !placed, let main {
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: main.frame.midX - size.width / 2, y: main.frame.midY - size.height / 2))
+            placed = true
+        }
+        showWindow(nil)
+    }
+}
+```
+
+In `mac/JawApp/Sources/AppModel.swift`, after `let glance = Glance()` (line 60), add:
+
+```swift
+    /// Settings' window, made the first time it's shown.
+    var settings: SettingsWindowController?
+```
+
+After `say(_:warn:)` (lines 324-328), add:
+
+```swift
+    /// Shows Settings, on `pane` when one's asked for, or brings it to the front.
+    func showSettings(_ pane: SettingsPane? = nil) {
+        if settings == nil { settings = SettingsWindowController(preferences: preferences, keeps: launch.snapshot == nil) }
+        settings?.show(pane, over: window?.window)
+    }
+```
+
+And make `restyle()`'s first line give Settings the app's appearance, so it changes with Appearance:
+
+```swift
+    func restyle() {
+        settings?.window?.appearance = preferences.nsAppearance
+        window?.restyle()
+```
+
+In `mac/JawApp/Sources/Commands.swift`, lines 19-20, the `settings` command, become the command and the palette's Choose a theme beside it:
+
+```swift
+        add(Command("settings", "Settings…", phrase: "Settings", detail: "appearance, messages and panes", key: Shortcut(","), place: .app, group: 1)
+            { [weak self] in self?.showSettings() })
+        add(Command("theme", "Choose a Theme", phrase: "Choose a theme", detail: "Settings › Appearance", place: nil)
+            { [weak self] in self?.showSettings(.appearance) })
+```
+
+In `mac/JawApp/Sources/MainWindowController.swift`, delete `    var settings: NSWindow?` (line 36), and `showSettings()` with its doc comment (lines 368-379, from `/// Settings, in a sheet over the window: modal to it, centred, Done or Esc to close.` to its closing brace).
+
+In `mac/JawApp/Sources/Bench.swift`:
+
+- Line 112, in `press`, where `let step = …` lists the steps, `key == "settings"` becomes `key == "settings" || key.hasPrefix("settings:")`.
+- Line 142, `if key == "settings" { model.window?.showSettings() }`, becomes:
+
+```swift
+            if key == "settings" { model.showSettings() }
+            if key.hasPrefix("settings:") {
+                if let pane = SettingsPane(rawValue: String(key.dropFirst(9))) {
+                    model.showSettings(pane)
+                } else {
+                    FileHandle.standardError.write(Data("\(key): no such pane\n".utf8))
+                }
+            }
+```
+
+- Lines 486-487, in `draw(to:model:)`, the end of the chain that picks the view to draw, `?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView`, becomes the line below, so the picture holds Settings with its toolbar once a step has opened it:
+
+```swift
+            ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView
+            ?? model.settings?.window.flatMap { $0.isVisible ? $0.contentView?.superview : nil }
+```
+
+- [ ] **Step 6: The harness no longer draws Settings over the window**
+
+In `mac/JawHarness/Sources/Specimen.swift`:
+
+- `ScreenSpecimen`'s doc comment (lines 70-73) becomes:
+
+```swift
+/// A whole window's content at the screen's size, as the window holds it, made from a `Screen`, with
+/// the title bar's buttons over it where the window puts them, and over both, when one is open, the
+/// palette or the glance, each a view where the window puts its panel, so a picture holds it.
+```
+
+- `case palette, glance, settings` becomes `case palette, glance`, and the line `case .settings: SettingsOver(conditions: conditions)` goes.
+- `SettingsOver` goes, with its doc comment: lines 146-182, from ``/// Settings as `MainWindowController.showSettings()` shows them`` to the struct's closing brace.
+
+In `mac/JawHarness/Sources/Scenes/ScreenScenes.swift`:
+
+- `screensOverlays`' synopsis becomes `"Lisbon Climbing open with the palette or the glance over it, and Ana Ribeiro open with the glance listing Lisbon Climbing"`, and `, SettingsView.self` goes from its `covers`.
+- `OverlaysScene`'s doc comment becomes:
+
+```swift
+/// Lisbon Climbing open with the palette and the glance each open over it, and Ana Ribeiro open with
+/// the glance over her chat, listing Lisbon Climbing, each where the window puts it.
+```
+
+- Its last band, the `ScreenBand` titled `"Settings"` with `overlay: .settings`, goes.
+
+- [ ] **Step 7: Build, test and look at the window**
+
+Run: `mac/scripts/build-mac build`, then `mac/scripts/build-mac test JawUITests` and `mac/scripts/build-mac test JawHarnessTests`; then `make check-parity`.
+Expected: each exits 0. A debug launch asserts that no command is listed twice and no key belongs to two commands or to one without a menu (`Menus.problems`), which Choose a theme, with neither key nor menu, keeps.
+
+Run, one at a time: `mac/scripts/build-mac snapshot mac/build/settings/appearance.png --keys settings:appearance`, then the same with `messages.png` and `settings:messages`, and `panes.png` and `settings:panes`.
+Expected: `{"panes":1.0,"snapshot":1.0,…}` among each run's last lines, and each picture, looked at with the Read tool, shows the Settings window alone: titled with its pane's name, the toolbar's three icon tabs, Appearance's palette, Messages' speech bubble and Panes' split rectangle, each over its name and the chosen one filled, its form below at its size with its explanation as the section's footer, and no Done. Appearance shows The system's, Dark and Light, Theme with Jaw (Tokyo Night), and "Redlamp's themes come in a later version." under them.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add mac/JawUI/Sources/Settings mac/JawApp/Sources/SettingsWindowController.swift mac/JawApp/Sources/AppModel.swift \
+    mac/JawApp/Sources/Commands.swift mac/JawApp/Sources/MainWindowController.swift mac/JawApp/Sources/Bench.swift \
+    mac/JawHarness/Sources/Specimen.swift mac/JawHarness/Sources/Scenes/ScreenScenes.swift mac/Tests/JawUITests/SettingsTests.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Settings leaves its sheet for a window of its own, as the owner asked on 6 November and the Settings and themes design has it: SettingsTabs, an NSTabViewController in its toolbar style in JawUI, shows Appearance, Messages and Panes as icon tabs, paintpalette, text.bubble and rectangle.split.2x1, each its SwiftUI form hosted at its size, 500 points wide, the window taking that size as its tab is chosen and keeping its top edge, and SettingsWindowController opens it with ⌘, and Jaw › Settings… on the pane last shown, centred over the main window the first time and where it was left after, closable and nothing else, in the app's appearance, with no Done since every change is kept as it's made, and ⌘W closing it before the menu bar's Close Pane can take it; the forms keep what they had, their explanations now their sections' footers; the palette's Choose a theme opens it on Appearance; --keys settings:<pane> opens it on a pane and --snapshot draws it with its toolbar; and the harness's With overlays scene loses its Settings band, Settings being over the window no more
+EOF
+```
+
+`git rm` in Step 3 has already staged `SettingsView.swift`'s deletion, so this commit carries it.
+
+---
+
+### Task 2: Omarchy's themes mapped as the terminal maps them, held on the surface, and a role for links
+
+**Files:**
+- Create: `mac/JawThemes/Sources/Contrast.swift`, `mac/JawThemes/Sources/Omarchy.swift`
+- Modify: `mac/JawThemes/Sources/Roles.swift` (`Roles`' accent at 21-22, `tokyoNight` at 83, `tokyoNightDay` at 109), `mac/JawUI/Sources/Layout/MessageLayout.swift` (line 445), `mac/JawUI/Sources/Components/Glyphs.swift` (`Ticks.of` at 38-47), `mac/JawUI/Sources/Library/LibraryDrawing.swift` (lines 315 and 325), `mac/JawHarness/Sources/Scenes/FoundationScenes.swift` (`RolesScene`'s `named` and `textColours` at 29-43, and its second band's note at 63)
+- Test: `mac/Tests/JawThemesTests/OmarchyTests.swift` (new), `mac/Tests/JawThemesTests/RolesTests.swift`, `mac/Tests/JawUITests/LinkPreviewTests.swift`
+
+**Interfaces:**
+- Consumes: `RGBA` (`init(_ hex: UInt32)`, `hex`, `opacity(_:)`, `over(_:)`, `contrast(with:)`), and `protocol/themes/*.toml`, read by the tests by path.
+- Produces, in JawThemes:
+  - `public var link: RGBA` in `Roles`, after `accent`: links and read ticks.
+  - `public enum Contrast` with `static func luminance(_ c: UInt32) -> Double`, `static func ratio(_ a: UInt32, _ b: UInt32) -> Double`, `static func mix(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32` and `static func fit(_ colour: UInt32, on ground: UInt32, toward end: UInt32, low: Double, high: Double = .infinity, target: Double) -> UInt32`.
+  - `public enum Omarchy` with `static let keys: [String]` (the 25), `struct Terminal` (`bg`, `surface`, `selection`, `fg`, `text`, `muted`, `comment`, `gutter`, `accent`, `link`, `mention`, `online`, `notice`, `senders`, all `UInt32`), `static func terminal(_ c: [String: UInt32]) -> Terminal?`, `static func roles(_ colours: [String: String], dark: Bool) -> Roles?`, `static func hex(_ text: String) -> UInt32?` and `static func file(_ text: String) -> (dark: Bool, colours: [String: String])?`.
+- Produces, in JawThemesTests, for Tasks 3 and 4: `themesFolder`, `omarchyFiles() throws -> [(id: String, dark: Bool, colours: [String: String])]` and `reads(_ r: Roles, _ name: String)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawThemesTests/OmarchyTests.swift`:
+
+```swift
+import Foundation
+@testable import JawThemes
+import Testing
+
+/// Omarchy's themes, read from `protocol/themes/` as jaw-proto reads them and mapped as `theme.rs`
+/// maps them, then held on the Mac's surface: the port lands on the terminal's own colours, each theme
+/// moves what `theme.rs` and the surface move and nothing else, and every theme reads.
+
+let themesFolder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    .deletingLastPathComponent().deletingLastPathComponent().appending(path: "protocol/themes")
+
+/// Omarchy's themes as `protocol/themes/` holds them, by ID, each read as jaw-proto reads it.
+func omarchyFiles() throws -> [(id: String, dark: Bool, colours: [String: String])] {
+    let names = try FileManager.default.contentsOfDirectory(atPath: themesFolder.path).filter { $0.hasSuffix(".toml") }.sorted()
+    return try names.map { name in
+        let text = try String(contentsOf: themesFolder.appending(path: name), encoding: .utf8)
+        let read = try #require(Omarchy.file(text), "\(name) reads")
+        return (String(name.dropLast(5)), read.dark, read.colours)
+    }
+}
+
+/// What every theme's roles read at, of every source and in each half: text at 4.5:1 wherever it's
+/// drawn, every colour at 3:1 on the ground and on the surface, the accent on the ground, the dim text
+/// in its band, and a selected row's online at 4.5:1 on its selection.
+func reads(_ r: Roles, _ name: String) {
+    for (ground, colour) in [("ground", r.ground), ("surface", r.surface), ("selection", r.selection), ("yours", r.yours)] {
+        #expect(r.text.contrast(with: colour) >= 4.5, "\(name): text on the \(ground), \(r.text.contrast(with: colour))")
+    }
+    let colours = [("secondary", r.secondary), ("link", r.link), ("mention", r.mention), ("online", r.online), ("failed", r.failed)]
+        + r.senders.map { ("a sender", $0) }
+    for (role, colour) in colours {
+        #expect(colour.contrast(with: r.ground) >= 3 && colour.contrast(with: r.surface) >= 3,
+                "\(name): \(role) on the ground and on the surface")
+    }
+    #expect(r.accent.contrast(with: r.ground) >= 3, "\(name): the accent")
+    #expect((2.5 ... 4.51).contains(r.tertiary.contrast(with: r.ground)), "\(name): dim text \(r.tertiary.contrast(with: r.ground))")
+    #expect(r.selectedOnline.contrast(with: r.selection) >= 4.5, "\(name): a selected row's online")
+}
+
+@Test func `every theme file reads as jaw-proto reads it, with its mode, its 25 colours and the fallbacks it fills`() throws {
+    let themes = try omarchyFiles()
+    #expect(themes.count == 23)
+    #expect(themes.filter { !$0.dark }.map { $0.id }.sorted() == ["catppuccin-latte", "flexoki-light", "lupine", "rose-pine", "white"])
+    #expect(themes.allSatisfy { $0.colours.count == 25 })
+    for (id, brown) in [("last-horizon", "#362f3a"), ("solitude", "#6d6e6e"), ("white", "#252525")] {
+        let c = try #require(themes.first { $0.id == id }?.colours)
+        #expect(c["orange"] == c["yellow"] && c["brown"] == brown, "\(id): orange is its yellow, and brown that mixed half with black")
+    }
+    let gruvbox = try #require(themes.first { $0.id == "gruvbox" }?.colours)
+    #expect(gruvbox["orange"] != gruvbox["yellow"] && gruvbox["brown"] == "#70432e", "a theme's own orange and brown are kept")
+    #expect(Omarchy.file("mode = \"dim\"\n") == nil, "a mode that isn't dark or light")
+    #expect(Omarchy.file("mode = \"dark\"\naccent \"#ffffff\"\n") == nil, "a line that isn't key = value")
+}
+
+@Test func `the port lands on theme.rs's own Tokyo Night, grey by grey and colour by colour`() throws {
+    let tokyo = try #require(omarchyFiles().first { $0.id == "tokyo-night" })
+    let t = try #require(Omarchy.terminal(tokyo.colours.compactMapValues(Omarchy.hex)))
+    #expect([t.bg, t.surface, t.selection, t.fg, t.text, t.muted, t.comment, t.gutter]
+        == [0x1A1B26, 0x24283B, 0x2D3247, 0xC0CAF5, 0xA9B1D6, 0x8088B0, 0x565F89, 0x414868], "as theme.rs's own test pins them")
+    #expect([t.accent, t.link, t.mention, t.senders[3], t.senders[7]] == [0x7AA2F7, 0x449DAB, 0xEB927B, 0xAD8EE6, 0x0DB9D7])
+}
+
+/// What `theme.rs` moves in each theme at Omarchy's 4c1b4cb, as its own test lists it.
+let terminalMoves: [(moved: [String], themes: [String])] = [
+    ([], ["catppuccin", "flexoki-light", "gruvbox", "hackerman", "lumon", "matte-black", "rose-pine"]),
+    (["dim text raised"], ["catppuccin-latte", "everforest", "last-horizon", "miasma", "nord", "solitude", "white"]),
+    (["borders lowered", "dim text lowered"], ["ethereal", "osaka-jade", "retro-82", "starship"]),
+    (["borders lowered"], ["miasma", "ristretto", "vantablack", "white"]),
+    (["surface raised"], ["last-horizon", "lupine", "solitude"]),
+    (["selection raised"], ["kanagawa", "tokyo-night", "vantablack", "white"]),
+]
+
+@Test func `each theme moves the greys theme.rs moves, and no others`() throws {
+    for theme in try omarchyFiles() {
+        let c = theme.colours.compactMapValues(Omarchy.hex)
+        let t = try #require(Omarchy.terminal(c))
+        let greys: [(String, UInt32, UInt32, UInt32)] = [
+            ("surface", c["lighter_background"]!, t.surface, t.bg), ("selection", c["selection"]!, t.selection, t.surface),
+            ("dim text", c["dark_foreground"]!, t.comment, t.bg), ("borders", c["muted"]!, t.gutter, t.bg),
+        ]
+        var moved: [String] = []
+        for (what, was, now, ground) in greys where now != was {
+            moved.append("\(what) \(Contrast.ratio(now, ground) > Contrast.ratio(was, ground) ? "raised" : "lowered")")
+        }
+        let listed = terminalMoves.filter { $0.themes.contains(theme.id) }.flatMap { $0.moved }
+        #expect(moved.sorted() == listed.sorted(), "\(theme.id)")
+    }
+}
+
+/// What holding Omarchy's colours at 3:1 on the Mac's surface too moves, beyond what `theme.rs` moves,
+/// at Omarchy's 4c1b4cb, as a port of the rule found on 6 November.
+let surfaceMoves: [String: [String]] = [
+    "catppuccin-latte": ["link", "online", "senders 5"],
+    "flexoki-light": ["link", "mention", "online", "senders 6"],
+    "kanagawa": ["failed", "senders 1"],
+    "last-horizon": ["mention", "senders 2"],
+    "matte-black": ["senders 1"],
+    "miasma": ["failed", "mention", "senders 2"],
+    "nord": ["failed", "senders 1"],
+    "rose-pine": ["link", "mention", "senders 5"],
+    "solitude": ["failed", "senders 1"],
+]
+
+@Test func `the Mac holds the terminal's colours at 3:1 on its surface too, which moves nine themes' and no others'`() throws {
+    for theme in try omarchyFiles() {
+        let c = theme.colours.compactMapValues(Omarchy.hex)
+        let t = try #require(Omarchy.terminal(c))
+        let r = try #require(Omarchy.roles(theme.colours, dark: theme.dark))
+        let red = Contrast.fit(c["red"]!, on: t.bg, toward: t.fg, low: 3, target: 3)
+        var moved: [String] = []
+        for (what, was, now) in [("link", t.link, r.link), ("mention", t.mention, r.mention), ("online", t.online, r.online),
+                                 ("failed", red, r.failed)] where now.hex != was
+        {
+            moved.append(what)
+        }
+        let senders = zip(t.senders, r.senders).count { $0.0 != $0.1.hex }
+        if senders > 0 { moved.append("senders \(senders)") }
+        #expect(moved.sorted() == (surfaceMoves[theme.id] ?? []).sorted(), "\(theme.id)")
+        #expect(r.accent.hex == t.accent && r.ground.hex == t.bg && r.tertiary.hex == t.comment, "\(theme.id): the rest as the terminal has it")
+    }
+}
+
+@Test func `every one of Omarchy's themes reads on the Mac, in the half its mode is`() throws {
+    for theme in try omarchyFiles() {
+        let roles = try #require(Omarchy.roles(theme.colours, dark: theme.dark), "\(theme.id) maps")
+        #expect(roles.isDark == theme.dark)
+        reads(roles, theme.id)
+    }
+    var missing = try #require(omarchyFiles().first).colours
+    missing["accent"] = nil
+    #expect(Omarchy.roles(missing, dark: true) == nil, "a theme without one of its colours isn't mapped")
+}
+```
+
+In `mac/Tests/JawThemesTests/RolesTests.swift`, add to the end of the first test, `` `jaw's theme is the terminal's Tokyo Night by role` ``:
+
+```swift
+    #expect(dark.link == dark.accent && Catalog.jaw.light.link == Catalog.jaw.light.accent, "Tokyo Night's links are its blue, in both halves")
+```
+
+and at the end of the file:
+
+```swift
+@Test func `Jaw's Tokyo Night reads as every theme must, in both halves`() {
+    reads(Catalog.jaw.dark, "Tokyo Night")
+    reads(Catalog.jaw.light, "Tokyo Night Day")
+}
+```
+
+At the end of `mac/Tests/JawUITests/LinkPreviewTests.swift`:
+
+```swift
+@Test func `links and read ticks are drawn in the link colour, not the accent`() throws {
+    var roles = Catalog.jaw.dark
+    roles.link = RGBA(0x449DAB)
+    #expect(Ticks.of(.read, roles)?.1 == roles.link && Ticks.of(.played, roles)?.1 == roles.link)
+    #expect(Ticks.of(.delivered, roles)?.1 == roles.tertiary)
+    let s = LayoutSpec(style: Style(roles: roles), me: ["person:1"])
+    let message = try #require(Samples.messages.first { $0.spans.contains { $0.t == .link } })
+    let frame = try #require(laid(message, s).text?.frame)
+    var colours: [CGColor] = []
+    for line in CTFrameGetLines(frame) as! [CTLine] {
+        for run in CTLineGetGlyphRuns(line) as! [CTRun] {
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            if attributes[NSAttributedString.Key.jawLink] != nil, let colour = attributes[NSAttributedString.Key.ctColour] {
+                colours.append(colour as! CGColor)
+            }
+        }
+    }
+    #expect(!colours.isEmpty && colours.allSatisfy { $0 == roles.link.cgColor }, "a link's run is in the link colour")
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 1, with `error: cannot find 'Omarchy' in scope` from `OmarchyTests.swift`.
+
+- [ ] **Step 3: Write the port, the mapping and the role**
+
+Create `mac/JawThemes/Sources/Contrast.swift`:
+
+```swift
+import Foundation
+
+/// WCAG's contrast on colours as `0xRRGGBB`, and the straight line the terminal's `theme.rs` moves a
+/// colour along until it reads, ported as it is: `mix` rounds each channel half away from zero, as
+/// Rust's `round` does, and `fit` halves the line 30 times, so the Mac lands on the terminal's colours.
+public enum Contrast {
+    /// WCAG's relative luminance of a colour.
+    public static func luminance(_ c: UInt32) -> Double {
+        func channel(_ shift: UInt32) -> Double {
+            let v = Double((c >> shift) & 0xFF) / 255
+            return v <= 0.039_28 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    /// WCAG's contrast between two colours, from 1 to 21.
+    public static func ratio(_ a: UInt32, _ b: UInt32) -> Double {
+        let (la, lb) = (luminance(a), luminance(b))
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    /// `a` moved `t` of the way to `b`, channel by channel.
+    public static func mix(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
+            let (x, y) = (Double((a >> shift) & 0xFF), Double((b >> shift) & 0xFF))
+            return min(UInt32((x + (y - x) * t).rounded()), 255) << shift
+        }
+        return channel(16) | channel(8) | channel(0)
+    }
+
+    /// `colour` as it is when its contrast with `ground` is from `low` to `high`, and otherwise moved
+    /// toward `end`, if it reads too little, or toward `ground`, if too much, until its contrast is
+    /// `target`, so it keeps its hue.
+    public static func fit(_ colour: UInt32, on ground: UInt32, toward end: UInt32, low: Double, high: Double = .infinity,
+                           target: Double) -> UInt32
+    {
+        let now = ratio(colour, ground)
+        if now >= low, now <= high { return colour }
+        let goal = now < low ? end : ground
+        var (near, far) = (0.0, 1.0)
+        for _ in 0 ..< 30 {
+            let t = (near + far) / 2
+            let reached = ratio(mix(colour, goal, t), ground)
+            if (now < low && reached < target) || (now > high && reached > target) {
+                near = t
+            } else {
+                far = t
+            }
+        }
+        return mix(colour, goal, far)
+    }
+}
+```
+
+Create `mac/JawThemes/Sources/Omarchy.swift`:
+
+```swift
+import Foundation
+
+/// Omarchy's themes as jawd serves them (`themes`), mapped onto the Mac's roles as the terminal's
+/// `theme.rs` maps them onto its own, then held at 3:1 against the surface too, where the Mac draws
+/// their bubbles and its chat list, as the terminal holds its colours against the ground.
+public enum Omarchy {
+    /// The 25 colours jawd serves for each theme, by Omarchy's names for them.
+    public static let keys = [
+        "accent", "selection", "muted", "background", "dark_background", "darker_background", "lighter_background",
+        "foreground", "dark_foreground", "light_foreground", "bright_foreground", "red", "yellow", "orange", "green", "cyan",
+        "blue", "magenta", "brown", "bright_red", "bright_yellow", "bright_green", "bright_cyan", "bright_blue", "bright_magenta",
+    ]
+
+    /// The terminal's roles for a theme, as `theme.rs`'s `Roles` has them, by its names for them.
+    public struct Terminal: Equatable, Sendable {
+        public var bg, surface, selection, fg, text, muted, comment, gutter: UInt32
+        public var accent, link, mention, online, notice: UInt32
+        public var senders: [UInt32]
+    }
+
+    /// `theme.rs`'s `Roles::of`, ported as it is: a grey outside its band of contrast with the ground
+    /// moved toward the ground or the text until it's in, keeping its hue; the selection then held
+    /// apart from the surface too, which overlays draw it on; and every colour at least 3:1. Nil when
+    /// one of the colours it reads is missing.
+    public static func terminal(_ c: [String: UInt32]) -> Terminal? {
+        guard let bg = c["background"], let bright = c["bright_foreground"], let plain = c["foreground"],
+              let dim = c["dark_foreground"], let lighter = c["lighter_background"], let picked = c["selection"],
+              let muted = c["muted"], let accent = c["accent"], let cyan = c["cyan"], let orange = c["orange"],
+              let green = c["green"], let yellow = c["yellow"]
+        else { return nil }
+        let named = ["red", "yellow", "blue", "magenta", "cyan", "green", "orange", "bright_cyan"].compactMap { c[$0] }
+        guard named.count == 8 else { return nil }
+        let (fg, text) = Contrast.ratio(bright, bg) >= Contrast.ratio(plain, bg) ? (bright, plain) : (plain, bright)
+        func held(_ colour: UInt32, _ low: Double, _ high: Double, _ target: Double) -> UInt32 {
+            Contrast.fit(colour, on: bg, toward: fg, low: low, high: high, target: target)
+        }
+        func hue(_ colour: UInt32) -> UInt32 {
+            held(colour, 3, .infinity, 3)
+        }
+        let comment = held(dim, 2.5, 4.5, 3)
+        let surface = held(lighter, 1.05, .infinity, 1.1)
+        let selection = held(picked, 1.15, .infinity, 1.25)
+        return Terminal(
+            bg: bg, surface: surface, selection: Contrast.fit(selection, on: surface, toward: fg, low: 1.15, target: 1.15),
+            fg: fg, text: text, muted: Contrast.mix(comment, text, 0.5), comment: comment, gutter: held(muted, 1.4, 2.6, 1.8),
+            accent: accent, link: hue(cyan), mention: hue(orange), online: hue(green), notice: hue(yellow), senders: named.map(hue),
+        )
+    }
+
+    /// The Mac's roles for one of Omarchy's themes, from its colours by Omarchy's keys as `#rrggbb`:
+    /// the terminal's, the Mac's own beside them (your bubbles, a selected row's online, failed), and
+    /// each colour the terminal holds at 3:1 against the ground held so against the surface too. Nil
+    /// when a colour is missing or isn't `#rrggbb`.
+    public static func roles(_ colours: [String: String], dark: Bool) -> Roles? {
+        var c: [String: UInt32] = [:]
+        for key in keys {
+            guard let value = colours[key].flatMap(hex) else { return nil }
+            c[key] = value
+        }
+        guard let t = terminal(c), let red = c["red"] else { return nil }
+        func surfaced(_ colour: UInt32) -> UInt32 {
+            Contrast.fit(colour, on: t.surface, toward: t.fg, low: 3, target: 3)
+        }
+        let online = surfaced(t.online)
+        return Roles(
+            isDark: dark, ground: RGBA(t.bg), surface: RGBA(t.surface), selection: RGBA(t.selection), text: RGBA(t.fg),
+            secondary: RGBA(t.muted), tertiary: RGBA(t.comment), separator: RGBA(t.gutter), accent: RGBA(t.accent),
+            link: RGBA(surfaced(t.link)), yours: RGBA(t.accent).opacity(dark ? 0.18 : 0.12).over(RGBA(t.bg)),
+            mention: RGBA(surfaced(t.mention)), online: RGBA(online),
+            selectedOnline: RGBA(Contrast.fit(online, on: t.selection, toward: t.fg, low: 4.5, target: 4.5)),
+            failed: RGBA(surfaced(Contrast.fit(red, on: t.bg, toward: t.fg, low: 3, target: 3))),
+            senders: t.senders.map { RGBA(surfaced($0)) },
+        )
+    }
+
+    /// `#rrggbb`, in either case, as `0xRRGGBB`.
+    public static func hex(_ text: String) -> UInt32? {
+        guard text.count == 7, text.hasPrefix("#"), text.dropFirst().allSatisfy(\.isHexDigit) else { return nil }
+        return UInt32(text.dropFirst(), radix: 16)
+    }
+
+    /// A theme's `colors.toml`, as `protocol/themes/` holds Omarchy's, read as jaw-proto reads it: its
+    /// mode, and its colours by Omarchy's keys as lowercase `#rrggbb`, with `orange` its `yellow` and
+    /// `brown` its `orange` mixed half with black, each channel rounded half up, where it leaves them
+    /// out. Nil when a line isn't `key = "value"`, the mode isn't `dark` or `light`, or a colour is
+    /// missing. For the tests and the harness, which ask jawd for nothing; the app reads jawd's `themes`.
+    public static func file(_ text: String) -> (dark: Bool, colours: [String: String])? {
+        var values: [String: String] = [:]
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            guard let equals = line.firstIndex(of: "=") else { return nil }
+            let key = line[..<equals].trimmingCharacters(in: .whitespaces)
+            values[key] = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        }
+        guard let mode = values["mode"], mode == "dark" || mode == "light" else { return nil }
+        if values["orange"] == nil { values["orange"] = values["yellow"] }
+        if values["brown"] == nil, let orange = values["orange"].flatMap(hex) {
+            func half(_ shift: UInt32) -> UInt32 {
+                ((((orange >> shift) & 0xFF) + 1) / 2) << shift
+            }
+            values["brown"] = String(format: "#%06x", half(16) | half(8) | half(0))
+        }
+        var colours: [String: String] = [:]
+        for key in keys {
+            guard let value = values[key].flatMap(hex) else { return nil }
+            colours[key] = String(format: "#%06x", value)
+        }
+        return (mode == "dark", colours)
+    }
+}
+```
+
+In `mac/JawThemes/Sources/Roles.swift`, `Roles` gains `link` after `accent` (lines 21-22):
+
+```swift
+    /// Focus, selection, unread counts.
+    public var accent: RGBA
+    /// Links and read ticks: the accent in Jaw's and Redlamp's themes, the terminal's cyan in Omarchy's.
+    public var link: RGBA
+```
+
+and both halves of Tokyo Night give it their blue: in `tokyoNight` (line 83) and in `tokyoNightDay` (line 109), `accent: blue,` becomes `accent: blue, link: blue,`. Its doc comment above `accent` said "Focus, selection, links, read ticks, unread counts."; it now says what's left, as above.
+
+In `mac/JawUI/Sources/Layout/MessageLayout.swift`, a link span's colour, line 445, `a[.ctColour] = roles.accent.cgColor` under `case .link:`, becomes `a[.ctColour] = roles.link.cgColor`.
+
+In `mac/JawUI/Sources/Components/Glyphs.swift`, `Ticks.of`:
+
+```swift
+    /// How many ticks a status has, and in which colour: one sent, two delivered, two in the link colour
+    /// read; nil for the states said in words or symbols.
+    public static func of(_ status: MessageStatus?, _ roles: Roles) -> (Int, RGBA)? {
+        switch status {
+        case .sent: (1, roles.tertiary)
+        case .delivered: (2, roles.tertiary)
+        case .read, .played: (2, roles.link)
+        case .pending, .failed, nil: nil
+        }
+    }
+```
+
+In `mac/JawUI/Sources/Library/LibraryDrawing.swift`'s `link(_:icon:x:right:size:_:into:)`, the link's symbol (line 315) and its host (line 325) take `r.link` where they take `r.accent`: `symbol("link", 13, r.link, centredIn: icon, into: &d.under)` and `[.ctFont: small, .ctColour: r.link.cgColor]`.
+
+In `mac/JawHarness/Sources/Scenes/FoundationScenes.swift`'s `RolesScene`, `("link", roles.link)` goes after `("accent", roles.accent)` in both `named` and `textColours`, and the second band's note begins "Secondary and tertiary text, the accent's counts, the links and read ticks, mentions, online and failed," where it began "Secondary and tertiary text, the accent's links and counts, mentions, online and failed,".
+
+- [ ] **Step 4: Run the tests**
+
+Run: `mac/scripts/build-mac test JawThemes`, then `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `mac/scripts/build-mac build`; then `make check-parity`.
+Expected: each exits 0. JawThemes runs six more tests than before, JawUITests one more, and every reference picture still matches: Jaw's Tokyo Night draws its links and read ticks in the blue it drew them in. If `surfaceMoves` differs from what the port finds, check `Omarchy.roles` against the design's table before changing the list, and say so in the report: it's what a port of the rule found on 6 November, and `theme.rs`'s own numbers, which the port must land on first, are the second test's.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mac/JawThemes/Sources/Contrast.swift mac/JawThemes/Sources/Omarchy.swift mac/JawThemes/Sources/Roles.swift \
+    mac/JawUI/Sources/Layout/MessageLayout.swift mac/JawUI/Sources/Components/Glyphs.swift mac/JawUI/Sources/Library/LibraryDrawing.swift \
+    mac/JawHarness/Sources/Scenes/FoundationScenes.swift mac/Tests/JawThemesTests mac/Tests/JawUITests/LinkPreviewTests.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Omarchy's themes map onto the Mac's roles as the terminal's theme.rs maps them onto its own, as the owner chose on 6 November: Contrast ports its contrast, its mix and its straight line toward the ground or the text on 0xRRGGBB colours as they are, so Tokyo Night lands on theme.rs's own pinned greys and colours and each theme moves the greys its test lists, and Omarchy maps a theme's 25 colours by their keys onto the Mac's roles, with your bubbles, a selected row's online and failed beside them, then holds each colour at 3:1 on the surface as well as the ground, readable over exact, which moves colours in nine of the 23 at Omarchy's 4c1b4cb, mostly senders', and reads a colors.toml as jaw-proto does for the tests and the harness; the Mac's roles gain link, the terminal's cyan in Omarchy's themes and the accent in Jaw's, so Kanagawa's links stand apart from its text, and the message layout, read ticks and the library's links draw in it; every one of Omarchy's 23 reads in the half its mode is, as Jaw's Tokyo Night does
+EOF
+```
+
+---
+
+### Task 3: Redlamp's catalog, copied, mapped and kept in step
+
+**Files:**
+- Create: `mac/JawThemes/Sources/RedlampCatalog.swift`, `mac/JawThemes/Sources/RedlampRoles.swift`, `scripts/sync-themes`
+- Test: `mac/Tests/JawThemesTests/RedlampTests.swift`
+
+**Interfaces:**
+- Consumes: `Contrast` (Task 2), `RGBA`, `Roles` with `link`, and `reads(_:_:)` from Task 2's tests.
+- Produces, in JawThemes:
+  - `public struct ThemePalette` (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, all `RGBA`, and `primaryRoles: PrimaryRoles`) and `public struct PrimaryRoles: OptionSet` (`.accent`, `.selection`, `.editedDot`, `.all`), as Redlamp has them.
+  - `public enum RedlampCatalog` with `public struct Family` (`id`, `name`, `dark`, `light`) and `public static let families: [Family]`, Redlamp's 21 families of ten colours in its order; `static func hsl(_ string: String) -> RGBA` and `enum Brand`, internal.
+  - `RGBA`'s internal `init(red:green:blue:alpha:)`, `init(white:alpha:)`, `init(hue:saturation:lightness:alpha:)` and `mixed(with:amount:)`, Redlamp's spellings.
+  - `public enum RedlampRoles` with `public static func roles(_ p: ThemePalette, dark: Bool) -> Roles` and `public static func neutral(dark: Bool, accent: RGBA) -> Roles`.
+- Produces: `scripts/sync-themes [--check]`, which prints `sync-themes: jaw's copy is Redlamp's catalog at 9fa9d9155` and exits 0 when the copy is the pinned commit's, says what differs and exits 1 when it isn't, and with no checkout says so and exits 0.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawThemesTests/RedlampTests.swift`:
+
+```swift
+import Foundation
+@testable import JawThemes
+import Testing
+
+/// Redlamp's catalog as jaw copies it, and jaw's roles from it: the families in Redlamp's order, the
+/// Mac design's table, the same bands as Omarchy's, which move what a port of them found on
+/// 6 November, the Redlamp family's red kept to its accent, and every half reading, Neutral's in the
+/// system's blue.
+
+@Test func `the copy holds Redlamp's 21 families of ten colours in its order, Neutral apart`() {
+    #expect(RedlampCatalog.families.map { $0.id } == [
+        "redlamp", "kanagawa", "tokyo-night", "moonlight", "catppuccin", "rose-pine", "nord", "everforest", "gruvbox", "dracula",
+        "solarized", "one-dark", "monokai", "ocean", "sakura", "copper", "mc-vinyl-noir", "mc-neon-dusk", "mc-burnt-tape",
+        "mc-phantom-frequency", "mc-velvet-static",
+    ])
+    #expect(Array(RedlampCatalog.families.map { $0.name }.suffix(5)) == ["Vinyl Noir", "Neon Dusk", "Burnt Tape", "Phantom Frequency", "Velvet Static"])
+    #expect(RedlampCatalog.hsl("240 16% 14%").hex == 0x1E1E29, "Kanagawa's dark ground, as Redlamp parses it")
+    #expect(RedlampCatalog.hsl("nonsense").hex == 0x000000, "a typo yields black, as in Redlamp")
+    let redlamp = RedlampCatalog.families[0]
+    #expect(redlamp.dark.background.hex == 0x0A0707 && redlamp.dark.primary.hex == 0xE0402E && redlamp.dark.primaryRoles == .accent)
+    #expect(redlamp.light.background.hex == 0xF3EEE8 && redlamp.light.neutral.hex == 0x57504E, "steel, the light half's grey")
+}
+
+/// What holding Redlamp's halves in the bands moves, role by role, as a port of the rule found on
+/// 6 November; every other half comes through as the Mac design's table maps it.
+let redlampMoves: [String: [String]] = [
+    "dim text": [
+        "redlamp light", "kanagawa light", "tokyo-night dark", "tokyo-night light", "moonlight dark", "moonlight light",
+        "catppuccin light", "rose-pine dark", "rose-pine light", "nord dark", "everforest dark", "everforest light", "gruvbox light",
+        "dracula dark", "dracula light", "solarized dark", "solarized light", "one-dark dark", "one-dark light", "monokai dark",
+        "monokai light", "ocean light", "sakura dark", "sakura light", "copper dark", "copper light", "mc-vinyl-noir dark",
+        "mc-vinyl-noir light", "mc-neon-dusk dark", "mc-neon-dusk light", "mc-burnt-tape dark", "mc-burnt-tape light",
+        "mc-phantom-frequency dark", "mc-phantom-frequency light", "mc-velvet-static dark", "mc-velvet-static light",
+    ],
+    "mention": [
+        "kanagawa light", "tokyo-night light", "moonlight light", "catppuccin light", "rose-pine light", "nord light",
+        "everforest light", "gruvbox light", "solarized light", "monokai light", "ocean light", "sakura light", "copper light",
+        "mc-vinyl-noir light", "mc-burnt-tape light", "mc-phantom-frequency light", "mc-velvet-static light",
+    ],
+    "online": [
+        "kanagawa light", "moonlight light", "catppuccin light", "nord light", "everforest light", "gruvbox light", "dracula light",
+        "solarized light", "monokai light",
+    ],
+    "secondary": [
+        "tokyo-night dark", "rose-pine light", "nord dark", "everforest dark", "everforest light", "dracula dark", "solarized dark",
+        "one-dark dark", "monokai dark",
+    ],
+    "accent": ["tokyo-night light", "everforest light"],
+    "failed": ["tokyo-night light", "moonlight light", "nord dark", "everforest light", "solarized dark"],
+    "selection": ["everforest dark", "everforest light"],
+    "yours": ["everforest light"],
+]
+
+@Test func `Redlamp's halves map by the Mac design's table, held by the bands, which leave five dark halves as they are`() {
+    var moved: [String: [String]] = [:]
+    var untouched: [String] = []
+    for family in RedlampCatalog.families {
+        for (half, p, dark) in [("dark", family.dark, true), ("light", family.light, false)] {
+            let r = RedlampRoles.roles(p, dark: dark)
+            let tint = p.primaryRoles.contains(.selection) ? p.primary : p.neutral
+            let accent = p.primaryRoles.contains(.accent) ? p.primary : p.neutral
+            let table: [(String, RGBA, RGBA)] = [
+                ("dim text", p.muted.opacity(0.28 / 0.45).over(p.background), r.tertiary), ("mention", p.accent, r.mention),
+                ("online", p.success, r.online), ("secondary", p.muted, r.secondary), ("accent", accent, r.accent),
+                ("failed", p.destructive, r.failed), ("selection", tint.opacity(dark ? 0.2 : 0.16).over(p.card), r.selection),
+                ("yours", tint.opacity(dark ? 0.18 : 0.12).over(p.background), r.yours),
+            ]
+            let name = "\(family.id) \(half)"
+            let differ = table.filter { $0.1.hex != $0.2.hex }.map { $0.0 }
+            for role in differ {
+                moved[role, default: []].append(name)
+            }
+            if differ.isEmpty { untouched.append(name) }
+            #expect(r.ground.hex == p.background.hex && r.surface.hex == p.card.hex && r.text.hex == p.foreground.hex, "\(name)")
+            #expect(r.link == r.accent && r.separator.hex == p.border.hex, "\(name): links as the accent, borders as authored")
+        }
+    }
+    #expect(untouched == ["redlamp dark", "kanagawa dark", "catppuccin dark", "gruvbox dark", "ocean dark"])
+    for (role, halves) in redlampMoves {
+        #expect(moved[role, default: []].sorted() == halves.sorted(), "\(role)")
+    }
+    #expect(Set(moved.keys) == Set(redlampMoves.keys))
+}
+
+@Test func `the Redlamp family keeps its red to the accent and links, its selection and your bubbles from its grey`() {
+    let redlamp = RedlampCatalog.families[0]
+    let dark = RedlampRoles.roles(redlamp.dark, dark: true)
+    #expect(dark.accent.hex == 0xE0402E && dark.link.hex == 0xE0402E, "the safelight")
+    #expect(dark.selection.hex == RedlampCatalog.Brand.ring.opacity(0.2).over(redlamp.dark.card).hex, "ring, not red")
+    #expect(dark.yours.hex == RedlampCatalog.Brand.ring.opacity(0.18).over(redlamp.dark.background).hex)
+}
+
+@Test func `every half of Redlamp's reads, its senders at 4.5:1 on their bubble, and Neutral's in the system's blue`() {
+    for family in RedlampCatalog.families {
+        for (half, p, dark) in [("dark", family.dark, true), ("light", family.light, false)] {
+            let r = RedlampRoles.roles(p, dark: dark)
+            reads(r, "\(family.id) \(half)")
+            #expect(r.senders.allSatisfy { $0.contrast(with: r.surface) >= 4.5 }, "\(family.id) \(half): senders on their bubble")
+            #expect(r.isDark == dark)
+        }
+    }
+    for (dark, accent) in [(true, RGBA(0x0A84FF)), (false, RGBA(0x007AFF))] {
+        let r = RedlampRoles.neutral(dark: dark, accent: accent)
+        reads(r, "neutral \(dark ? "dark" : "light")")
+        #expect(r.ground.hex == (dark ? 0x1D1D1D : 0xECECEC), "Redlamp's panel grey")
+        #expect(r.accent.hex == accent.hex, "the system's accent, which reads as it is")
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 1, with `error: cannot find 'RedlampCatalog' in scope` from `RedlampTests.swift`.
+
+- [ ] **Step 3: Copy the catalog**
+
+Create `mac/JawThemes/Sources/RedlampCatalog.swift`. What's between each pair of `// sync-themes:` markers is Redlamp's at 9fa9d91, line for line, which `scripts/sync-themes` checks; the families' lines are those of `ThemeCatalog.swift` from `// omoi-station classic palettes` to the last of its originals:
+
+```swift
+// Redlamp's theme catalog: the data of packages/RedlampDesign/Sources/Themes/ThemeCatalog.swift and the brand's colours
+// in Tokens/Brand.swift, at Redlamp's 9fa9d915540782ce600ee6e4854dc3f2ccd15250, relicensed by its owner for jaw under
+// jaw's MIT licence. scripts/sync-themes keeps each region between its `// sync-themes:` markers line for line as Redlamp has it.
+
+import Foundation
+
+/// A theme's ten colors, in the layout omoi-station's themes are authored in. jaw's roles come from
+/// these by `RedlampRoles`.
+public struct ThemePalette: Sendable, Hashable {
+    public var background, card, foreground, muted, primary, accent, border, success, destructive, neutral: RGBA
+    /// The tokens that take `primary`. The rest take `neutral`, so a theme whose primary
+    /// must stay rare (the brand red) can keep it to one place.
+    public var primaryRoles: PrimaryRoles
+
+    public init(
+        background: RGBA, card: RGBA, foreground: RGBA, muted: RGBA, primary: RGBA, accent: RGBA,
+        border: RGBA, success: RGBA, destructive: RGBA, neutral: RGBA, primaryRoles: PrimaryRoles = .all,
+    ) {
+        self.background = background
+        self.card = card
+        self.foreground = foreground
+        self.muted = muted
+        self.primary = primary
+        self.accent = accent
+        self.border = border
+        self.success = success
+        self.destructive = destructive
+        self.neutral = neutral
+        self.primaryRoles = primaryRoles
+    }
+}
+
+public struct PrimaryRoles: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let accent = PrimaryRoles(rawValue: 1 << 0)
+    public static let selection = PrimaryRoles(rawValue: 1 << 1)
+    public static let editedDot = PrimaryRoles(rawValue: 1 << 2)
+    public static let all: PrimaryRoles = [.accent, .selection, .editedDot]
+}
+
+/// Redlamp's families of ten colours, each a dark and a light half, in Redlamp's slot order. Neutral,
+/// which Redlamp authors as its own greys rather than ten colours, isn't among them:
+/// `RedlampRoles.neutral` has it.
+public enum RedlampCatalog {
+    /// A family: its ID and its name, as Redlamp has them, and its two halves.
+    public struct Family: Sendable, Hashable {
+        public var id: String
+        public var name: String
+        public var dark: ThemePalette
+        public var light: ThemePalette
+    }
+
+    public static let families: [Family] = [
+        Family(id: "redlamp", name: "Redlamp", dark: redlampDark, light: redlampLight),
+        // swiftformat:disable all
+        // sync-themes: families
+        // omoi-station classic palettes
+        family("kanagawa", "Kanagawa",
+               dark: pal("240 16% 14%", "240 16% 11%", "46 37% 77%", "258 13% 60%", "222 50% 67%", "34 100% 62%", "240 10% 26%", "88 32% 58%", "354 65% 65%", "258 13% 60%"),
+               light: pal("40 40% 95%", "40 30% 92%", "240 16% 20%", "42 26% 46%", "222 50% 52%", "34 100% 48%", "40 15% 82%", "88 32% 45%", "0 83% 48%", "42 26% 46%")),
+        family("tokyo-night", "Tokyo Night",
+               dark: pal("230 19% 18%", "230 23% 16%", "226 84% 88%", "228 20% 44%", "217 92% 72%", "267 82% 75%", "230 16% 30%", "88 57% 61%", "355 75% 72%", "228 20% 44%"),
+               light: pal("234 14% 89%", "233 11% 84%", "230 13% 20%", "230 18% 50%", "217 76% 55%", "266 87% 64%", "233 11% 78%", "90 34% 34%", "348 93% 56%", "230 18% 50%")),
+        family("moonlight", "Moonlight",
+               dark: pal("233 27% 17%", "233 25% 13%", "224 82% 88%", "228 29% 52%", "220 100% 75%", "19 100% 71%", "231 20% 30%", "85 65% 73%", "355 100% 73%", "228 29% 52%"),
+               light: pal("235 25% 92%", "235 20% 88%", "230 23% 14%", "231 15% 45%", "224 70% 50%", "19 100% 60%", "235 15% 80%", "155 50% 38%", "355 90% 55%", "231 15% 50%")),
+        family("catppuccin", "Catppuccin",
+               dark: pal("240 21% 15%", "240 21% 12%", "226 64% 88%", "228 17% 63%", "267 84% 81%", "23 92% 75%", "237 12% 31%", "115 54% 76%", "351 74% 73%", "228 17% 63%"),
+               light: pal("220 23% 95%", "220 22% 92%", "234 16% 35%", "233 10% 47%", "266 85% 58%", "22 99% 52%", "225 14% 77%", "109 58% 40%", "347 87% 44%", "228 11% 53%")),
+        family("rose-pine", "Rosé Pine",
+               dark: pal("249 22% 12%", "249 14% 15%", "245 50% 91%", "253 10% 47%", "343 76% 68%", "35 91% 72%", "250 12% 25%", "197 49% 38%", "343 76% 68%", "253 10% 47%"),
+               light: pal("33 54% 95%", "33 100% 97%", "248 19% 40%", "257 7% 62%", "343 35% 55%", "35 84% 56%", "25 25% 88%", "197 50% 33%", "343 35% 55%", "257 7% 62%")),
+        family("nord", "Nord",
+               dark: pal("220 16% 22%", "220 16% 26%", "219 28% 88%", "220 16% 55%", "213 32% 63%", "193 43% 67%", "220 16% 36%", "92 28% 65%", "354 42% 56%", "220 16% 55%"),
+               light: pal("220 16% 94%", "220 16% 90%", "220 16% 22%", "220 16% 36%", "213 32% 52%", "92 28% 65%", "220 16% 82%", "92 28% 50%", "354 42% 56%", "220 16% 50%")),
+        family("everforest", "Everforest",
+               dark: pal("192 15% 19%", "192 12% 24%", "38 23% 74%", "120 5% 50%", "95 35% 63%", "24 74% 68%", "195 10% 33%", "95 35% 63%", "359 73% 70%", "120 5% 50%"),
+               light: pal("47 55% 94%", "48 38% 90%", "195 12% 40%", "110 8% 55%", "92 99% 32%", "24 93% 55%", "45 18% 84%", "92 99% 32%", "1 92% 65%", "110 8% 55%")),
+        family("gruvbox", "Gruvbox",
+               dark: pal("0 0% 16%", "20 5% 22%", "40 57% 81%", "35 16% 59%", "27 99% 55%", "42 95% 58%", "27 10% 36%", "64 65% 44%", "6 96% 59%", "0 7% 52%"),
+               light: pal("47 76% 93%", "44 68% 90%", "0 0% 16%", "30 12% 42%", "24 88% 45%", "42 95% 58%", "33 30% 76%", "60 73% 35%", "2 75% 46%", "0 7% 52%")),
+        family("dracula", "Dracula",
+               dark: pal("231 15% 18%", "232 14% 22%", "60 30% 96%", "225 27% 51%", "265 89% 78%", "326 100% 74%", "232 14% 31%", "135 94% 65%", "0 100% 67%", "225 27% 51%"),
+               light: pal("231 40% 96%", "231 30% 93%", "231 15% 18%", "225 20% 45%", "265 89% 55%", "326 80% 52%", "231 20% 83%", "135 60% 38%", "0 100% 50%", "225 20% 50%")),
+        family("solarized", "Solarized",
+               dark: pal("193 100% 11%", "192 81% 14%", "180 7% 73%", "194 14% 40%", "205 82% 48%", "45 100% 35%", "192 40% 20%", "68 100% 30%", "1 71% 52%", "194 14% 40%"),
+               light: pal("44 87% 94%", "44 44% 90%", "192 81% 14%", "194 14% 40%", "205 82% 48%", "45 100% 35%", "44 25% 83%", "68 100% 30%", "1 71% 52%", "194 14% 40%")),
+        family("one-dark", "One Dark",
+               dark: pal("220 13% 18%", "220 14% 15%", "219 14% 71%", "220 14% 45%", "207 82% 66%", "286 60% 67%", "220 13% 28%", "95 38% 62%", "355 65% 65%", "220 14% 45%"),
+               light: pal("230 8% 97%", "230 6% 93%", "230 8% 24%", "230 6% 50%", "222 87% 55%", "301 62% 40%", "230 5% 83%", "120 34% 42%", "4 72% 55%", "230 6% 50%")),
+        family("monokai", "Monokai",
+               dark: pal("70 8% 15%", "70 8% 11%", "60 30% 96%", "50 11% 41%", "338 95% 56%", "80 76% 53%", "70 6% 25%", "80 76% 53%", "338 95% 56%", "50 11% 41%"),
+               light: pal("60 10% 96%", "60 8% 93%", "70 8% 15%", "50 11% 41%", "338 95% 45%", "80 76% 42%", "50 8% 82%", "80 76% 38%", "338 95% 45%", "50 11% 45%")),
+        family("ocean", "Ocean",
+               dark: pal("222 47% 11%", "217 33% 17%", "214 32% 91%", "215 20% 65%", "170 70% 59%", "38 92% 50%", "217 15% 28%", "160 60% 55%", "0 91% 71%", "215 20% 55%"),
+               light: pal("170 50% 98%", "170 35% 95%", "215 28% 17%", "215 16% 47%", "174 61% 31%", "38 92% 50%", "170 15% 85%", "160 60% 35%", "0 84% 60%", "215 16% 47%")),
+        family("sakura", "Sakura",
+               dark: pal("260 20% 12%", "260 15% 16%", "20 30% 88%", "260 8% 50%", "340 68% 69%", "120 25% 65%", "260 10% 27%", "120 30% 60%", "0 80% 65%", "260 10% 55%"),
+               light: pal("20 60% 98%", "20 35% 95%", "260 15% 15%", "260 8% 50%", "340 55% 55%", "120 25% 56%", "20 15% 85%", "120 30% 45%", "0 70% 55%", "260 8% 55%")),
+        family("copper", "Copper",
+               dark: pal("0 0% 11%", "0 0% 15%", "30 18% 82%", "20 6% 50%", "28 59% 60%", "0 30% 63%", "0 0% 25%", "140 35% 55%", "0 72% 62%", "20 6% 55%"),
+               light: pal("30 24% 95%", "30 18% 91%", "0 0% 12%", "20 6% 45%", "28 60% 47%", "0 30% 63%", "30 12% 80%", "140 35% 40%", "0 65% 50%", "20 6% 50%")),
+        // omoi-station originals
+        family("mc-vinyl-noir", "Vinyl Noir",
+               dark: pal("30 8% 10%", "30 6% 14%", "35 18% 78%", "30 10% 48%", "35 55% 58%", "42 40% 62%", "30 6% 22%", "145 25% 55%", "10 55% 58%", "30 10% 48%"),
+               light: pal("35 20% 95%", "35 15% 91%", "30 5% 15%", "30 8% 45%", "32 45% 42%", "42 35% 50%", "35 10% 80%", "145 25% 40%", "10 50% 48%", "30 8% 48%")),
+        family("mc-neon-dusk", "Neon Dusk",
+               dark: pal("250 15% 12%", "250 12% 16%", "260 15% 80%", "260 8% 48%", "320 40% 65%", "175 35% 58%", "250 8% 26%", "160 30% 55%", "350 45% 62%", "260 8% 50%"),
+               light: pal("260 12% 96%", "260 10% 93%", "250 10% 18%", "260 6% 48%", "320 35% 48%", "175 30% 42%", "260 6% 82%", "160 25% 42%", "350 40% 48%", "260 6% 50%")),
+        family("mc-burnt-tape", "Burnt Tape",
+               dark: pal("20 15% 10%", "20 12% 14%", "30 15% 76%", "20 8% 46%", "18 50% 56%", "38 45% 58%", "20 8% 22%", "150 22% 52%", "5 50% 55%", "20 8% 48%"),
+               light: pal("30 30% 94%", "30 22% 90%", "20 12% 18%", "20 8% 48%", "16 45% 42%", "38 40% 48%", "28 12% 80%", "150 22% 42%", "5 45% 45%", "20 8% 50%")),
+        family("mc-phantom-frequency", "Phantom Frequency",
+               dark: pal("220 18% 11%", "220 15% 15%", "210 18% 78%", "215 10% 46%", "240 28% 65%", "168 30% 55%", "220 10% 24%", "155 25% 55%", "345 40% 60%", "215 10% 48%"),
+               light: pal("210 20% 96%", "210 15% 93%", "220 15% 18%", "215 10% 48%", "240 22% 48%", "168 25% 48%", "210 10% 82%", "155 22% 42%", "345 35% 48%", "215 10% 50%")),
+        family("mc-velvet-static", "Velvet Static",
+               dark: pal("280 15% 10%", "280 12% 14%", "300 12% 80%", "290 8% 46%", "335 35% 62%", "45 35% 62%", "280 8% 24%", "155 22% 55%", "350 45% 60%", "290 8% 48%"),
+               light: pal("300 10% 96%", "300 8% 93%", "280 10% 16%", "290 6% 48%", "330 28% 42%", "45 30% 52%", "300 5% 82%", "155 20% 42%", "350 40% 45%", "290 6% 48%")),
+        // sync-themes: end
+        // swiftformat:enable all
+    ]
+
+    // MARK: - Redlamp
+
+    // The brand's room: warm near-black, paper text, steel edges. The red is kept to the accent, since
+    // the brand allows it once per view (Redlamp's docs/brand/README.md).
+    // sync-themes: redlamp
+    static let redlampDark = ThemePalette(
+        background: Brand.wall, card: Brand.bakelite, foreground: Brand.paper,
+        muted: Brand.ring.mixed(with: Brand.steel, amount: 0.5),
+        primary: Brand.safelight, accent: Brand.filament, border: Brand.steel,
+        success: hsl("95 22% 52%"), destructive: hsl("6 40% 50%"), neutral: Brand.ring,
+        primaryRoles: .accent,
+    )
+
+    static let redlampLight = ThemePalette(
+        background: Brand.paper, card: Brand.paper.mixed(with: Brand.ink, amount: 0.04), foreground: Brand.ink,
+        muted: Brand.steel.mixed(with: Brand.paper, amount: 0.3), primary: Brand.safelightOnLight,
+        accent: Brand.safelight, border: Brand.ring,
+        success: hsl("95 25% 38%"), destructive: hsl("6 45% 40%"), neutral: Brand.steel,
+        primaryRoles: .accent,
+    )
+    // sync-themes: end
+
+    /// Redlamp's brand colours, which the Redlamp family is made of.
+    enum Brand {
+        // sync-themes: brand
+        static let safelight = RGBA(red: 224 / 255, green: 64 / 255, blue: 46 / 255)
+        static let safelightOnLight = RGBA(red: 216 / 255, green: 53 / 255, blue: 42 / 255)
+        static let filament = RGBA(red: 255 / 255, green: 176 / 255, blue: 138 / 255)
+        static let wall = RGBA(red: 10 / 255, green: 7 / 255, blue: 7 / 255)
+        static let bakelite = RGBA(red: 34 / 255, green: 28 / 255, blue: 26 / 255)
+        static let steel = RGBA(red: 87 / 255, green: 80 / 255, blue: 78 / 255)
+        static let ring = RGBA(red: 217 / 255, green: 208 / 255, blue: 203 / 255)
+        static let paper = RGBA(red: 243 / 255, green: 238 / 255, blue: 232 / 255)
+        static let ink = RGBA(red: 26 / 255, green: 20 / 255, blue: 20 / 255)
+        // sync-themes: end
+    }
+
+    // MARK: - Builder
+
+    private static func family(_ id: String, _ name: String, dark: ThemePalette, light: ThemePalette) -> Family {
+        Family(id: id, name: name, dark: dark, light: light)
+    }
+
+    private static func pal(
+        _ background: String, _ card: String, _ foreground: String, _ muted: String, _ primary: String,
+        _ accent: String, _ border: String, _ success: String, _ destructive: String, _ neutral: String,
+    ) -> ThemePalette {
+        ThemePalette(
+            background: hsl(background), card: hsl(card), foreground: hsl(foreground), muted: hsl(muted),
+            primary: hsl(primary), accent: hsl(accent), border: hsl(border), success: hsl(success),
+            destructive: hsl(destructive), neutral: hsl(neutral),
+        )
+    }
+
+    /// Parses `"H S% L%"`. The palettes are authored data, so malformed input only guards
+    /// typos and yields black.
+    static func hsl(_ string: String) -> RGBA {
+        let parts = string.split(whereSeparator: { $0 == " " || $0 == "%" }).compactMap { Double($0) }
+        guard parts.count >= 3 else { return RGBA(white: 0) }
+        return RGBA(hue: parts[0], saturation: parts[1] / 100, lightness: parts[2] / 100)
+    }
+}
+
+extension RGBA {
+    /// From its channels, as Redlamp writes its brand's colours.
+    init(red: Double, green: Double, blue: Double, alpha: Double = 1) {
+        self.init(r: red, g: green, b: blue, a: alpha)
+    }
+
+    /// A grey.
+    init(white: Double, alpha: Double = 1) {
+        self.init(r: white, g: white, b: white, a: alpha)
+    }
+
+    /// Hue in degrees (wrapped), saturation and lightness 0...1: the HSL model themes are
+    /// authored in.
+    init(hue degrees: Double, saturation: Double, lightness: Double, alpha: Double = 1) {
+        let hue = ((degrees.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360)
+        let a = saturation * min(lightness, 1 - lightness)
+        func channel(_ n: Double) -> Double {
+            let k = (n + hue / 30).truncatingRemainder(dividingBy: 12)
+            return lightness - a * max(-1, min(k - 3, 9 - k, 1))
+        }
+        self.init(r: channel(0), g: channel(8), b: channel(4), a: alpha)
+    }
+
+    /// `amount` of the way to `other`, as Redlamp writes it.
+    func mixed(with other: RGBA, amount: Double) -> RGBA {
+        mixed(with: other, amount)
+    }
+}
+```
+
+- [ ] **Step 4: Map it**
+
+Create `mac/JawThemes/Sources/RedlampRoles.swift`:
+
+```swift
+import Foundation
+
+/// jaw's roles from Redlamp's families, by the Mac design's table, then held as Omarchy's are: every
+/// colour at 3:1 against the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1,
+/// and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, so
+/// a family made for a photo editor's panels reads in a chat, readable over exact (Owner, 6 Nov).
+public enum RedlampRoles {
+    /// A family's half: `primary`, or `neutral` where `primaryRoles` keeps it out, takes the accent and
+    /// links, the selection at 20% over `card` (16% in light) and your bubbles at 18% over `background`
+    /// (12%); `accent` takes mentions, `success` online and `destructive` failed; the senders are eight
+    /// hues 45° apart from `primary`'s.
+    public static func roles(_ p: ThemePalette, dark: Bool) -> Roles {
+        let tint = p.primaryRoles.contains(.selection) ? p.primary : p.neutral
+        return held(
+            dark: dark, ground: p.background, surface: p.card, text: p.foreground,
+            selection: tint.opacity(dark ? 0.2 : 0.16).over(p.card), yours: tint.opacity(dark ? 0.18 : 0.12).over(p.background),
+            secondary: p.muted, tertiary: p.muted.opacity(0.28 / 0.45).over(p.background), separator: p.border,
+            accent: p.primaryRoles.contains(.accent) ? p.primary : p.neutral,
+            mention: p.accent, online: p.success, failed: p.destructive, hue: p.primary,
+        )
+    }
+
+    /// Neutral, Redlamp's own grey: its standard tokens' greys at their alphas over its panel, white
+    /// over 11.5% grey in dark and black over 92.5% in light; its accent the system's, which Redlamp's
+    /// Neutral leaves its accent to; and the system's orange, green and red for mentions, online and
+    /// failed, as macOS draws them in each appearance, held as a family's are, its senders' hues from
+    /// the accent's.
+    public static func neutral(dark: Bool, accent: RGBA) -> Roles {
+        let ink = dark ? RGBA(0xFFFFFF) : RGBA(0x000000)
+        let ground = dark ? RGBA(r: 0.115, g: 0.115, b: 0.115) : RGBA(r: 0.925, g: 0.925, b: 0.925)
+        let surface = RGBA(0xFFFFFF).opacity(dark ? 0.05 : 0.55).over(ground)
+        return held(
+            dark: dark, ground: ground, surface: surface, text: ink.opacity(dark ? 0.9 : 0.88).over(ground),
+            selection: ink.opacity(dark ? 0.1 : 0.08).over(surface), yours: accent.opacity(dark ? 0.18 : 0.12).over(ground),
+            secondary: ink.opacity(dark ? 0.45 : 0.5).over(ground), tertiary: ink.opacity(dark ? 0.28 : 0.3).over(ground),
+            separator: ink.opacity(dark ? 0.07 : 0.09).over(ground), accent: accent,
+            mention: dark ? RGBA(0xFF9F0A) : RGBA(0xFF9500), online: dark ? RGBA(0x30D158) : RGBA(0x34C759),
+            failed: dark ? RGBA(0xFF453A) : RGBA(0xFF3B30), hue: accent,
+        )
+    }
+
+    /// The roles from what a half gives each, held: colours at 3:1 on the ground and then the surface,
+    /// the dim text in its band, the selection and your bubbles under text, a selected row's online at
+    /// 4.5:1 on its selection, links as the accent and the borders as authored.
+    static func held(dark: Bool, ground: RGBA, surface: RGBA, text: RGBA, selection: RGBA, yours: RGBA, secondary: RGBA,
+                     tertiary: RGBA, separator: RGBA, accent: RGBA, mention: RGBA, online: RGBA, failed: RGBA, hue: RGBA) -> Roles
+    {
+        let (g, s, t) = (ground.hex, surface.hex, text.hex)
+        func both(_ c: RGBA) -> UInt32 {
+            Contrast.fit(Contrast.fit(c.hex, on: g, toward: t, low: 3, target: 3), on: s, toward: t, low: 3, target: 3)
+        }
+        let picked = under(t, selection.hex, toward: s)
+        let on = both(online)
+        let a = RGBA(both(accent))
+        return Roles(
+            isDark: dark, ground: RGBA(g), surface: RGBA(s), selection: RGBA(picked), text: RGBA(t), secondary: RGBA(both(secondary)),
+            tertiary: RGBA(Contrast.fit(tertiary.hex, on: g, toward: t, low: 2.5, high: 4.5, target: 3)), separator: RGBA(separator.hex),
+            accent: a, link: a, yours: RGBA(under(t, yours.hex, toward: g)), mention: RGBA(both(mention)), online: RGBA(on),
+            selectedOnline: RGBA(Contrast.fit(on, on: picked, toward: t, low: 4.5, target: 4.5)), failed: RGBA(both(failed)),
+            senders: senders(from: hue, on: s, dark: dark),
+        )
+    }
+
+    /// `fill` moved toward `ground` until `text` reads at 4.5:1 on it.
+    static func under(_ text: UInt32, _ fill: UInt32, toward ground: UInt32) -> UInt32 {
+        guard Contrast.ratio(text, fill) < 4.5 else { return fill }
+        var (near, far) = (0.0, 1.0)
+        for _ in 0 ..< 30 {
+            let t = (near + far) / 2
+            if Contrast.ratio(text, Contrast.mix(fill, ground, t)) < 4.5 {
+                near = t
+            } else {
+                far = t
+            }
+        }
+        return Contrast.mix(fill, ground, far)
+    }
+
+    /// Eight hues 45° apart from `primary`'s, its saturation and lightness kept, each lightened in dark
+    /// or darkened in light half a percent at a time until it reads at 4.5:1 on `surface`.
+    static func senders(from primary: RGBA, on surface: UInt32, dark: Bool) -> [RGBA] {
+        let (hue, saturation, lightness) = hsl(primary)
+        return (0 ..< 8).map { k in
+            var l = lightness
+            var colour = RGBA(hue: hue + Double(k) * 45, saturation: saturation, lightness: l).hex
+            var steps = 0
+            while Contrast.ratio(colour, surface) < 4.5, steps < 200 {
+                l = min(max(l + (dark ? 0.005 : -0.005), 0), 1)
+                colour = RGBA(hue: hue + Double(k) * 45, saturation: saturation, lightness: l).hex
+                steps += 1
+            }
+            return RGBA(colour)
+        }
+    }
+
+    /// A colour's hue in degrees, its saturation and its lightness, as HSL has them.
+    static func hsl(_ c: RGBA) -> (hue: Double, saturation: Double, lightness: Double) {
+        let (high, low) = (max(c.r, c.g, c.b), min(c.r, c.g, c.b))
+        let lightness = (high + low) / 2
+        guard high > low else { return (0, 0, lightness) }
+        let d = high - low
+        let saturation = lightness > 0.5 ? d / (2 - high - low) : d / (high + low)
+        let hue: Double = switch high {
+        case c.r: (c.g - c.b) / d + (c.g < c.b ? 6 : 0)
+        case c.g: (c.b - c.r) / d + 2
+        default: (c.r - c.g) / d + 4
+        }
+        return (hue * 60, saturation, lightness)
+    }
+}
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 0, `** TEST SUCCEEDED **`, with four more tests than Task 2 left. If `redlampMoves` or the five untouched halves differ from what the port finds, check `RedlampRoles` against the design's table and bands before changing the lists, and say so in the report.
+
+- [ ] **Step 6: Write `scripts/sync-themes`**
+
+Create `scripts/sync-themes`, and make it executable with `chmod +x scripts/sync-themes`:
+
+```python
+#!/usr/bin/env python3
+"""Keeps jaw's copy of Redlamp's theme catalog in step with Redlamp's own.
+
+    scripts/sync-themes            # copy the catalog's data from Redlamp at the commit pinned below
+    scripts/sync-themes --check    # say what differs, failing if jaw's copy isn't the pinned commit's
+
+mac/JawThemes/Sources/RedlampCatalog.swift holds the data of Redlamp's catalog, its owner having
+relicensed it for jaw under jaw's MIT licence on 6 November 2026: between its `// sync-themes: <region>`
+markers, line for line as Redlamp has it, its families' ten HSL colours (`families`), the Redlamp
+family's two palettes (`redlamp`) and the brand's nine colours they're made of (`brand`). Redlamp's
+repository is private, so this reads a checkout of it, ~/src/darkroom or the folder REDLAMP names, with
+`git show` at REDLAMP_COMMIT, never checking anything out, fetching or writing there; with no checkout,
+as in CI, it says so and checks nothing. --check also says what the checkout's own main has changed in
+those files since the pinned commit, Neutral's tokens in Tokens/Palette.swift among them, which jaw's
+RedlampRoles.neutral is written from by hand. To move to a newer Redlamp, change REDLAMP_COMMIT, run
+this and look at what changed: a family added or gone changes the gallery and the tests that list
+Redlamp's families.
+"""
+
+import argparse
+import difflib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REDLAMP_COMMIT = "9fa9d915540782ce600ee6e4854dc3f2ccd15250"
+ROOT = Path(__file__).resolve().parent.parent
+COPY = ROOT / "mac" / "JawThemes" / "Sources" / "RedlampCatalog.swift"
+CATALOG = "packages/RedlampDesign/Sources/Themes/ThemeCatalog.swift"
+BRAND = "packages/RedlampDesign/Sources/Tokens/Brand.swift"
+PALETTE = "packages/RedlampDesign/Sources/Tokens/Palette.swift"
+REGIONS = ("families", "redlamp", "brand")
+MARKED = r"(^[ ]*// sync-themes: {}\n)(.*?)(^[ ]*// sync-themes: end$)"
+
+
+def checkout() -> Path:
+    return Path(os.environ.get("REDLAMP") or Path.home() / "src" / "darkroom")
+
+
+def show(where: Path, rev: str, path: str) -> str:
+    """A file of Redlamp's at `rev`, read without touching the checkout."""
+    return subprocess.run(
+        ["git", "-C", str(where), "show", f"{rev}:{path}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+    ).stdout
+
+
+def families(catalog: str) -> list[str]:
+    """The families' lines, from omoi-station's classic palettes to the last of its originals."""
+    lines = catalog.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "// omoi-station classic palettes")
+    end = next(i for i, line in enumerate(lines) if i > start and line.strip() == "// swiftlint:enable line_length")
+    return lines[start:end]
+
+
+def palettes(catalog: str) -> list[str]:
+    """The Redlamp family's two palettes, as written, with a blank line between them."""
+    blocks = re.findall(r"^    static let redlamp(?:Dark|Light) = ThemePalette\(\n.*?^    \)$", catalog, re.S | re.M)
+    if len(blocks) != 2:
+        sys.exit("sync-themes: Redlamp's catalog doesn't have the Redlamp family's two palettes where it did")
+    return "\n\n".join(blocks).splitlines()
+
+
+def brand(text: str) -> list[str]:
+    """The brand's colours, one line each, as jaw's copy nests them."""
+    return [f"        static let {name} = {value}" for name, value in re.findall(r"static let (\w+) = (RGBA\(red: [^)]*\))", text)]
+
+
+def neutral(palette: str) -> str:
+    """Redlamp's standard tokens, dark and light, which Neutral is."""
+    found = re.search(
+        r"public static let standard = PaletteTokens\(.*?\n    \)\n\n.*?public static let standardLight = PaletteTokens\(.*?\n    \)",
+        palette,
+        re.S,
+    )
+    return found.group(0) if found else ""
+
+
+def wanted(where: Path, rev: str) -> dict[str, list[str]]:
+    catalog = show(where, rev, CATALOG)
+    return {"families": families(catalog), "redlamp": palettes(catalog), "brand": brand(show(where, rev, BRAND))}
+
+
+def present(copy: str) -> dict[str, list[str]]:
+    out = {}
+    for name in REGIONS:
+        found = re.search(MARKED.format(name), copy, re.S | re.M)
+        if not found:
+            sys.exit(f"sync-themes: {COPY.relative_to(ROOT)} has no `// sync-themes: {name}` region")
+        out[name] = found.group(2).rstrip("\n").splitlines()
+    return out
+
+
+def written(copy: str, regions: dict[str, list[str]]) -> str:
+    for name, lines in regions.items():
+        copy = re.sub(
+            MARKED.format(name),
+            lambda m, lines=lines: m.group(1) + "\n".join(lines) + "\n" + m.group(3),
+            copy,
+            count=1,
+            flags=re.S | re.M,
+        )
+    return copy
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="say what differs; fail if jaw's copy isn't the pinned commit's")
+    args = parser.parse_args()
+    where = checkout()
+    if not (where / ".git").exists():
+        print(f"sync-themes: no checkout of Redlamp at {where}, so nothing is checked (REDLAMP names another)")
+        return
+    pinned = wanted(where, REDLAMP_COMMIT)
+    copy = COPY.read_text()
+    if not args.check:
+        COPY.write_text(written(copy, pinned))
+        print(f"sync-themes: {COPY.relative_to(ROOT)} has Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
+        return
+    have = present(copy)
+    differs = [name for name in REGIONS if have[name] != pinned[name]]
+    for name in differs:
+        print(f"sync-themes: {name} differs from Redlamp's at {REDLAMP_COMMIT[:9]}:")
+        sys.stdout.writelines(difflib.unified_diff([l + "\n" for l in pinned[name]], [l + "\n" for l in have[name]], "redlamp", "jaw"))
+    moved = wanted(where, "main")
+    for name in REGIONS:
+        if moved[name] != pinned[name]:
+            print(f"sync-themes: Redlamp's main has changed {name} since {REDLAMP_COMMIT[:9]}: move REDLAMP_COMMIT to take it")
+    if neutral(show(where, "main", PALETTE)) != neutral(show(where, REDLAMP_COMMIT, PALETTE)):
+        print(f"sync-themes: Redlamp's main has changed Neutral's tokens since {REDLAMP_COMMIT[:9]}: look at RedlampRoles.neutral")
+    if not differs:
+        print(f"sync-themes: jaw's copy is Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
+    sys.exit(1 if differs else 0)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 7: Try it**
+
+It reads Redlamp's checkout with `git show`, which changes nothing there, and builds nothing, so it runs here.
+
+Run: `scripts/sync-themes --check`
+Expected: `sync-themes: jaw's copy is Redlamp's catalog at 9fa9d9155`, exit 0, and nothing about Redlamp's main, whose `main` was at 9fa9d91 on 6 November; if it has moved since, it says which regions, which is a note, not a failure.
+
+Run: `sed -i '' 's/"240 16% 14%", "240 16% 11%"/"240 16% 15%", "240 16% 11%"/' mac/JawThemes/Sources/RedlampCatalog.swift && scripts/sync-themes --check; echo "exit $?"`
+Expected: `sync-themes: families differs from Redlamp's at 9fa9d9155:`, a diff with `-` Redlamp's line and `+` jaw's changed one, and `exit 1`.
+
+Run: `scripts/sync-themes && git diff --exit-code mac/JawThemes/Sources/RedlampCatalog.swift && scripts/sync-themes --check`
+Expected: `sync-themes: mac/JawThemes/Sources/RedlampCatalog.swift has Redlamp's catalog at 9fa9d9155`, no diff (the copy is back as Steps 3 wrote it), then the `--check` line of the first run, exit 0.
+
+Run: `REDLAMP=/tmp/no-redlamp-here scripts/sync-themes --check; echo "exit $?"`
+Expected: `sync-themes: no checkout of Redlamp at /tmp/no-redlamp-here, so nothing is checked (REDLAMP names another)` and `exit 0`.
+
+Then `mac/scripts/build-mac build` and `make check-parity`; each exits 0.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add mac/JawThemes/Sources/RedlampCatalog.swift mac/JawThemes/Sources/RedlampRoles.swift scripts/sync-themes mac/Tests/JawThemesTests/RedlampTests.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Redlamp's theme catalog comes into jaw, as the owner chose on 6 November, relicensed by its owner under jaw's MIT ("I own redlamp, MIT is fine"): RedlampCatalog.swift holds its 21 families of ten HSL colours in Redlamp's order, the Redlamp family's two palettes and the brand's nine colours, line for line between sync-themes markers, with ThemePalette, PrimaryRoles and its HSL parser, and RedlampRoles maps each half onto the Mac's roles by the Mac design's table, then holds it by the bands Omarchy's go through, readable over exact, so the dim text, mentions, online and secondary text are raised where a photo editor's panels had them faint, five dark halves coming through untouched, the Redlamp family keeps its red to the accent and links, the senders are eight hues 45° apart from primary's at 4.5:1 on their bubble, and Neutral is Redlamp's standard greys with the system's accent and its orange, green and red; scripts/sync-themes pins Redlamp's 9fa9d91, copies the regions from a checkout with git show and never touches it, and with --check says what differs and what Redlamp's main has changed since, Neutral's tokens included, saying so and checking nothing where there's no checkout, as in CI
+EOF
+```
+
+---
+
+### Task 4: Every theme in a catalog, and a slot for dark and one for light
+
+**Files:**
+- Create: `mac/JawThemes/Sources/Theme.swift`, `mac/JawThemes/Sources/Slots.swift`
+- Modify: `mac/JawUI/Sources/Style/Preferences.swift` (`Preferences` at lines 60-136), `mac/JawUI/Sources/Settings/Panes.swift` (`AppearancePane`, Task 1's), `mac/JawUI/Sources/Settings/SettingsPane.swift` (`size`), `mac/JawApp/Sources/AppDelegate.swift` (after the observer of `AppleInterfaceThemeChangedNotification`, lines 38-42), `mac/Tests/JawUITests/SettingsTests.swift` (`scratchPreferences`, Task 1's)
+- Test: `mac/Tests/JawThemesTests/ThemeTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`
+
+**Interfaces:**
+- Consumes: `Omarchy.roles(_:dark:)` and `Omarchy.file(_:)` (Task 2), `RedlampCatalog.families`, `RedlampRoles.roles(_:dark:)` and `RedlampRoles.neutral(dark:accent:)` (Task 3), `Catalog.jaw`, and `omarchyFiles()` from Task 2's tests.
+- Produces, in JawThemes:
+  - `public enum ThemeSource: String, CaseIterable` (`.jaw`, `.omarchy`, `.redlamp`, each with `title`: "Jaw's", "Omarchy's", "Redlamp's").
+  - `public enum Slot: String, CaseIterable` (`.dark`, `.light`, with `isDark` and `title`).
+  - `public struct Theme: Identifiable, Hashable` (`id`, `name`, `source`, `dark: Roles?`, `light: Roles?`, `roles(_ slot: Slot) -> Roles?`).
+  - `public struct OmarchyTheme: Identifiable, Hashable` (`id`, `name`, `dark: Bool`, `colours: [String: String]`), with `init(id:name:dark:colours:)` and `init?(id:file:)`.
+  - `public struct SystemAccent: Hashable` (`dark`, `light`, both `RGBA`), with `static let blue`.
+  - `Omarchy.name(_ id: String) -> String`, jaw-proto's `name`.
+  - `Catalog.jawTheme`, `Catalog.themes(omarchy:accent:) -> [Theme]`, `Catalog.theme(id:omarchy:accent:) -> Theme?` and `Catalog.roles(_ slot: Slot, of: Slots, omarchy:accent:) -> Roles`.
+  - `public struct Slots: Hashable` (`dark`, `light`, both IDs, `subscript(_ slot: Slot) -> String`, `choosing(_ theme: Theme, for slot: Slot, only: Bool = false) -> Slots`).
+- Produces, in JawUI: `Preferences.slots: Slots` in place of `theme`, kept as `themeDark` and `themeLight`; `Preferences.accent: SystemAccent`; `Preferences(defaults:accent:)`; `Preferences.roles(_ slot: Slot) -> Roles`; `Preferences.themes: [Theme]`; `Preferences.systemColoursChanged()`; `SystemAccent.current()`.
+- Produces, in JawThemesTests: `servedThemes() throws -> [OmarchyTheme]`, for Tasks 5 to 7.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawThemesTests/ThemeTests.swift`:
+
+```swift
+import Foundation
+@testable import JawThemes
+import Testing
+
+/// Every theme there is to choose, the two slots that hold them, and what each slot draws: Jaw's
+/// Tokyo Night first, Omarchy's as jawd serves them, then Redlamp's, Neutral in the accent it's given;
+/// a choice filling both slots, the slot of its mode, or one; and Tokyo Night drawn where a slot's
+/// theme can't be had.
+
+/// Omarchy's themes as jawd serves them: read from `protocol/themes/`, named as jaw-proto names them,
+/// in the order of their IDs.
+func servedThemes() throws -> [OmarchyTheme] {
+    try omarchyFiles().map { OmarchyTheme(id: $0.id, name: Omarchy.name($0.id), dark: $0.dark, colours: $0.colours) }
+        .sorted { $0.id < $1.id }
+}
+
+@Test func `the catalog lists Jaw's Tokyo Night, then Omarchy's as jawd serves them, then Redlamp's, and finds each by its ID`() throws {
+    let served = try servedThemes()
+    let themes = Catalog.themes(omarchy: served, accent: .blue)
+    let sources: [ThemeSource] = [.jaw] + Array(repeating: ThemeSource.omarchy, count: 23) + Array(repeating: ThemeSource.redlamp, count: 22)
+    #expect(themes.map { $0.source } == sources)
+    #expect(themes[0] == Catalog.jawTheme && Catalog.jawTheme.id == "jaw" && Catalog.jawTheme.name == "Tokyo Night")
+    #expect(themes[0].dark == Catalog.jaw.dark && themes[0].light == Catalog.jaw.light)
+    #expect(Array(themes.map { $0.id }[1 ... 3]) == ["omarchy:catppuccin", "omarchy:catppuccin-latte", "omarchy:ethereal"])
+    #expect(Array(themes.map { $0.id }[24 ... 26]) == ["redlamp:neutral", "redlamp:redlamp", "redlamp:kanagawa"])
+    #expect(themes.filter { $0.dark != nil }.count == 41 && themes.filter { $0.light != nil }.count == 28,
+            "the dark slot's gallery has 41 cards and the light one's 28, as the design counts them")
+    #expect(themes.filter { $0.source == .omarchy }.allSatisfy { ($0.dark == nil) != ($0.light == nil) }, "one half each")
+    #expect(themes.first { $0.id == "omarchy:rose-pine" }?.name == "Rosé Pine")
+    #expect(Omarchy.name("last-horizon") == "Last Horizon" && Omarchy.name("retro-82") == "Retro 82")
+    for theme in themes {
+        #expect(Catalog.theme(id: theme.id, omarchy: served, accent: .blue) == theme, "\(theme.id)")
+    }
+    #expect(Catalog.theme(id: "nord", omarchy: served, accent: .blue) == nil, "an ID names its source")
+    #expect(Catalog.theme(id: "omarchy:nord", omarchy: [], accent: .blue) == nil, "Omarchy's only once jawd serves them")
+    let broken = OmarchyTheme(id: "broken", name: "Broken", dark: true, colours: ["accent": "#ffffff"])
+    #expect(Catalog.themes(omarchy: [broken], accent: .blue).count == 23, "one whose colours don't map is left out")
+}
+
+@Test func `a slot draws its theme's half, or Jaw's Tokyo Night's where no source has the theme or it has no half of the slot's mode`() throws {
+    let served = try servedThemes()
+    let nord = try #require(RedlampCatalog.families.first { $0.id == "nord" })
+    let both = Slots(dark: "redlamp:nord", light: "redlamp:nord")
+    #expect(Catalog.roles(.dark, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.dark, dark: true))
+    #expect(Catalog.roles(.light, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.light, dark: false))
+    let gruvbox = try #require(served.first { $0.id == "gruvbox" })
+    let held = Slots(dark: "omarchy:gruvbox", light: "omarchy:gruvbox")
+    #expect(Catalog.roles(.dark, of: held, omarchy: served, accent: .blue) == Omarchy.roles(gruvbox.colours, dark: true))
+    #expect(Catalog.roles(.light, of: held, omarchy: served, accent: .blue) == Catalog.jaw.light, "Gruvbox has no light half")
+    #expect(Catalog.roles(.dark, of: held, omarchy: [], accent: .blue) == Catalog.jaw.dark, "jawd hasn't served it")
+    let unknown = Slots(dark: "nord", light: "redlamp:nowhere")
+    #expect(Catalog.roles(.dark, of: unknown, omarchy: served, accent: .blue) == Catalog.jaw.dark)
+    #expect(Catalog.roles(.light, of: unknown, omarchy: served, accent: .blue) == Catalog.jaw.light)
+}
+
+@Test func `a theme with both halves fills both slots, one of Omarchy's the slot of its mode, and ⌥ only the slot chosen for`() throws {
+    let themes = Catalog.themes(omarchy: try servedThemes(), accent: .blue)
+    func theme(_ id: String) throws -> Theme {
+        try #require(themes.first { $0.id == id })
+    }
+    let start = Slots()
+    #expect(start == Slots(dark: "jaw", light: "jaw") && start[.dark] == "jaw" && start[.light] == "jaw")
+    let nord = try start.choosing(theme("redlamp:nord"), for: .dark)
+    #expect(nord == Slots(dark: "redlamp:nord", light: "redlamp:nord"))
+    let gruvbox = try nord.choosing(theme("omarchy:gruvbox"), for: .dark)
+    #expect(gruvbox == Slots(dark: "omarchy:gruvbox", light: "redlamp:nord"))
+    let latte = try gruvbox.choosing(theme("omarchy:catppuccin-latte"), for: .dark)
+    #expect(latte == Slots(dark: "omarchy:gruvbox", light: "omarchy:catppuccin-latte"), "a light theme fills the light slot")
+    let only = try latte.choosing(theme("jaw"), for: .dark, only: true)
+    #expect(only == Slots(dark: "jaw", light: "omarchy:catppuccin-latte"))
+    let wrong = try only.choosing(theme("omarchy:nord"), for: .light, only: true)
+    #expect(wrong == Slots(dark: "omarchy:nord", light: "omarchy:catppuccin-latte"), "a slot never holds a theme of the other mode")
+}
+
+@Test func `Neutral draws in the accent it's given, in each appearance, and Redlamp's families don't change with it`() throws {
+    let purple = SystemAccent(dark: RGBA(0xBF5AF2), light: RGBA(0xAF52DE))
+    let neutral = try #require(Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: purple))
+    #expect(neutral.dark?.accent.hex == 0xBF5AF2 && neutral.light?.accent.hex == 0xAF52DE, "the system's purple reads as it is")
+    #expect(neutral.dark?.link == neutral.dark?.accent)
+    #expect(neutral != Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: .blue))
+    #expect(Catalog.theme(id: "redlamp:nord", omarchy: [], accent: purple) == Catalog.theme(id: "redlamp:nord", omarchy: [], accent: .blue))
+}
+```
+
+Create `mac/Tests/JawUITests/PreferencesTests.swift`:
+
+```swift
+import AppKit
+import JawThemes
+@testable import JawUI
+import Testing
+
+/// The two slots in the app's preferences: Jaw's Tokyo Night in both at first, the `theme` key read
+/// into both once while they're unset and left as it is, `themeDark` and `themeLight` kept, and the
+/// style drawn from the slot of the appearance, worked out again when the slots or the accent change.
+
+@MainActor @Test func `the slots start as Jaw's Tokyo Night, take the theme key once while unset, and are kept as themeDark and themeLight`() throws {
+    #expect(try scratchPreferences("slots-fresh").slots == Slots(dark: "jaw", light: "jaw"))
+    let suite = "jaw.tests.slots-kept"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    defaults.set("redlamp:nord", forKey: "theme")
+    let preferences = Preferences(defaults: defaults, accent: .blue)
+    #expect(preferences.slots == Slots(dark: "redlamp:nord", light: "redlamp:nord"), "read into both while they're unset")
+    preferences.slots[.dark] = "omarchy:gruvbox"
+    #expect(defaults.string(forKey: "themeDark") == "omarchy:gruvbox" && defaults.string(forKey: "themeLight") == "redlamp:nord")
+    #expect(defaults.string(forKey: "theme") == "redlamp:nord", "left as it is, so an earlier build still reads it")
+    defaults.set("jaw", forKey: "theme")
+    #expect(Preferences(defaults: defaults, accent: .blue).slots == Slots(dark: "omarchy:gruvbox", light: "redlamp:nord"),
+            "read only while the slots are unset")
+}
+
+@MainActor @Test func `the style is the slot's theme's half for the appearance, drawn again when the slots or the accent change`() throws {
+    let preferences = try scratchPreferences("slots-style")
+    var told = 0
+    preferences.changed.append { told += 1 }
+    #expect(preferences.style(dark: true).roles == Catalog.jaw.dark && preferences.style(dark: false).roles == Catalog.jaw.light)
+    let nord = try #require(RedlampCatalog.families.first { $0.id == "nord" })
+    preferences.slots = Slots(dark: "redlamp:nord", light: "redlamp:neutral")
+    #expect(preferences.style(dark: true).roles == RedlampRoles.roles(nord.dark, dark: true))
+    #expect(preferences.style(dark: false).roles.accent.hex == 0x007AFF, "Neutral in the system's blue")
+    let purple = SystemAccent(dark: RGBA(0xBF5AF2), light: RGBA(0xAF52DE))
+    preferences.accent = purple
+    #expect(preferences.style(dark: false).roles.accent.hex == 0xAF52DE, "and again in the accent the system has now")
+    #expect(preferences.themes.first { $0.id == "redlamp:neutral" }?.light?.accent.hex == 0xAF52DE)
+    preferences.accent = purple
+    #expect(told == 2, "once for the slots and once for the accent, and not for an accent that didn't change")
+    #expect(preferences.themes.map { $0.id } == Catalog.themes(omarchy: [], accent: purple).map { $0.id })
+}
+```
+
+In `mac/Tests/JawUITests/SettingsTests.swift`, `scratchPreferences` makes its preferences in macOS's blue, so no test depends on the build Mac's accent: `return Preferences(defaults: defaults)` becomes `return Preferences(defaults: defaults, accent: .blue)`.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 1, with `error: cannot find 'OmarchyTheme' in scope` from `ThemeTests.swift`.
+
+- [ ] **Step 3: Write the themes and the slots**
+
+Create `mac/JawThemes/Sources/Theme.swift`:
+
+```swift
+import Foundation
+
+/// Where a theme comes from: Jaw's own, Omarchy's as jawd serves them, or Redlamp's, copied into jaw.
+public enum ThemeSource: String, CaseIterable, Sendable, Hashable {
+    case jaw, omarchy, redlamp
+
+    /// Its section in the gallery, and what follows a theme's name, as in "Gruvbox, Omarchy's".
+    public var title: String {
+        switch self {
+        case .jaw: "Jaw's"
+        case .omarchy: "Omarchy's"
+        case .redlamp: "Redlamp's"
+        }
+    }
+}
+
+/// The two slots a theme fills: the one Jaw draws while the Mac is dark, and the one while it's light.
+public enum Slot: String, CaseIterable, Sendable, Hashable {
+    case dark, light
+
+    public var isDark: Bool {
+        self == .dark
+    }
+
+    public var title: String {
+        isDark ? "Dark" : "Light"
+    }
+}
+
+/// A theme to choose: its ID, as a slot keeps it (`jaw`, `omarchy:<id>` or `redlamp:<id>`, since
+/// Omarchy's and Redlamp's share names such as `nord`), its name, its source, and its halves as the
+/// roles Jaw draws in, a dark one, a light one or both.
+public struct Theme: Sendable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    public var source: ThemeSource
+    public var dark: Roles?
+    public var light: Roles?
+
+    public init(id: String, name: String, source: ThemeSource, dark: Roles?, light: Roles?) {
+        self.id = id
+        self.name = name
+        self.source = source
+        self.dark = dark
+        self.light = light
+    }
+
+    /// The half `slot` would take, where the theme has one.
+    public func roles(_ slot: Slot) -> Roles? {
+        slot.isDark ? dark : light
+    }
+}
+
+/// One of Omarchy's themes as jawd serves it: its ID and its name as jawd gives them, its mode, and its
+/// colours by Omarchy's keys, `#rrggbb`, as jawd sends them and the app remembers them.
+public struct OmarchyTheme: Sendable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    public var dark: Bool
+    public var colours: [String: String]
+
+    public init(id: String, name: String, dark: Bool, colours: [String: String]) {
+        self.id = id
+        self.name = name
+        self.dark = dark
+        self.colours = colours
+    }
+
+    /// One read from its `colors.toml`, named as jawd names it; nil where jaw-proto wouldn't read it.
+    public init?(id: String, file text: String) {
+        guard let read = Omarchy.file(text) else { return nil }
+        self.init(id: id, name: Omarchy.name(id), dark: read.dark, colours: read.colours)
+    }
+}
+
+/// The system's accent as it's drawn in a dark appearance and in a light one, which Neutral takes.
+public struct SystemAccent: Sendable, Hashable {
+    public var dark: RGBA
+    public var light: RGBA
+
+    public init(dark: RGBA, light: RGBA) {
+        self.dark = dark
+        self.light = light
+    }
+
+    /// macOS's blue, the accent until another is chosen in System Settings, which the tests and the
+    /// harness draw Neutral in, so their pictures don't depend on the Mac's.
+    public static let blue = SystemAccent(dark: RGBA(0x0A84FF), light: RGBA(0x007AFF))
+}
+
+public extension Omarchy {
+    /// What jawd shows a theme as, as jaw-proto names it: its ID's words capitalised, and Rosé Pine
+    /// with its accent.
+    static func name(_ id: String) -> String {
+        if id == "rose-pine" { return "Rosé Pine" }
+        return id.split(separator: "-", omittingEmptySubsequences: false).map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+}
+
+public extension Catalog {
+    /// Jaw's Tokyo Night as a theme to choose, with both halves, its ID `jaw` as before.
+    static let jawTheme = Theme(id: jaw.id, name: "Tokyo Night", source: .jaw, dark: jaw.dark, light: jaw.light)
+
+    /// Every theme there is to choose, in the gallery's order: Jaw's Tokyo Night; Omarchy's in the
+    /// order jawd serves them, but for one whose colours don't map; and Redlamp's, Neutral in `accent`,
+    /// then its families in Redlamp's order.
+    static func themes(omarchy: [OmarchyTheme], accent: SystemAccent) -> [Theme] {
+        let served = omarchy.compactMap { theme($0) }
+        return [jawTheme] + served + [neutral(accent)] + redlampFamilies
+    }
+
+    /// The theme `id` names, from the source it names, or nil where that source hasn't it.
+    static func theme(id: String, omarchy: [OmarchyTheme], accent: SystemAccent) -> Theme? {
+        if id == jawTheme.id { return jawTheme }
+        if id == "redlamp:neutral" { return neutral(accent) }
+        if id.hasPrefix("omarchy:") { return omarchy.first { "omarchy:" + $0.id == id }.flatMap { theme($0) } }
+        return RedlampCatalog.families.first { "redlamp:" + $0.id == id }.map { theme($0) }
+    }
+
+    /// What `slot` draws: its theme's half for it, or Jaw's Tokyo Night's where no source has the theme
+    /// or it has no half of the slot's mode, as the terminal draws a theme it doesn't know.
+    static func roles(_ slot: Slot, of slots: Slots, omarchy: [OmarchyTheme], accent: SystemAccent) -> Roles {
+        theme(id: slots[slot], omarchy: omarchy, accent: accent)?.roles(slot) ?? jaw.roles(dark: slot.isDark)
+    }
+}
+
+extension Catalog {
+    /// One of Omarchy's, `omarchy:<id>`, with the half of its mode; nil where its colours don't map,
+    /// which jawd's own reading of them keeps from happening.
+    static func theme(_ o: OmarchyTheme) -> Theme? {
+        guard let roles = Omarchy.roles(o.colours, dark: o.dark) else { return nil }
+        return Theme(id: "omarchy:" + o.id, name: o.name, source: .omarchy, dark: o.dark ? roles : nil, light: o.dark ? nil : roles)
+    }
+
+    /// One of Redlamp's families, `redlamp:<id>`, with both halves.
+    static func theme(_ family: RedlampCatalog.Family) -> Theme {
+        Theme(id: "redlamp:" + family.id, name: family.name, source: .redlamp,
+              dark: RedlampRoles.roles(family.dark, dark: true), light: RedlampRoles.roles(family.light, dark: false))
+    }
+
+    /// Neutral, `redlamp:neutral`, in the system's accent.
+    static func neutral(_ accent: SystemAccent) -> Theme {
+        Theme(id: "redlamp:neutral", name: "Neutral", source: .redlamp, dark: RedlampRoles.neutral(dark: true, accent: accent.dark),
+              light: RedlampRoles.neutral(dark: false, accent: accent.light))
+    }
+
+    /// Redlamp's families as themes, mapped once, as they never change while the app runs.
+    static let redlampFamilies = RedlampCatalog.families.map { theme($0) }
+}
+```
+
+Create `mac/JawThemes/Sources/Slots.swift`:
+
+```swift
+import Foundation
+
+/// The theme in each slot, by ID: the one Jaw draws while the Mac is dark, and the one while it's
+/// light. Both hold Jaw's Tokyo Night at first.
+public struct Slots: Sendable, Hashable {
+    public var dark: String
+    public var light: String
+
+    public init(dark: String = Catalog.jaw.id, light: String = Catalog.jaw.id) {
+        self.dark = dark
+        self.light = light
+    }
+
+    public subscript(_ slot: Slot) -> String {
+        get { slot.isDark ? dark : light }
+        set {
+            if slot.isDark { dark = newValue } else { light = newValue }
+        }
+    }
+
+    /// The slots once `theme` is chosen for `slot`: one with both halves fills both, each with its own
+    /// half, unless `only`, as ⌥-click is, which fills `slot` alone; one with a single half fills the
+    /// slot of its mode, so a slot never holds a theme of the other mode.
+    public func choosing(_ theme: Theme, for slot: Slot, only: Bool = false) -> Slots {
+        var next = self
+        switch (theme.dark != nil, theme.light != nil) {
+        case (true, true) where only:
+            next[slot] = theme.id
+        case (true, true):
+            next.dark = theme.id
+            next.light = theme.id
+        case (true, false):
+            next.dark = theme.id
+        case (false, true):
+            next.light = theme.id
+        case (false, false):
+            break
+        }
+        return next
+    }
+}
+```
+
+- [ ] **Step 4: Run JawThemes' tests**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 0, `** TEST SUCCEEDED **`, with four more tests than Task 3 left.
+
+- [ ] **Step 5: Keep the slots in the preferences**
+
+In `mac/JawUI/Sources/Style/Preferences.swift`, `Preferences` keeps the slots in place of `theme`, the system's accent beside them, and what they draw until they change. Replace the line `    public var theme: String { didSet { save() } }` with:
+
+```swift
+    /// The theme in each slot, by ID, kept as `themeDark` and `themeLight`.
+    public var slots: Slots {
+        didSet {
+            made = [:]
+            save()
+        }
+    }
+
+    /// The system's accent in each appearance, which Neutral draws in, read again by
+    /// `systemColoursChanged()`, and not kept, as it's the system's.
+    public var accent: SystemAccent {
+        didSet {
+            guard accent != oldValue else { return }
+            made = [:]
+            listed = nil
+            tell()
+        }
+    }
+```
+
+After `@ObservationIgnored public var changed: [() -> Void] = []`, add:
+
+```swift
+    /// Each slot's roles and every theme there is, worked out once until what they rest on changes,
+    /// since the app reads its style on every layout.
+    @ObservationIgnored var made: [Slot: Roles] = [:]
+    @ObservationIgnored var listed: [Theme]?
+```
+
+`public init(defaults: UserDefaults = .standard) {` becomes:
+
+```swift
+    /// `accent` is the system's unless one's given, as the tests give macOS's blue.
+    public init(defaults: UserDefaults = .standard, accent: SystemAccent? = nil) {
+```
+
+and in it, the line `        theme = defaults.string(forKey: "theme") ?? Catalog.jaw.id` becomes:
+
+```swift
+        // The theme key holds the one theme there was before the slots: it's read into both while
+        // they're unset, and left as it is, so an earlier build still reads it.
+        let theme = defaults.string(forKey: "theme") ?? Catalog.jaw.id
+        slots = Slots(dark: defaults.string(forKey: "themeDark") ?? theme, light: defaults.string(forKey: "themeLight") ?? theme)
+        self.accent = accent ?? .current()
+```
+
+In `save()`, `        defaults.set(theme, forKey: "theme")` becomes:
+
+```swift
+        defaults.set(slots.dark, forKey: "themeDark")
+        defaults.set(slots.light, forKey: "themeLight")
+```
+
+and its last lines, `        for change in changed {` to the loop's closing brace, become `        tell()`, with `tell()` after `save()`:
+
+```swift
+    /// Tells the app to draw again, as something it draws from has changed.
+    func tell() {
+        for change in changed {
+            change()
+        }
+    }
+```
+
+`style(dark:)` becomes the slot's theme's, with what it rests on after it:
+
+```swift
+    public func style(dark: Bool) -> Style {
+        Style(roles: roles(dark ? .dark : .light), look: look, density: density, textSize: textSize, font: font)
+    }
+
+    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. The
+    /// slots and the accent are read before what's made, so a view drawn from them redraws as they change.
+    public func roles(_ slot: Slot) -> Roles {
+        let slots = self.slots, accent = self.accent
+        if let roles = made[slot] { return roles }
+        let roles = Catalog.roles(slot, of: slots, omarchy: [], accent: accent)
+        made[slot] = roles
+        return roles
+    }
+
+    /// Every theme there is to choose, in the gallery's order.
+    public var themes: [Theme] {
+        let accent = self.accent
+        if let listed { return listed }
+        let themes = Catalog.themes(omarchy: [], accent: accent)
+        listed = themes
+        return themes
+    }
+
+    /// Reads the system's accent again, as the app does when AppKit says the system's colours changed.
+    public func systemColoursChanged() {
+        accent = .current()
+    }
+```
+
+At the end of the file, after the `nsColor` extension, add:
+
+```swift
+public extension SystemAccent {
+    /// The system's accent as AppKit draws it now, in a dark appearance and in a light one.
+    @MainActor static func current() -> SystemAccent {
+        func drawn(_ name: NSAppearance.Name) -> RGBA {
+            var colour = SystemAccent.blue.dark
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance { colour = RGBA(NSColor.controlAccentColor) }
+            return colour
+        }
+        return SystemAccent(dark: drawn(.darkAqua), light: drawn(.aqua))
+    }
+}
+```
+
+`RGBA(_ colour: NSColor)` is Task 1's, in `Panes.swift`; it takes the colour into sRGB, which resolves the accent in the appearance being drawn.
+
+- [ ] **Step 6: A menu for each slot until the gallery comes**
+
+In `mac/JawUI/Sources/Settings/Panes.swift`, `AppearancePane`'s doc comment becomes `/// Settings › Appearance: dark, light or the system's, and the theme in each slot.`, and its `Section { … } footer: { … }` becomes:
+
+```swift
+            Section {
+                Picker("Appearance", selection: $preferences.appearance) {
+                    Text("The system's").tag(Appearance.system)
+                    Text("Dark").tag(Appearance.dark)
+                    Text("Light").tag(Appearance.light)
+                }
+                .pickerStyle(.inline)
+                ForEach(Slot.allCases, id: \.self) { slot in
+                    Picker(slot.title, selection: pick(slot)) {
+                        ForEach(preferences.themes.filter { $0.roles(slot) != nil }) { theme in
+                            Text("\(theme.name), \(theme.source.title)").tag(theme.id)
+                        }
+                    }
+                }
+            } footer: {
+                Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
+            }
+```
+
+and after `body`, add:
+
+```swift
+    /// A slot's menu: choosing a theme fills the slots as a click on its card will (`Slots.choosing`).
+    func pick(_ slot: Slot) -> Binding<String> {
+        Binding(
+            get: { preferences.slots[slot] },
+            set: { id in
+                if let theme = preferences.themes.first(where: { $0.id == id }) {
+                    preferences.slots = preferences.slots.choosing(theme, for: slot)
+                }
+            },
+        )
+    }
+```
+
+In `mac/JawUI/Sources/Settings/SettingsPane.swift`, Appearance's size becomes `NSSize(width: 500, height: 230)`, for the second menu.
+
+- [ ] **Step 7: The system's accent read again as it changes**
+
+In `mac/JawApp/Sources/AppDelegate.swift`, after the observer of `AppleInterfaceThemeChangedNotification` (lines 38-42), add:
+
+```swift
+        NotificationCenter.default.addObserver(forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppDelegate.shared?.model.preferences.systemColoursChanged() }
+        }
+```
+
+`systemColoursChanged()` tells the app only when the accent has moved, and `AppModel.start()` already restyles on each telling.
+
+- [ ] **Step 8: Build, test and look**
+
+Run: `mac/scripts/build-mac test JawUITests`, then `mac/scripts/build-mac build` and `mac/scripts/build-mac test JawHarnessTests`; then `make check-parity`.
+Expected: each exits 0; JawUITests runs two more tests than Task 2 left.
+
+The build Mac's own preferences for Jaw are read too, so each run gives the slots it looks at.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/slots.png --keys settings:appearance -themeDark redlamp:nord -themeLight jaw`
+Expected: `"snapshot":1.0` among the last lines; the picture, looked at with the Read tool, shows Appearance with The system's, Dark and Light, then Dark's menu showing "Nord, Redlamp's" and Light's "Tokyo Night, Jaw's", the footer under them, nothing cut.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/nord.png -appearance dark -themeDark redlamp:nord`
+Expected: the main window drawn in Redlamp's Nord: its ground the blue-grey `#2F3541`, its accent Nord's frost blue, not Tokyo Night's navy.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add mac/JawThemes/Sources/Theme.swift mac/JawThemes/Sources/Slots.swift mac/JawUI/Sources/Style/Preferences.swift \
+    mac/JawUI/Sources/Settings/Panes.swift mac/JawUI/Sources/Settings/SettingsPane.swift mac/JawApp/Sources/AppDelegate.swift \
+    mac/Tests/JawThemesTests/ThemeTests.swift mac/Tests/JawUITests/PreferencesTests.swift mac/Tests/JawUITests/SettingsTests.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Jaw draws a theme for dark and one for light, as the owner chose on 6 November: JawThemes lists every theme there is to choose, Jaw's Tokyo Night, Omarchy's as jawd serves them and Redlamp's, Neutral in the system's accent and its families, each with the halves it has and an ID naming its source, finds what a slot draws, Tokyo Night's half where no source has its theme or it has none of the slot's mode, and fills the slots as the design has a choice fill them, a theme with both halves in both, one of Omarchy's in the slot of its mode and ⌥ only the slot chosen for; Preferences keeps the slots as themeDark and themeLight in place of theme, which it reads into both once while they're unset and leaves for an earlier build, works out what each draws once until the slots or the accent change, and reads the system's accent in both appearances again when AppKit says the system's colours changed; and until the gallery comes, Settings › Appearance chooses with a menu for each slot
+EOF
+```
+
+---
+
+### Task 5: Omarchy's themes from jawd, remembered for the next launch
+
+**Files:**
+- Create: `mac/JawKit/Sources/Protocol/Themes.swift`, `mac/JawUI/Sources/Settings/OmarchyState.swift`
+- Modify: `mac/JawKit/Sources/Client/Incoming.swift` (`Expect` at line 5, `Reply` at 9-20, `IncomingLine`'s replies at 91-99), `mac/JawKit/Sources/Client/Jawd.swift` (after `status()` at 244-246, `answered` at 431-472, `Asked` at 563-589, `refused`'s `case .status, .quiet:` at 743, `JawUpdate` at 776-829), `mac/JawUI/Sources/Style/Preferences.swift` (Task 4's `slots`, `accent`, `roles(_:)` and `themes`), `mac/JawUI/Sources/Settings/Panes.swift` (`AppearancePane`'s footer), `mac/JawApp/Sources/AppModel.swift` (`var reach` at line 23, `apply`'s `.hello` at 178-187 and its last case at 319)
+- Test: `mac/Tests/JawKitTests/FixtureTests.swift`, `mac/Tests/JawKitTests/ClientTests.swift`, `mac/Tests/JawKitTests/LiveTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`
+
+**Interfaces:**
+- Consumes: `OmarchyTheme`, `Catalog.themes(omarchy:accent:)`, `Catalog.roles(_:of:omarchy:accent:)` (Task 4); JawKit's `ask`, `NoParams`, `Failure`, `ErrorCode.unknownMethod`; `Situation.Reach`.
+- Produces, in JawKit: `public struct ServedTheme: Codable, Hashable` (`id`, `name`, `mode: ServedTheme.Mode` (`.dark`, `.light`), `colors: [String: String]`); `Expect.themes`; `Reply.themes([ServedTheme])`; `Jawd.themes()`; `Jawd.Asked.themes`; `JawUpdate.themes([ServedTheme])` and `JawUpdate.noThemes(older: Bool, why: String)`.
+- Produces, in JawUI: `public enum OmarchyState: Hashable` (`.connecting`, `.asking`, `.starting`, `.unreachable`, `.older`, `.refused(String)`), with `init(_ reach: Situation.Reach)` and `line: String?`; `Preferences.served: [OmarchyTheme]?`, `Preferences.omarchyState: OmarchyState` and `Preferences.omarchyLine: String?`; the copies `themeDarkColours` and `themeLightColours`.
+- Produces, in the app: `themes` asked after each hello, its answer given to `Preferences.served`, and the Omarchy section's state following `reach`.
+
+- [ ] **Step 1: Write JawKit's failing tests**
+
+In `mac/Tests/JawKitTests/FixtureTests.swift`, in `every result and push fixture decodes`, after `case "status": .reply(.status)` add `        case "themes": .reply(.themes)`; in `each request JawKit writes equals its fixture`, after the `status.request.json` line add:
+
+```swift
+    try same("themes.request.json", written(id: 21, "themes", NoParams?.none))
+```
+
+and at the end of the file add:
+
+```swift
+@Test func `themes' answer decodes as jaw-proto serves Omarchy's themes, each with its mode and its 25 colours`() throws {
+    guard case let .reply(_, .themes(themes)) = try incoming("themes.result.json", .reply(.themes)) else {
+        Issue.record("not themes")
+        return
+    }
+    #expect(themes.map(\.id) == ["catppuccin", "catppuccin-latte"] && themes.map(\.name) == ["Catppuccin", "Catppuccin Latte"])
+    #expect(themes.map(\.mode) == [.dark, .light] && themes.allSatisfy { $0.colors.count == 25 })
+    #expect(themes.first?.colors["background"] == "#1e1e2e" && themes.first?.colors["brown"] == "#7b5b55")
+}
+```
+
+In `mac/Tests/JawKitTests/ClientTests.swift`, inside `ClientTests`, after `the terminal's panes are asked for by its name and come whole, and a jawd without them says so`, add:
+
+```swift
+    @Test func `Omarchy's themes come as jawd serves them, and a jawd from before them is told apart from a drop`() async throws {
+        let served = String(decoding: try fixture("themes.result.json"), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fake = try FakeJawd { method, params, id in
+            guard method == "themes" else { return ordinary(method, params, id) }
+            return [served.replacingOccurrences(of: "{\"id\":21,", with: "{\"id\":\(id),")]
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.themes()
+        let all = await drain(jawd) { all in all.contains { if case .themes = $0 { true } else { false } } }
+        let themes = all.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        #expect(themes.map(\.id) == ["catppuccin", "catppuccin-latte"] && themes.map(\.mode) == [.dark, .light])
+        #expect(requests(fake, "themes") == [.null], "asked with no params")
+        let older = jawd.refused(.themes, .jawd(JawError(code: ErrorCode.unknownMethod, message: "unknown method: themes")))
+        let busy = jawd.refused(.themes, .jawd(JawError(code: ErrorCode.limit, message: "jawd is busy")))
+        guard case let .noThemes(isOlder, _)? = older.first, case let .noThemes(busyIsOlder, why)? = busy.first else {
+            Issue.record("nothing said: \(older), \(busy)")
+            return
+        }
+        #expect(isOlder && !busyIsOlder && why == "jawd is busy")
+        #expect(jawd.refused(.themes, .lost).isEmpty && jawd.refused(.themes, .unreachable).isEmpty,
+                "a drop says nothing, as the next hello asks again")
+    }
+```
+
+In `mac/Tests/JawKitTests/LiveTests.swift`, inside `LiveTests`, after `the terminal's panes come from a real jawd as it keeps them, and a chat is looked up by its JID`, add:
+
+```swift
+    @Test func `a real jawd serves Omarchy's 23 themes, in the order of their IDs, each with its mode and its 25 colours`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let held = Held(demo.socket)
+        defer { held.jawd.close() }
+        #expect(await held.until { h in h.updates.contains { if case .hello = $0 { true } else { false } } })
+        held.jawd.themes()
+        #expect(await held.until { h in h.updates.contains { if case .themes = $0 { true } else { false } } })
+        let themes = held.updates.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        #expect(themes.count == 23 && themes.map(\.id) == themes.map(\.id).sorted())
+        #expect(themes.filter { $0.mode == .light }.map(\.id) == ["catppuccin-latte", "flexoki-light", "lupine", "rose-pine", "white"])
+        #expect(themes.allSatisfy { $0.colors.count == 25 } && themes.first { $0.id == "rose-pine" }?.name == "Rosé Pine")
+    }
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawKit`
+Expected: exit 1, with `error: type 'Expect' has no member 'themes'` from `FixtureTests.swift` and `error: value of type 'Jawd' has no member 'themes'` from `ClientTests.swift`.
+
+- [ ] **Step 3: Ask for the themes**
+
+Create `mac/JawKit/Sources/Protocol/Themes.swift`:
+
+```swift
+import Foundation
+
+/// One of Omarchy's themes as `themes` serves it, as jaw-proto's `Theme` has it: its ID, the name it's
+/// shown as, its mode, and its 25 colours by Omarchy's keys, `#rrggbb`.
+public struct ServedTheme: Codable, Sendable, Hashable {
+    public enum Mode: String, Codable, Sendable, Hashable {
+        case dark, light
+    }
+
+    public var id: String
+    public var name: String
+    public var mode: Mode
+    public var colors: [String: String]
+
+    public init(id: String, name: String, mode: Mode, colors: [String: String]) {
+        self.id = id
+        self.name = name
+        self.mode = mode
+        self.colors = colors
+    }
+}
+
+/// `themes`' result.
+struct ServedThemes: Decodable {
+    let themes: [ServedTheme]
+}
+```
+
+In `mac/JawKit/Sources/Client/Incoming.swift`:
+- `Expect`'s cases become `case json, sent, chat, info, chatInfo, status, layout, saved, folder, themes`.
+- `Reply` gains, after `case folder(FolderRow?)`:
+
+```swift
+    /// Omarchy's themes, in the order jawd serves them.
+    case themes([ServedTheme])
+```
+
+- In `IncomingLine.init(from:)`, after `case .reply(.folder): …`, add:
+
+```swift
+                case .reply(.themes): value = try .reply(id, .themes(c.decode(ServedThemes.self, forKey: .result).themes))
+```
+
+In `mac/JawKit/Sources/Client/Jawd.swift`:
+- After `status()`, add:
+
+```swift
+    /// Asks for Omarchy's themes, which come as `.themes`; a jawd that doesn't serve them is said as
+    /// `.noThemes`, and a drop says nothing, as the app asks again at the next hello.
+    public func themes() {
+        ask("themes", NoParams?.none, .themes, expect: .themes)
+    }
+```
+
+- In `answered`, after `case let (.status, .status(status)): out.append(.status(status))`, add:
+
+```swift
+        case let (.themes, .themes(themes)):
+            out.append(.themes(themes))
+```
+
+- In `Asked`, after `case status`, add `        case themes`.
+- In `refused`, before `case .status, .quiet:`, add:
+
+```swift
+        case .themes:
+            if failure == .lost || failure == .unreachable { return [] }
+            return [.noThemes(older: failure.code == ErrorCode.unknownMethod, why: failure.description)]
+```
+
+- In `JawUpdate`, after `case status(Status)`, add:
+
+```swift
+    /// Omarchy's themes, as `themes` answered.
+    case themes([ServedTheme])
+    /// jawd didn't serve its themes: an older one, which doesn't know `themes`, or another refusal, in
+    /// jawd's words.
+    case noThemes(older: Bool, why: String)
+```
+
+- [ ] **Step 4: Run JawKit's tests**
+
+Run: `mac/scripts/build-mac test JawKit`
+Expected: exit 0, `** TEST SUCCEEDED **`, three more tests than before, the live one among them run against `target/debug/jawd` (jawd 660701c5).
+
+- [ ] **Step 5: Write the preferences' failing tests**
+
+In `mac/Tests/JawUITests/PreferencesTests.swift`, add:
+
+```swift
+/// One of Omarchy's themes as jawd serves it, read from `protocol/themes/`.
+func omarchy(_ id: String) throws -> OmarchyTheme {
+    let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent().appending(path: "protocol/themes/\(id).toml")
+    return try #require(OmarchyTheme(id: id, file: String(contentsOf: file, encoding: .utf8)))
+}
+
+@MainActor @Test func `a slot's Omarchy theme is remembered as jawd served it, drawn before jawd answers, and dropped once jawd serves themes without it`() throws {
+    let suite = "jaw.tests.slots-remembered"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let gruvbox = try omarchy("gruvbox"), latte = try omarchy("catppuccin-latte")
+    let first = Preferences(defaults: defaults, accent: .blue)
+    first.served = [gruvbox, latte]
+    let chosen = try #require(first.themes.first { $0.id == "omarchy:gruvbox" })
+    first.slots = first.slots.choosing(chosen, for: .dark)
+    let dark = try #require(Omarchy.roles(gruvbox.colours, dark: true))
+    #expect(first.roles(.dark) == dark && first.roles(.light) == Catalog.jaw.light)
+    let copy = defaults.dictionary(forKey: "themeDarkColours") as? [String: String]
+    #expect(copy?["id"] == "gruvbox" && copy?["name"] == "Gruvbox" && copy?["background"] == "#282828" && copy?.count == 27)
+    #expect(defaults.dictionary(forKey: "themeLightColours") == nil, "the light slot holds Jaw's")
+
+    let next = Preferences(defaults: defaults, accent: .blue)
+    #expect(next.served == nil && next.roles(.dark) == dark, "the next launch draws Gruvbox before jawd answers")
+    #expect(next.themes.filter { $0.source == .omarchy }.map { $0.id } == ["omarchy:gruvbox"], "the slots' themes, from their copies")
+    var newer = gruvbox
+    newer.colours["accent"] = "#ff0000"
+    next.served = [newer, latte]
+    #expect(next.roles(.dark) == Omarchy.roles(newer.colours, dark: true), "jawd's colours replace the copy")
+    #expect((defaults.dictionary(forKey: "themeDarkColours") as? [String: String])?["accent"] == "#ff0000")
+    next.served = [latte]
+    #expect(next.roles(.dark) == Catalog.jaw.dark && next.slots.dark == "omarchy:gruvbox", "drawn as Tokyo Night, and the choice kept")
+    #expect(defaults.dictionary(forKey: "themeDarkColours") == nil)
+    defaults.set(["id": "nord", "name": "Nord"].merging(gruvbox.colours) { $1 }, forKey: "themeDarkColours")
+    #expect(Preferences(defaults: defaults, accent: .blue).roles(.dark) == Catalog.jaw.dark, "a copy of another theme isn't drawn")
+}
+
+@MainActor @Test func `until jawd serves its themes, the Omarchy section says why, and nothing while the app connects or asks`() throws {
+    #expect(OmarchyState(.waiting).line == nil && OmarchyState(.up).line == nil)
+    #expect(OmarchyState(.starting(failed: nil)).line == "Starting jawd")
+    #expect(OmarchyState(.unreachable(why: "no socket", retry: 2)).line
+        == "Omarchy's themes come from jawd, which isn't answering; they show once it does")
+    #expect(OmarchyState(.starting(failed: "jawd isn't in the app")) == .unreachable, "a jawd that couldn't start isn't answering")
+    #expect(OmarchyState.older.line == "This jawd is older and serves no themes; restart it")
+    #expect(OmarchyState.refused("jawd is busy").line == "Omarchy's themes didn't come: jawd is busy")
+    let preferences = try scratchPreferences("omarchy-state")
+    #expect(preferences.omarchyState == .connecting && preferences.omarchyLine == nil)
+    preferences.omarchyState = .older
+    #expect(preferences.omarchyLine == OmarchyState.older.line)
+    preferences.served = [try omarchy("gruvbox")]
+    #expect(preferences.omarchyLine == nil, "once jawd has served its themes there's nothing to say, even when it goes")
+}
+```
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, with `error: value of type 'Preferences' has no member 'served'`.
+
+- [ ] **Step 6: Keep jawd's themes and the copies**
+
+Create `mac/JawUI/Sources/Settings/OmarchyState.swift`:
+
+```swift
+import Foundation
+
+/// What the gallery's Omarchy section says while jawd hasn't served its themes: nothing while the app
+/// connects or asks, as jawd answers at once; "Starting jawd" while the jawd the app started starts;
+/// that jawd isn't answering while it can't be reached or couldn't start; that it's older and serves
+/// no themes when it doesn't know `themes`; and any other refusal in jawd's words.
+public enum OmarchyState: Sendable, Hashable {
+    case connecting, asking, starting, unreachable, older
+    case refused(String)
+
+    /// From how jawd is reached, before its answer to `themes`.
+    public init(_ reach: Situation.Reach) {
+        switch reach {
+        case .waiting: self = .connecting
+        case .starting(failed: nil): self = .starting
+        case .starting: self = .unreachable
+        case .up: self = .asking
+        case .unreachable: self = .unreachable
+        }
+    }
+
+    /// The line the section shows in place of the themes it hasn't, or nil.
+    public var line: String? {
+        switch self {
+        case .connecting, .asking: nil
+        case .starting: "Starting jawd"
+        case .unreachable: "Omarchy's themes come from jawd, which isn't answering; they show once it does"
+        case .older: "This jawd is older and serves no themes; restart it"
+        case let .refused(why): "Omarchy's themes didn't come: \(why)"
+        }
+    }
+}
+```
+
+In `mac/JawUI/Sources/Style/Preferences.swift`:
+
+- `slots`' `didSet` becomes:
+
+```swift
+        didSet {
+            made = [:]
+            listed = nil
+            remember()
+            save()
+        }
+```
+
+- After `accent`, add:
+
+```swift
+    /// Omarchy's themes as jawd served them this run, nil until it has. They stay when jawd goes away,
+    /// as its answer still holds.
+    public var served: [OmarchyTheme]? = nil {
+        didSet {
+            guard served != oldValue else { return }
+            made = [:]
+            listed = nil
+            remember()
+            tell()
+        }
+    }
+
+    /// What the gallery's Omarchy section says while jawd hasn't served its themes.
+    public var omarchyState: OmarchyState = .connecting
+```
+
+- `roles(_:)` and `themes` take Omarchy's themes from jawd, or the copies until it answers:
+
+```swift
+    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. What
+    /// it rests on is read before what's made, so a view drawn from it redraws as that changes.
+    public func roles(_ slot: Slot) -> Roles {
+        let slots = self.slots, accent = self.accent, served = self.served
+        if let roles = made[slot] { return roles }
+        let roles = Catalog.roles(slot, of: slots, omarchy: served ?? remembered(slots), accent: accent)
+        made[slot] = roles
+        return roles
+    }
+
+    /// Every theme there is to choose, in the gallery's order: Omarchy's as jawd serves them, or until
+    /// it has, the slots' own from their copies.
+    public var themes: [Theme] {
+        let slots = self.slots, accent = self.accent, served = self.served
+        if let listed { return listed }
+        let themes = Catalog.themes(omarchy: served ?? remembered(slots), accent: accent)
+        listed = themes
+        return themes
+    }
+
+    /// The line the Omarchy section shows in place of jawd's themes, or nil once they're in.
+    public var omarchyLine: String? {
+        served == nil ? omarchyState.line : nil
+    }
+
+    /// The slots' Omarchy themes as jawd last served them, from the copies kept beside the slots; a copy
+    /// of a theme other than its slot's is passed over.
+    func remembered(_ slots: Slots) -> [OmarchyTheme] {
+        Slot.allCases.compactMap { slot in
+            guard var colours = defaults.dictionary(forKey: Self.copy(slot)) as? [String: String],
+                  let id = colours.removeValue(forKey: "id"), let name = colours.removeValue(forKey: "name"),
+                  slots[slot] == "omarchy:" + id
+            else { return nil }
+            return OmarchyTheme(id: id, name: name, dark: slot.isDark, colours: colours)
+        }
+    }
+
+    /// Where a slot's copy of its Omarchy theme is kept.
+    static func copy(_ slot: Slot) -> String {
+        slot.isDark ? "themeDarkColours" : "themeLightColours"
+    }
+
+    /// Keeps a copy of each slot's Omarchy theme as jawd serves it, with its ID and name, and drops one
+    /// jawd no longer serves, so the next launch draws what this one does before jawd answers.
+    func remember() {
+        guard let served else { return }
+        for slot in Slot.allCases {
+            if let theme = served.first(where: { "omarchy:" + $0.id == slots[slot] && $0.dark == slot.isDark }) {
+                defaults.set(theme.colours.merging(["id": theme.id, "name": theme.name]) { $1 }, forKey: Self.copy(slot))
+            } else {
+                defaults.removeObject(forKey: Self.copy(slot))
+            }
+        }
+    }
+```
+
+In `mac/JawUI/Sources/Settings/Panes.swift`, `AppearancePane`'s footer says what the Omarchy section will, until the gallery comes:
+
+```swift
+            } footer: {
+                VStack(alignment: .leading) {
+                    Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
+                    if let line = preferences.omarchyLine { Text(line) }
+                }
+            }
+```
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 0, `** TEST SUCCEEDED **`, two more tests than Task 4 left.
+
+- [ ] **Step 7: The app asks after each hello**
+
+In `mac/JawApp/Sources/AppModel.swift`:
+
+- `    var reach: Reach = .waiting` (line 23) becomes:
+
+```swift
+    var reach: Reach = .waiting {
+        didSet { preferences.omarchyState = OmarchyState(reach) }
+    }
+```
+
+- In `apply`, the `.hello` case's last line, `pictures.files = .folder(w.root)`, is followed by:
+
+```swift
+            jawd.themes()
+```
+
+- Before `case .push, .chats, .layout, .folders, .roster:`, add:
+
+```swift
+        case let .themes(served):
+            preferences.served = served.map { OmarchyTheme(id: $0.id, name: $0.name, dark: $0.mode == .dark, colours: $0.colors) }
+        case let .noThemes(older, why):
+            preferences.omarchyState = older ? .older : .refused(why)
+```
+
+`preferences.served`'s `didSet` tells the app, which restyles every window in the served colours, and only when they've changed, so each hello's answer redraws nothing when jawd's themes are as they were.
+
+- [ ] **Step 8: Build, test and look**
+
+Run: `mac/scripts/build-mac build`, `mac/scripts/build-mac test JawHarnessTests` and `make check-parity`.
+Expected: each exits 0; check-parity counts `themes` among the methods the Mac sends, which the terminal, reading Omarchy's themes from jaw-proto, has no need to.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/omarchy.png --keys settings:appearance -themeDark omarchy:gruvbox -themeLight jaw`
+Expected: Dark's menu shows "Gruvbox, Omarchy's", and opened it would list Jaw's Tokyo Night, Omarchy's 18 dark and Redlamp's 22; no line under the footer, as the demo's jawd has served its themes.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/gruvbox.png -appearance dark -themeDark omarchy:gruvbox`
+Expected: the main window drawn in Omarchy's Gruvbox, its ground `#282828` and its text `#d4be98`. Running it writes the copy `themeDarkColours` into the build Mac's own preferences for Jaw, which only a slot holding Gruvbox reads.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add mac/JawKit/Sources/Protocol/Themes.swift mac/JawKit/Sources/Client/Incoming.swift mac/JawKit/Sources/Client/Jawd.swift \
+    mac/JawUI/Sources/Settings/OmarchyState.swift mac/JawUI/Sources/Style/Preferences.swift mac/JawUI/Sources/Settings/Panes.swift \
+    mac/JawApp/Sources/AppModel.swift mac/Tests/JawKitTests/FixtureTests.swift mac/Tests/JawKitTests/ClientTests.swift \
+    mac/Tests/JawKitTests/LiveTests.swift mac/Tests/JawUITests/PreferencesTests.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Omarchy's themes come to the Mac from jawd, as the Settings and themes design has them: JawKit asks themes, which it reads as ServedTheme by Omarchy's keys and hands up as JawUpdate.themes, and tells a jawd from before them, which answers that it doesn't know the method, from any other refusal, saying nothing of a drop since the app asks again after each hello; Preferences keeps what jawd served, which stays when jawd goes away, and a copy of each slot's Omarchy theme as themeDarkColours and themeLightColours, so the next launch draws it from its first frame, jawd's colours replacing the copy as they come and a theme jawd no longer serves drawn as Tokyo Night with the choice kept; OmarchyState follows how jawd is reached, saying nothing while the app connects or asks, and that jawd is starting, isn't answering or is older and serves no themes; and the slots' menus list Omarchy's beside Jaw's and Redlamp's
+EOF
+```
+
+---
+
+### Task 6: The slots and the gallery
+
+**Files:**
+- Create: `mac/JawUI/Sources/Settings/ThemeCard.swift`, `mac/JawUI/Sources/Settings/Gallery.swift`
+- Modify: `mac/JawUI/Sources/Settings/Panes.swift` (`AppearancePane`, as Tasks 4 and 5 left it), `mac/JawUI/Sources/Settings/SettingsPane.swift` (`size`), `mac/JawUI/Sources/Style/Preferences.swift` (after `omarchyState`), `mac/JawApp/Sources/SettingsWindowController.swift` (Task 1's)
+- Test: `mac/Tests/JawUITests/GalleryTests.swift`, and the reference pictures `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png`
+
+**Interfaces:**
+- Consumes: `Theme`, `Slot`, `Slots`, `Catalog`, `Omarchy.name` (Task 4); `Preferences.themes`, `roles(_:)`, `slots`, `served`, `omarchyLine` (Tasks 4 and 5); `Roles.link` (Task 2); `TextStyle`, `Space`, `Radius`, `Stroke`, `RGBA.color`; the tests' `scratchPreferences`, `omarchy(_:)`, `picture(_:on:)` and `compare(_:_:)`.
+- Produces, in JawUI:
+  - `public struct ThemeChat: View` (`init(_ roles: Roles)`, `static let size`, 144 by 104).
+  - `public struct ThemeCard: View` (`init(theme:roles:ticked:hovered:label:)`), `public struct GalleryGrid: View` (`init(themes:slot:slots:choose:)`, `choose: (Theme, _ only: Bool) -> Void`) and `public struct SlotTileView: View` (`init(tile:roles:outlined:)`).
+  - `public struct Gallery: Hashable` (`init(_ themes: [Theme], for slot: Slot, omarchyLine: String?)`, `slot`, `sections: [Gallery.Section]` (`source`, `themes`, `line`), `cards`, `moving(from:by:) -> Theme?`, `static func label(_ theme: Theme, _ slots: Slots) -> String`).
+  - `public struct SlotTile: Hashable` (`init(_ slot: Slot, slots:themes:served:appearance:dark:)`, `slot`, `name`, `note`).
+  - `Preferences.choosing: Slot?`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawUITests/GalleryTests.swift`:
+
+```swift
+import AppKit
+import JawThemes
+@testable import JawUI
+import SwiftUI
+import Testing
+
+/// The Appearance pane's gallery and slots: a slot's half of every theme that has one, in Jaw's,
+/// Omarchy's and Redlamp's sections; the Omarchy section while jawd's themes aren't in; where the
+/// arrows go; what each slot's tile says; what VoiceOver reads a card as; and every card for each slot
+/// compared with a reference picture, so a change to any mapping shows.
+
+/// Omarchy's 23 as jawd serves them, read from `protocol/themes/`, in the order of their IDs.
+func allOmarchy() throws -> [OmarchyTheme] {
+    let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent().appending(path: "protocol/themes")
+    return try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".toml") }
+        .map { String($0.dropLast(5)) }.sorted().map { try omarchy($0) }
+}
+
+@MainActor @Test func `the gallery shows a slot's half of every theme that has one, in three sections, 41 for dark and 28 for light`() throws {
+    let preferences = try scratchPreferences("gallery-sections")
+    preferences.served = try allOmarchy()
+    let dark = Gallery(preferences.themes, for: .dark, omarchyLine: preferences.omarchyLine)
+    #expect(dark.sections.map(\.source) == [.jaw, .omarchy, .redlamp] && dark.sections.map(\.themes.count) == [1, 18, 22])
+    #expect(dark.cards.count == 41 && dark.sections.allSatisfy { $0.line == nil })
+    #expect(dark.cards.allSatisfy { $0.dark != nil })
+    let light = Gallery(preferences.themes, for: .light, omarchyLine: nil)
+    #expect(light.sections.map(\.themes.count) == [1, 5, 22] && light.cards.count == 28)
+    #expect(light.sections[1].themes.map(\.name) == ["Catppuccin Latte", "Flexoki Light", "Lupine", "Rosé Pine", "White"])
+    #expect(Array(dark.sections[2].themes.prefix(3).map(\.name)) == ["Neutral", "Redlamp", "Kanagawa"])
+}
+
+@MainActor @Test func `while jawd's themes aren't in, the Omarchy section shows the slots' own from their copies and says why`() throws {
+    let suite = "jaw.tests.gallery-waiting"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let first = Preferences(defaults: defaults, accent: .blue)
+    first.served = try allOmarchy()
+    first.slots = Slots(dark: "omarchy:gruvbox", light: "jaw")
+    let next = Preferences(defaults: defaults, accent: .blue)
+    next.omarchyState = .unreachable
+    let gallery = Gallery(next.themes, for: .dark, omarchyLine: next.omarchyLine)
+    #expect(gallery.sections[1].themes.map(\.id) == ["omarchy:gruvbox"])
+    #expect(gallery.sections[1].line == "Omarchy's themes come from jawd, which isn't answering; they show once it does")
+    #expect(gallery.sections[0].themes.count == 1 && gallery.sections[2].themes.count == 22, "Jaw's and Redlamp's never wait")
+}
+
+@MainActor @Test func `the arrows go to the card before or after across the sections, a row of three for up and down, and nowhere past either end`() throws {
+    let preferences = try scratchPreferences("gallery-arrows")
+    preferences.served = try allOmarchy()
+    let gallery = Gallery(preferences.themes, for: .dark, omarchyLine: nil)
+    #expect(gallery.moving(from: "jaw", by: 1)?.id == "omarchy:catppuccin", "from Jaw's into Omarchy's")
+    #expect(gallery.moving(from: "omarchy:catppuccin", by: -1)?.id == "jaw")
+    #expect(gallery.moving(from: "omarchy:vantablack", by: 1)?.id == "redlamp:neutral", "from Omarchy's into Redlamp's")
+    #expect(gallery.moving(from: "jaw", by: 3)?.id == gallery.cards[3].id)
+    #expect(gallery.moving(from: "jaw", by: -1) == nil && gallery.moving(from: "jaw", by: -3) == nil)
+    #expect(gallery.moving(from: "redlamp:mc-velvet-static", by: 1) == nil)
+    #expect(gallery.moving(from: "omarchy:catppuccin-latte", by: 1) == nil, "a light theme isn't in the dark gallery")
+}
+
+@Test func `a slot's tile says its theme and its source, that it's in use or when it would be, and why it draws Tokyo Night`() throws {
+    let themes = Catalog.themes(omarchy: [try omarchy("gruvbox")], accent: .blue)
+    let slots = Slots(dark: "omarchy:gruvbox", light: "redlamp:nord")
+    let dark = SlotTile(.dark, slots: slots, themes: themes, served: true, appearance: .system, dark: true)
+    #expect(dark.name == "Gruvbox, Omarchy's" && dark.note == "In use")
+    let light = SlotTile(.light, slots: slots, themes: themes, served: true, appearance: .system, dark: true)
+    #expect(light.name == "Nord, Redlamp's" && light.note == nil, "left to the system, the other slot says nothing")
+    #expect(SlotTile(.light, slots: slots, themes: themes, served: true, appearance: .dark, dark: true).note == "Used when Appearance is Light")
+    let gone = Slots(dark: "omarchy:nord", light: "omarchy:gruvbox")
+    #expect(SlotTile(.dark, slots: gone, themes: themes, served: true, appearance: .system, dark: true).name == "Nord isn't among jawd's themes")
+    #expect(SlotTile(.dark, slots: gone, themes: themes, served: false, appearance: .system, dark: true).name == "Nord, once jawd serves it")
+    #expect(SlotTile(.light, slots: gone, themes: themes, served: true, appearance: .system, dark: true).name
+        == "Tokyo Night, as Gruvbox has no light half")
+    #expect(SlotTile(.dark, slots: Slots(dark: "redlamp:nowhere"), themes: themes, served: true, appearance: .system, dark: true).name
+        == "Tokyo Night, as no source has redlamp:nowhere")
+}
+
+@Test func `VoiceOver reads a card as its name, its section and the slots it fills`() throws {
+    let themes = Catalog.themes(omarchy: [try omarchy("gruvbox")], accent: .blue)
+    func card(_ id: String) throws -> Theme {
+        try #require(themes.first { $0.id == id })
+    }
+    let slots = Slots(dark: "omarchy:gruvbox", light: "jaw")
+    #expect(Gallery.label(try card("omarchy:gruvbox"), slots) == "Gruvbox, Omarchy's, the dark theme")
+    #expect(Gallery.label(try card("jaw"), slots) == "Tokyo Night, Jaw's, the light theme")
+    #expect(Gallery.label(try card("redlamp:nord"), Slots(dark: "redlamp:nord", light: "redlamp:nord"))
+        == "Nord, Redlamp's, the dark and light themes")
+    #expect(Gallery.label(try card("redlamp:kanagawa"), slots) == "Kanagawa, Redlamp's")
+}
+
+@MainActor @Test(.timeLimit(.minutes(2))) func `every theme's card for the dark slot and for the light one, three across at 144 points, as the gallery draws them`() async throws {
+    let preferences = try scratchPreferences("gallery-pictures")
+    preferences.served = try allOmarchy()
+    for slot in Slot.allCases {
+        let gallery = Gallery(preferences.themes, for: slot, omarchyLine: nil)
+        let grid = GalleryGrid(themes: gallery.cards, slot: slot, slots: Slots(dark: "", light: "")) { _, _ in }
+            .frame(width: ThemeChat.size.width * 3 + Space.m * 2)
+            .padding(Space.m)
+        let host = NSHostingView(rootView: grid)
+        host.frame.size = host.fittingSize
+        let w = NSWindow(contentRect: NSRect(origin: CGPoint(x: -30000, y: -30000), size: host.frame.size), styleMask: [.borderless],
+                         backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.appearance = NSAppearance(named: slot.isDark ? .darkAqua : .aqua)
+        w.contentView = host
+        w.orderFront(nil)
+        defer { w.close() }
+        try await Task.sleep(for: .milliseconds(200))
+        host.layoutSubtreeIfNeeded()
+        try compare(try picture(host, on: slot.isDark ? RGBA(0x1E1E1E) : RGBA(0xF2F2F2)), "theme-gallery-\(slot.rawValue)")
+    }
+}
+```
+
+The pictures tick no card, as the system's accent would draw the tick, and Neutral is drawn in macOS's blue, which `scratchPreferences` gives, so they don't depend on the build Mac.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, with `error: cannot find 'Gallery' in scope` from `GalleryTests.swift`.
+
+- [ ] **Step 3: The gallery's sections, its arrows and the tiles' words**
+
+Create `mac/JawUI/Sources/Settings/Gallery.swift`:
+
+```swift
+import JawThemes
+
+/// The gallery for a slot: Jaw's, Omarchy's and Redlamp's sections, each the themes with a half for
+/// the slot in the catalog's order, with what's said in place of Omarchy's while jawd hasn't served
+/// them; where the arrows go; and what VoiceOver reads a card as.
+public struct Gallery: Sendable, Hashable {
+    /// A section: its source, its themes, and the line said in place of those jawd hasn't served.
+    public struct Section: Sendable, Hashable, Identifiable {
+        public var source: ThemeSource
+        public var themes: [Theme]
+        public var line: String?
+
+        public var id: ThemeSource {
+            source
+        }
+    }
+
+    public var slot: Slot
+    public var sections: [Section]
+
+    public init(_ themes: [Theme], for slot: Slot, omarchyLine: String?) {
+        self.slot = slot
+        sections = ThemeSource.allCases.map { source in
+            Section(source: source, themes: themes.filter { $0.source == source && $0.roles(slot) != nil },
+                    line: source == .omarchy ? omarchyLine : nil)
+        }
+    }
+
+    /// Every card, in the gallery's order, across its sections.
+    public var cards: [Theme] {
+        sections.flatMap(\.themes)
+    }
+
+    /// The card the arrows reach from the theme `id`, `step` cards on: ← and → one, ↑ and ↓ three, a
+    /// row; nil past either end, or from a theme the gallery hasn't.
+    public func moving(from id: String, by step: Int) -> Theme? {
+        let cards = cards
+        guard let at = cards.firstIndex(where: { $0.id == id }), cards.indices.contains(at + step) else { return nil }
+        return cards[at + step]
+    }
+
+    /// What VoiceOver reads a card as: its name, its section and the slots it fills, as in "Gruvbox,
+    /// Omarchy's, the dark theme".
+    public static func label(_ theme: Theme, _ slots: Slots) -> String {
+        let fills = Slot.allCases.filter { slots[$0] == theme.id }.map(\.rawValue)
+        let filling = fills.isEmpty ? "" : ", the \(fills.joined(separator: " and ")) theme\(fills.count > 1 ? "s" : "")"
+        return "\(theme.name), \(theme.source.title)\(filling)"
+    }
+}
+
+/// What a slot's tile says: its theme's name and source, or why it draws Tokyo Night, and that Jaw
+/// draws it now, or when it would.
+public struct SlotTile: Sendable, Hashable {
+    public var slot: Slot
+    public var name: String
+    /// "In use", "Used when Appearance is Light" while Appearance holds the other, or nil.
+    public var note: String?
+
+    /// `served` is whether jawd has served Omarchy's themes, and `dark` whether Jaw draws dark now.
+    public init(_ slot: Slot, slots: Slots, themes: [Theme], served: Bool, appearance: Appearance, dark: Bool) {
+        self.slot = slot
+        let id = slots[slot]
+        if let theme = themes.first(where: { $0.id == id }) {
+            name = theme.roles(slot) == nil ? "Tokyo Night, as \(theme.name) has no \(slot.rawValue) half" : "\(theme.name), \(theme.source.title)"
+        } else if id.hasPrefix("omarchy:") {
+            let named = Omarchy.name(String(id.dropFirst("omarchy:".count)))
+            name = served ? "\(named) isn't among jawd's themes" : "\(named), once jawd serves it"
+        } else {
+            name = "Tokyo Night, as no source has \(id)"
+        }
+        note = slot.isDark == dark ? "In use" : appearance == .system ? nil : "Used when Appearance is \(slot.title)"
+    }
+}
+```
+
+- [ ] **Step 4: The card, the gallery's grid and the slots' tiles**
+
+Create `mac/JawUI/Sources/Settings/ThemeCard.swift`:
+
+```swift
+import AppKit
+import JawThemes
+import SwiftUI
+
+/// A theme's half as a small chat, drawn from its roles as the chat list and a conversation draw them:
+/// on the ground, an unread chat's row on the surface, a separator, their bubble on the surface with a
+/// mention of you, and yours. 104 points tall and as wide as it's given, 144 in the design; a slot's
+/// tile draws it at half size.
+public struct ThemeChat: View {
+    public static let size = CGSize(width: 144, height: 104)
+    let roles: Roles
+
+    public init(_ roles: Roles) {
+        self.roles = roles
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: Space.xxs) {
+            row
+            Rectangle().fill(roles.separator.color).frame(height: Stroke.hairline)
+            theirs
+            yours.frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(Space.s)
+        .frame(maxWidth: .infinity, minHeight: Self.size.height, maxHeight: Self.size.height, alignment: .top)
+        .background(roles.ground.color)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.control))
+        .accessibilityHidden(true)
+    }
+
+    /// Lisbon Climbing's row, unread, as the chat list draws one: the avatar in a sender's colour with
+    /// the online dot, the name, Rui's line, the time in the accent and the count on it.
+    var row: some View {
+        HStack(spacing: Space.xs) {
+            Circle().fill(roles.sender(2).color).frame(width: 16, height: 16)
+                .overlay(alignment: .bottomTrailing) { Circle().fill(roles.online.color).frame(width: 6, height: 6) }
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Lisbon Climbing").bold().foregroundStyle(roles.text.color)
+                Text("Rui: Sunday at 9?").foregroundStyle(roles.secondary.color)
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 0) {
+                Text("13:58").foregroundStyle(roles.accent.color)
+                Text("2").bold().foregroundStyle((roles.isDark ? roles.ground : RGBA(0xFFFFFF)).color)
+                    .padding(.horizontal, Space.xs)
+                    .background(Capsule().fill(roles.accent.color))
+            }
+        }
+        .textStyle(.micro)
+        .lineLimit(1)
+        .padding(Space.xs)
+        .background(RoundedRectangle(cornerRadius: Radius.small).fill(roles.surface.color))
+    }
+
+    /// Their bubble on the surface: Ana's name in another sender's colour over a line with @Pedro, a
+    /// mention of you, in the mention colour on a tint of it, as `MessageLayout` draws one.
+    var theirs: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Ana").bold().foregroundStyle(roles.sender(0).color)
+            HStack(spacing: 0) {
+                Text("@Pedro").bold().foregroundStyle(roles.mention.color).background(roles.mention.opacity(0.16).color)
+                Text(" bring the rope").foregroundStyle(roles.text.color)
+            }
+        }
+        .textStyle(.micro)
+        .lineLimit(1)
+        .padding(Space.xs)
+        .background(RoundedRectangle(cornerRadius: Radius.small).fill(roles.surface.color))
+    }
+
+    /// Yours: "On it" in your bubble, its time in the dim text and its read ticks in the link colour.
+    var yours: some View {
+        HStack(spacing: Space.xxs) {
+            Text("On it").foregroundStyle(roles.text.color)
+            Text("13:59").foregroundStyle(roles.tertiary.color)
+            Text("✓✓").foregroundStyle(roles.link.color)
+        }
+        .textStyle(.micro)
+        .padding(Space.xs)
+        .background(RoundedRectangle(cornerRadius: Radius.small).fill(roles.yours.color))
+    }
+}
+
+/// A card in the gallery: the half the slot chosen for would take, as a small chat, its name under it
+/// in the system's label colour, a tick and the system's accent around it when it's that slot's theme,
+/// and a ring under the pointer. VoiceOver reads it as its name, its section and the slots it fills.
+public struct ThemeCard: View {
+    let theme: Theme
+    let roles: Roles
+    let ticked: Bool
+    let hovered: Bool
+    let label: String
+    @State private var pointer = false
+
+    /// `hovered` draws it as under the pointer, for the harness's pictures.
+    public init(theme: Theme, roles: Roles, ticked: Bool, hovered: Bool = false, label: String) {
+        self.theme = theme
+        self.roles = roles
+        self.ticked = ticked
+        self.hovered = hovered
+        self.label = label
+    }
+
+    public var body: some View {
+        VStack(spacing: Space.xs) {
+            ThemeChat(roles)
+                .overlay {
+                    RoundedRectangle(cornerRadius: Radius.control)
+                        .strokeBorder(ring, lineWidth: ticked || hovered || pointer ? Stroke.focus : Stroke.hairline)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if ticked {
+                        Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.accentColor)
+                            .padding(Space.xs)
+                    }
+                }
+            Text(theme.name).font(.callout).lineLimit(1)
+        }
+        .contentShape(Rectangle())
+        .onHover { pointer = $0 }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(ticked ? [.isButton, .isSelected] : .isButton)
+    }
+
+    var ring: Color {
+        if ticked { return .accentColor }
+        return hovered || pointer ? Color(nsColor: .secondaryLabelColor) : Color(nsColor: .separatorColor)
+    }
+}
+
+/// A gallery section's cards, three across, each the half `slot` would take and ticked when it's the
+/// slot's theme: a click chooses it, and ⌥-click or its menu's Use for Dark Only (or Light Only)
+/// chooses it for that slot alone.
+public struct GalleryGrid: View {
+    let themes: [Theme]
+    let slot: Slot
+    let slots: Slots
+    let choose: (Theme, _ only: Bool) -> Void
+
+    public init(themes: [Theme], slot: Slot, slots: Slots, choose: @escaping (Theme, _ only: Bool) -> Void) {
+        self.themes = themes
+        self.slot = slot
+        self.slots = slots
+        self.choose = choose
+    }
+
+    public var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.m), count: 3), spacing: Space.m) {
+            ForEach(themes) { theme in
+                ThemeCard(theme: theme, roles: theme.roles(slot) ?? Catalog.jaw.roles(dark: slot.isDark), ticked: slots[slot] == theme.id,
+                          label: Gallery.label(theme, slots))
+                    .onTapGesture { choose(theme, NSEvent.modifierFlags.contains(.option)) }
+                    .contextMenu {
+                        Button("Use for \(slot.title) Only") { choose(theme, true) }
+                    }
+            }
+        }
+    }
+}
+
+/// A slot's tile: what it draws, as a card at half size, with the slot's name, its theme's name and
+/// source, and whether it's in use or when it would be; outlined in the system's accent while the
+/// gallery chooses for it.
+public struct SlotTileView: View {
+    let tile: SlotTile
+    let roles: Roles
+    let outlined: Bool
+
+    public init(tile: SlotTile, roles: Roles, outlined: Bool) {
+        self.tile = tile
+        self.roles = roles
+        self.outlined = outlined
+    }
+
+    public var body: some View {
+        HStack(spacing: Space.m) {
+            ThemeChat(roles)
+                .frame(width: ThemeChat.size.width, height: ThemeChat.size.height)
+                .scaleEffect(0.5)
+                .frame(width: ThemeChat.size.width / 2, height: ThemeChat.size.height / 2)
+            VStack(alignment: .leading, spacing: Space.xxs) {
+                Text(tile.slot.title).font(.headline)
+                Text(tile.name).font(.callout).lineLimit(2)
+                if let note = tile.note {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Space.xs)
+        .frame(maxWidth: .infinity, minHeight: 64)
+        .overlay {
+            RoundedRectangle(cornerRadius: Radius.control)
+                .strokeBorder(outlined ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: outlined ? Stroke.focus : Stroke.hairline)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(outlined ? [.isButton, .isSelected] : .isButton)
+    }
+}
+```
+
+- [ ] **Step 5: Run the tests, then look at the pictures and keep them**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, every test passing but the pictures', which record `theme-gallery-dark: no reference yet; wrote theme-gallery-dark.png to look at and commit` and the same for light.
+
+Run: `mac/scripts/build-mac references`, then look at `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png` with the Read tool.
+Expected: 41 cards and 28, three across, each a small chat on its theme's ground, its name under it: the row's name, line, time and count, the separator, Ana's bubble with @Pedro on its tint, and yours with its ticks, all readable, nothing cut but the row's name in a narrow card. Tokyo Night first, Omarchy's from Catppuccin, then Neutral in macOS's blue, Redlamp, Kanagawa and on. If a card is cut or unreadable, fix `ThemeChat` and run again, deleting the two pictures first.
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 0, `** TEST SUCCEEDED **`, six more tests than Task 5 left.
+
+- [ ] **Step 6: The pane**
+
+In `mac/JawUI/Sources/Style/Preferences.swift`, after `omarchyState`, add:
+
+```swift
+    /// The slot the gallery chooses for, nil for the one in use; Settings sets it back each time it
+    /// opens, and it isn't kept.
+    public var choosing: Slot? = nil
+```
+
+In `mac/JawUI/Sources/Settings/Panes.swift`, `AppearancePane` becomes:
+
+```swift
+/// Settings › Appearance: dark, light or the system's; the slots, Dark and Light, each a tile of what it
+/// draws; and the gallery that fills the outlined one, Jaw's, Omarchy's and Redlamp's themes each a
+/// card. The arrows move through the cards, choosing each as they reach it.
+public struct AppearancePane: View {
+    @Bindable var preferences: Preferences
+    @Environment(\.colorScheme) private var scheme
+    @FocusState private var focused: Bool
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    /// The slot the gallery chooses for: the one picked, or the one in use.
+    var slot: Slot {
+        preferences.choosing ?? (scheme == .dark ? .dark : .light)
+    }
+
+    public var body: some View {
+        let gallery = Gallery(preferences.themes, for: slot, omarchyLine: preferences.omarchyLine)
+        Form {
+            Section {
+                Picker("Appearance", selection: $preferences.appearance) {
+                    Text("The system's").tag(Appearance.system)
+                    Text("Dark").tag(Appearance.dark)
+                    Text("Light").tag(Appearance.light)
+                }
+                .pickerStyle(.radioGroup)
+                .horizontalRadioGroupLayout()
+            }
+            Section {
+                HStack(spacing: Space.m) {
+                    ForEach(Slot.allCases, id: \.self) { each in
+                        SlotTileView(tile: SlotTile(each, slots: preferences.slots, themes: preferences.themes,
+                                                    served: preferences.served != nil, appearance: preferences.appearance,
+                                                    dark: scheme == .dark),
+                                     roles: preferences.roles(each), outlined: each == slot)
+                            .onTapGesture { preferences.choosing = each }
+                    }
+                }
+            } footer: {
+                Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
+            }
+            ForEach(gallery.sections) { section in
+                Section(section.source.title) {
+                    if !section.themes.isEmpty {
+                        GalleryGrid(themes: section.themes, slot: slot, slots: preferences.slots) { theme, only in
+                            choose(theme, only: only)
+                        }
+                    }
+                    if let line = section.line {
+                        Text(line).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(.leftArrow) { move(-1, in: gallery) }
+        .onKeyPress(.rightArrow) { move(1, in: gallery) }
+        .onKeyPress(.upArrow) { move(-3, in: gallery) }
+        .onKeyPress(.downArrow) { move(3, in: gallery) }
+        .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
+    }
+
+    /// Fills the slots with `theme` as a click on its card does, and gives the gallery the keys.
+    func choose(_ theme: Theme, only: Bool) {
+        preferences.slots = preferences.slots.choosing(theme, for: slot, only: only)
+        focused = true
+    }
+
+    /// Chooses the card `step` cards on from the slot's theme, as the terminal previews a theme as it
+    /// moves through its list.
+    func move(_ step: Int, in gallery: Gallery) -> KeyPress.Result {
+        guard let theme = gallery.moving(from: preferences.slots[slot], by: step) else { return .ignored }
+        choose(theme, only: false)
+        return .handled
+    }
+}
+```
+
+In `mac/JawUI/Sources/Settings/SettingsPane.swift`, Appearance's size becomes `NSSize(width: 500, height: 640)`.
+
+In `mac/JawApp/Sources/SettingsWindowController.swift`, the controller keeps the preferences and opens on the slot in use: add `    let preferences: Preferences` after `let tabs: SettingsTabs`, `        self.preferences = preferences` as `init`'s first line, and `        preferences.choosing = nil` as `show(_:over:)`'s first line.
+
+- [ ] **Step 7: Build, test and look at the pane**
+
+Run: `mac/scripts/build-mac build`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `make check-parity`.
+Expected: each exits 0. `check-components` passes: the card takes its type from `TextStyle.micro`, its corners from `Radius` and its lines from `Stroke`, and the pane's own words use the system's semantic fonts, as the Settings window is the system's look.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/gallery.png --keys settings:appearance -appearance dark -themeDark omarchy:gruvbox -themeLight redlamp:nord`
+Expected: the Appearance pane, 640 points tall: Dark selected among the radio buttons in a row; the Dark tile outlined, "Gruvbox, Omarchy's", "In use", its half-size card in Gruvbox, and the Light tile "Nord, Redlamp's", "Used when Appearance is Light"; the footer; Jaw's section with Tokyo Night, and Omarchy's starting with Catppuccin, Gruvbox's card, the first of its second row, ticked and ringed in the accent if the picture reaches it (it shows the pane's top 640 points). Nothing cut at the right edge.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add mac/JawUI/Sources/Settings mac/JawUI/Sources/Style/Preferences.swift mac/JawApp/Sources/SettingsWindowController.swift \
+    mac/Tests/JawUITests/GalleryTests.swift mac/Tests/JawUITests/References/theme-gallery-dark.png \
+    mac/Tests/JawUITests/References/theme-gallery-light.png
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Settings › Appearance gets its slots and its gallery, as the Settings and themes design draws them: a tile for Dark and one for Light, each its theme's card at half size with its name and source and whether it's in use or when it would be, the outlined one the slot the gallery chooses for, and under them Jaw's, Omarchy's and Redlamp's sections of cards three across, each a small chat in the half that slot would take, an unread row, Ana's mention of you and your reply with its ticks in the link colour, ticked and ringed in the accent when it's the slot's theme; a click fills the slots as a choice does, ⌥-click or the card's menu fills only the slot chosen for, and the arrows move through the cards choosing each as they reach it; while jawd's themes aren't in, the Omarchy section shows the slots' own from their copies and says why; a tile says why its slot draws Tokyo Night when it does; and two reference pictures hold every theme's card for each slot, so a change to any mapping shows
+EOF
+```
+
+---
+
+### Task 7: The harness draws every theme, and Settings
+
+**Files:**
+- Create: `mac/JawHarness/Sources/Fixtures/Themes.swift`, `mac/JawHarness/Sources/Scenes/SettingsScenes.swift`
+- Modify: `mac/Project.swift` (the `JawHarness` target's `resources`, line 138, and the comment above it), `mac/JawHarness/Sources/HarnessScene.swift` (`HarnessSection` at lines 6-36, `Conditions.roles` at 49-51), `mac/JawHarness/Sources/HarnessLaunch.swift` (its doc comment and `--theme` at lines 39-41), `mac/JawHarness/Sources/ConditionsControls.swift` (the Theme picker at 12-14), `mac/JawHarness/Sources/BuiltInScenes.swift` (after `catalog.register(.contactForm)`), `mac/JawThemes/Sources/Roles.swift` (`Catalog.jaw`'s doc comment, `families` and `family(_:)` at lines 59-67)
+- Test: `mac/Tests/JawHarnessTests/ScenesTests.swift` (the list of scenes at 53-59), `mac/Tests/JawHarnessTests/LaunchTests.swift`, `mac/Tests/JawHarnessTests/CatalogTests.swift`
+
+**Interfaces:**
+- Consumes: `OmarchyTheme(id:file:)`, `Catalog.themes(omarchy:accent:)`, `Catalog.roles(_:of:omarchy:accent:)`, `Slots`, `SystemAccent.blue` (Task 4); `OmarchyState` (Task 5); `AppearancePane`, `MessagesPane`, `PanesPane`, `SettingsPane` (Task 1); `Gallery`, `GalleryGrid`, `ThemeCard`, `ThemeChat`, `SlotTile`, `SlotTileView` (Task 6); the harness's `Fixtures`, `SpecimenGroup` and `HarnessScene`.
+- Produces, in the harness: `Fixtures.omarchy: [OmarchyTheme]` and `Fixtures.themes: [Theme]`; `HarnessSection.settings`; the scenes `settings-panes`, `theme-gallery` and `theme-states`; `--theme jaw|omarchy:<id>|redlamp:<id>`.
+- Removes: `Catalog.families` and `Catalog.family(_:)`, which nothing reads once the harness lists every theme.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `mac/Tests/JawHarnessTests/ScenesTests.swift`, the list in `every scene draws as wide as it says, says what to look for, and is named for a script` gains the three scenes after `"contact-form"`:
+
+```swift
+            "poll-form", "contact-sheet", "contact-form", "settings-panes", "theme-gallery", "theme-states", "states",
+```
+
+In `mac/Tests/JawHarnessTests/LaunchTests.swift`, add:
+
+```swift
+@MainActor @Test func `--theme takes any theme's ID, Jaw's, Omarchy's or Redlamp's, and nothing else`() {
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "omarchy:gruvbox"]).conditions.theme == "omarchy:gruvbox")
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "redlamp:nord"]).conditions.theme == "redlamp:nord")
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "nord"]).conditions.theme == "jaw", "an ID names its source")
+}
+```
+
+In `mac/Tests/JawHarnessTests/CatalogTests.swift`, add:
+
+```swift
+@Test func `a scene is drawn in any theme's half for its appearance, and in Tokyo Night's where the theme has none`() throws {
+    #expect(Fixtures.omarchy.count == 23 && Fixtures.themes.count == 46, "Omarchy's, read from the harness's bundle, beside Jaw's and Redlamp's")
+    var conditions = Conditions()
+    conditions.theme = "redlamp:nord"
+    #expect(conditions.roles == (try #require(Fixtures.themes.first { $0.id == "redlamp:nord" })).dark)
+    conditions.theme = "omarchy:gruvbox"
+    conditions.dark = false
+    #expect(conditions.roles == Catalog.jaw.light, "Gruvbox is dark only")
+    conditions.theme = "redlamp:neutral"
+    #expect(conditions.roles.accent.hex == 0x007AFF, "Neutral in macOS's blue, whatever the Mac's accent")
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawHarnessTests`
+Expected: exit 1, with `error: type 'Fixtures' has no member 'omarchy'` from `CatalogTests.swift`.
+
+- [ ] **Step 3: Omarchy's themes in the harness's bundle**
+
+In `mac/Project.swift`, the `JawHarness` target's comment and resources become:
+
+```swift
+            // The app's icon; the protocol's fixtures, which the scenes decode as jawd sends them; and
+            // Omarchy's themes, which they read as jawd serves them.
+            resources: ["JawApp/Resources/**", "../protocol/fixtures/*.json", "../protocol/themes/*.toml"],
+```
+
+Create `mac/JawHarness/Sources/Fixtures/Themes.swift`:
+
+```swift
+import Foundation
+import JawThemes
+
+extension Fixtures {
+    /// Omarchy's themes as jawd serves them: each `protocol/themes/<id>.toml` in the harness's bundle,
+    /// read as jaw-proto reads it, in the order of their IDs. A file that can't be read stops the
+    /// harness, saying which.
+    static let omarchy: [OmarchyTheme] = (Bundle.main.urls(forResourcesWithExtension: "toml", subdirectory: nil) ?? [])
+        .map { url in
+            let id = url.deletingPathExtension().lastPathComponent
+            guard let text = try? String(contentsOf: url, encoding: .utf8), let theme = OmarchyTheme(id: id, file: text) else {
+                fatalError("protocol/themes/\(id).toml doesn't read as jaw-proto reads it")
+            }
+            return theme
+        }
+        .sorted { $0.id < $1.id }
+
+    /// Every theme there is to choose, as the gallery lists them, Neutral in macOS's blue, so the
+    /// harness's pictures don't depend on the Mac's accent.
+    static let themes = Catalog.themes(omarchy: omarchy, accent: .blue)
+}
+```
+
+- [ ] **Step 4: Every theme in the conditions and on the command line**
+
+In `mac/JawHarness/Sources/HarnessScene.swift`:
+- `HarnessSection` gains `    case settings = "Settings"` after `case overlays = "Palette and overlays"`, and its `symbol` gains `        case .settings: "gearshape"` after `.overlays`' line.
+- `Conditions.roles` becomes:
+
+```swift
+    /// The theme's half for the appearance, or Tokyo Night's where it has none, as the app draws a slot.
+    var roles: Roles {
+        Fixtures.themes.first { $0.id == theme }?.roles(dark ? .dark : .light) ?? Catalog.jaw.roles(dark: dark)
+    }
+```
+
+In `mac/JawHarness/Sources/HarnessLaunch.swift`, the doc comment's line ``/// - `--theme <id>`, `--appearance dark|light`, …`` begins ``/// - `--theme jaw|omarchy:<id>|redlamp:<id>`, `--appearance dark|light`,`` and the `--theme` lines become:
+
+```swift
+        if let theme = value("--theme"), Fixtures.themes.contains(where: { $0.id == theme }) {
+            launch.conditions.theme = theme
+        }
+```
+
+In `mac/JawHarness/Sources/ConditionsControls.swift`, the Theme picker lists every theme by section:
+
+```swift
+            Picker("Theme", selection: $conditions.theme) {
+                ForEach(ThemeSource.allCases, id: \.self) { source in
+                    Section(source.title) {
+                        ForEach(Fixtures.themes.filter { $0.source == source }) { Text($0.name).tag($0.id) }
+                    }
+                }
+            }
+```
+
+In `mac/JawThemes/Sources/Roles.swift`, `Catalog.jaw`'s doc comment's last sentence, "Redlamp's families join it in Mac-M5.", becomes "`Catalog.themes` lists it first, as `jawTheme`, before Omarchy's and Redlamp's.", and `public static let families = [jaw]` and `family(_:)` with the blank lines around them go.
+
+- [ ] **Step 5: The Settings scenes**
+
+Create `mac/JawHarness/Sources/Scenes/SettingsScenes.swift`:
+
+```swift
+import AppKit
+import JawThemes
+import JawUI
+import SwiftUI
+
+extension HarnessScene {
+    static var settingsPanes: HarnessScene {
+        HarnessScene(
+            id: "settings-panes", title: "Settings' panes", symbol: "gearshape",
+            synopsis: "Appearance, Messages and Panes at the window's width, each at its own height, as the toolbar's tabs show them",
+            section: .settings, covers: [AppearancePane.self, MessagesPane.self, PanesPane.self, SlotTileView.self],
+            width: SettingsPane.appearance.size.width,
+        ) { SettingsPanesScene(conditions: $0) }
+    }
+
+    static var themeGallery: HarnessScene {
+        HarnessScene(
+            id: "theme-gallery", title: "Theme gallery", symbol: "square.grid.3x3",
+            synopsis: "Every theme's card for the slot of the appearance, as the gallery draws them: each should read, and none look like another",
+            section: .settings, covers: [GalleryGrid.self, ThemeCard.self, ThemeChat.self],
+            width: ThemeChat.size.width * 3 + Space.m * 2,
+        ) { ThemeGalleryScene(conditions: $0) }
+    }
+
+    static var themeStates: HarnessScene {
+        HarnessScene(
+            id: "theme-states", title: "Theme states", symbol: "checkmark.circle",
+            synopsis: "A card at rest, under the pointer and filling its slot; the slots' tiles; and the Omarchy section while jawd starts, can't be reached and is older",
+            section: .settings, covers: [ThemeCard.self, SlotTileView.self, GalleryGrid.self],
+            width: SettingsPane.appearance.size.width,
+        ) { ThemeStatesScene(conditions: $0) }
+    }
+}
+
+/// Settings' preferences for a scene: the harness's own, emptied once a launch so each starts from the
+/// app's defaults; the scene's look, density, text size, font and appearance; its theme in the slot of
+/// its appearance and Jaw's in the other; Omarchy's themes as jawd serves them; and Neutral in macOS's
+/// blue, so the pictures don't depend on the Mac's accent.
+@MainActor
+func scenePreferences(_ conditions: Conditions) -> Preferences {
+    let preferences = Preferences(defaults: SettingsDefaults.shared, accent: .blue)
+    preferences.look = conditions.look
+    preferences.density = conditions.density
+    preferences.textSize = conditions.textSize
+    preferences.font = conditions.font
+    preferences.appearance = conditions.dark ? .dark : .light
+    preferences.served = Fixtures.omarchy
+    preferences.slots = conditions.dark ? Slots(dark: conditions.theme) : Slots(light: conditions.theme)
+    return preferences
+}
+
+/// The harness's own defaults for Settings, emptied as they're made, the first time a scene makes
+/// preferences in a launch.
+private enum SettingsDefaults {
+    static let shared: UserDefaults = {
+        let suite = "\(Bundle.main.bundleIdentifier ?? "JawHarness").settings"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }()
+}
+
+/// Settings' three panes as the toolbar's tabs show them, each at its size on the window's colour.
+private struct SettingsPanesScene: View {
+    let roles: Roles
+    @State private var preferences: Preferences
+
+    init(conditions: Conditions) {
+        roles = conditions.roles
+        _preferences = State(initialValue: scenePreferences(conditions))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SpecimenGroup(
+                title: "Appearance",
+                note: "The appearance in a row; the slots, the one in use outlined and saying so, the other saying when it would be, each its theme's card at half size with its name and source; then the gallery's first sections. Nothing should be cut at the right edge.",
+                roles: roles,
+            ) { pane(AppearancePane(preferences: preferences)) }
+            SpecimenGroup(
+                title: "Messages",
+                note: "Bubbles or lines, then spacing, text size and font, each explanation its section's footer, as the sheet had them.",
+                roles: roles,
+            ) { pane(MessagesPane(preferences: preferences)) }
+            SpecimenGroup(
+                title: "Panes",
+                note: "How much the other panes are dimmed, and the focused pane's outline, its colour the theme's accent until one's picked.",
+                roles: roles,
+            ) { pane(PanesPane(preferences: preferences)) }
+        }
+    }
+
+    /// A pane on the window's colour, as the window holds it.
+    func pane(_ view: some View) -> some View {
+        view.background(Color(nsColor: .windowBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: Radius.panel))
+    }
+}
+
+/// Every theme's card for the slot of the scene's appearance, three across at 144 points, as the
+/// gallery draws them, the scene's theme ticked.
+private struct ThemeGalleryScene: View {
+    let conditions: Conditions
+
+    var slot: Slot {
+        conditions.dark ? .dark : .light
+    }
+
+    var body: some View {
+        let slots = conditions.dark ? Slots(dark: conditions.theme) : Slots(light: conditions.theme)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Gallery(Fixtures.themes, for: slot, omarchyLine: nil).sections) { section in
+                SpecimenGroup(title: "\(section.source.title), for \(slot.title)", note: note(section.source), roles: conditions.roles) {
+                    GalleryGrid(themes: section.themes, slot: slot, slots: slots) { _, _ in }
+                }
+            }
+        }
+    }
+
+    func note(_ source: ThemeSource) -> String {
+        switch source {
+        case .jaw: "Tokyo Night, or Tokyo Night Day for Light: the app's own, as it was before the slots."
+        case .omarchy: "The 18 dark or the 5 light, in jawd's order, each mapped as the terminal maps it and held on the surface: no line should be hard to read."
+        case .redlamp: "Neutral in macOS's blue, then Redlamp and the twenty from omoi-station, held by the same bands: no line should be faint, and Redlamp's red only its accent."
+        }
+    }
+}
+
+/// A card in each of its states, the slots' tiles, and the Omarchy section while jawd's themes aren't
+/// in, each as the Appearance pane draws it.
+private struct ThemeStatesScene: View {
+    let conditions: Conditions
+
+    var slot: Slot {
+        conditions.dark ? .dark : .light
+    }
+
+    /// The scene's theme, or Jaw's where it has no half for the scene's appearance.
+    var theme: Theme {
+        Fixtures.themes.first { $0.id == conditions.theme && $0.roles(slot) != nil } ?? Catalog.jawTheme
+    }
+
+    var body: some View {
+        let roles = theme.roles(slot) ?? conditions.roles
+        let slots = conditions.dark ? Slots(dark: theme.id) : Slots(light: theme.id)
+        let empty = Slots(dark: "", light: "")
+        VStack(alignment: .leading, spacing: 0) {
+            SpecimenGroup(
+                title: "A card",
+                note: "At rest, under the pointer, and filling the slot: ringed in the separator, then in the secondary label colour, then ticked and ringed in the system's accent.",
+                roles: conditions.roles,
+            ) {
+                HStack(alignment: .top, spacing: Space.m) {
+                    ThemeCard(theme: theme, roles: roles, ticked: false, label: Gallery.label(theme, empty))
+                    ThemeCard(theme: theme, roles: roles, ticked: false, hovered: true, label: Gallery.label(theme, empty))
+                    ThemeCard(theme: theme, roles: roles, ticked: true, label: Gallery.label(theme, slots))
+                }
+                .frame(width: ThemeChat.size.width * 3 + Space.m * 2)
+            }
+            SpecimenGroup(
+                title: "The slots",
+                note: "The slot chosen for outlined in the accent; the one in use says so, and the other when it would be, as Appearance holds one.",
+                roles: conditions.roles,
+            ) {
+                HStack(spacing: Space.m) {
+                    ForEach(Slot.allCases, id: \.self) { each in
+                        SlotTileView(tile: SlotTile(each, slots: slots, themes: Fixtures.themes, served: true,
+                                                    appearance: conditions.dark ? .dark : .light, dark: conditions.dark),
+                                     roles: Catalog.roles(each, of: slots, omarchy: Fixtures.omarchy, accent: .blue), outlined: each == slot)
+                    }
+                }
+            }
+            SpecimenGroup(
+                title: "Omarchy's, while jawd's themes aren't in",
+                note: "The slots' own from their copies, here Gruvbox, and one line in jawd's state: starting, not answering, older.",
+                roles: conditions.roles,
+            ) {
+                VStack(spacing: Space.m) {
+                    ForEach([OmarchyState.starting, .unreachable, .older], id: \.self) { state in
+                        Form {
+                            Section("Omarchy's") {
+                                GalleryGrid(themes: Fixtures.themes.filter { $0.id == "omarchy:gruvbox" }, slot: .dark,
+                                            slots: Slots(dark: "omarchy:gruvbox")) { _, _ in }
+                                if let line = state.line {
+                                    Text(line).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .formStyle(.grouped)
+                        .frame(height: 220)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+In `mac/JawHarness/Sources/BuiltInScenes.swift`, after `catalog.register(.contactForm)`, add:
+
+```swift
+        catalog.register(.settingsPanes)
+        catalog.register(.themeGallery)
+        catalog.register(.themeStates)
+```
+
+- [ ] **Step 6: Run the tests and look at the scenes**
+
+Run: `mac/scripts/build-mac test JawHarnessTests`
+Expected: exit 0, `** TEST SUCCEEDED **`: the new scenes draw as wide as they say, each with notes and the same picture twice, and the two new tests pass.
+
+Run, one at a time:
+
+```bash
+mac/scripts/build-mac shot settings-panes mac/build/settings/settings-panes-dark.png --appearance dark
+mac/scripts/build-mac shot settings-panes mac/build/settings/settings-panes-light.png --appearance light
+mac/scripts/build-mac shot theme-gallery mac/build/settings/theme-gallery-dark.png --appearance dark --theme omarchy:gruvbox
+mac/scripts/build-mac shot theme-gallery mac/build/settings/theme-gallery-light.png --appearance light --theme omarchy:gruvbox
+mac/scripts/build-mac shot theme-states mac/build/settings/theme-states-dark.png --appearance dark --theme redlamp:nord
+mac/scripts/build-mac shot theme-states mac/build/settings/theme-states-light.png --appearance light --theme redlamp:nord
+```
+
+Expected: each picture, looked at with the Read tool, shows what its notes ask for: the three panes whole at 500 points; every card for the slot, Gruvbox's ticked in the dark gallery and nothing ticked in the light one, where Gruvbox has no half; Nord's card at rest, under the pointer and ticked, the two tiles, and the three Omarchy sections, each with Gruvbox and its line.
+
+Then `mac/scripts/build-mac build`, `mac/scripts/build-mac test JawThemes`, `mac/scripts/build-mac test JawUITests` and `make check-parity`; each exits 0.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add mac/Project.swift mac/JawHarness/Sources mac/JawThemes/Sources/Roles.swift mac/Tests/JawHarnessTests
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+The harness draws every theme the app offers, as the Settings and themes design asks: Omarchy's 23 are copied into its bundle from protocol/themes and read as jaw-proto reads them, its Theme condition lists Jaw's, Omarchy's and Redlamp's by section, --theme takes jaw, omarchy:<id> or redlamp:<id>, Neutral is drawn in macOS's blue so no picture depends on the Mac's accent, and the Roles scene draws any of them with its contrast; a Settings section draws the three panes at the window's width, every card for the slot of the appearance, and a card at rest, under the pointer and filling its slot, the slots' tiles and the Omarchy section while jawd starts, can't be reached and is older; and Catalog.families and Catalog.family, which nothing reads now, go
+EOF
+```
+
+---
+
+### Task 8: The docs, and the branch left ready
+
+**Files:**
+- Modify: `docs/plans/2026-10-26-jaw-mac-design.md` (Decisions, line 30; "The UI stack", line 181; "Themes", lines 357-390; "Code", line 488; "Testing", line 501; "Milestones", line 515), `docs/plans/2026-10-26-jaw-mac-plan.md` (Decisions, line 35; Mac-M5's steps 1 and 6, lines 149 and 154; "Alongside", line 171), `docs/plans/2026-10-27-jaw-mac-parity-plan.md` (line 27; step 3.5, lines 156-160; Phase 4, line 202; the owner's answers, line 221), `mac/README.md` (lines 25 and 39)
+- Outside the repository: the parity canvas, `jaw-feature-parity.canvas.tsx` in the project's canvases (`/Users/pedrogomes/.cursor/projects/Users-pedrogomes-src-jaw/canvases/`), lines 348-349
+- Unchanged, on purpose: `mac/parity.toml`, whose rows for step 3.5, `settings.set` and the `settings` push, are its other half, the settings jawd keeps (P5)
+
+**Interfaces:**
+- Consumes: what Tasks 1 to 7 built, as their commits say it.
+- Produces: docs that say what's built: Settings in a window of its own, the slots and the gallery, Omarchy's themes from jawd, Redlamp's copied under jaw's MIT by its owner, `sync-themes` run by hand rather than in CI.
+
+- [ ] **Step 1: The Mac design**
+
+In `docs/plans/2026-10-26-jaw-mac-design.md`:
+
+The decision on line 30 becomes:
+
+```markdown
+- **Redlamp's themes copied into jaw, with a check that keeps them in step** (Owner, 26 Oct), **and Omarchy's from jawd beside them, a theme for dark and one for light** (Owner, 6 Nov). `RedlampDesign` is a Tuist framework that depends on Redlamp's engine API and is mostly a photo editor's controls; jaw needs only its ten-colour theme families, which their owner relicensed for jaw under its MIT licence, and `scripts/sync-themes` keeps the copy diffable, as `scripts/sync-protos` keeps whatsmeow's protobufs. "Themes" has the slots and the gallery.
+```
+
+In "The UI stack"'s decision, line 181, `the palette (in a panel of its own), settings, sheets` becomes `the palette (in a panel of its own), settings (in a window of its own, its panes the toolbar's tabs), sheets`.
+
+"Themes", from `## Themes` to the line before `## Animation`, becomes:
+
+```markdown
+## Themes
+
+Settings › Appearance holds a theme for dark and one for light, each chosen from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd and Redlamp's 22 families, each drawn as a small chat in its colours ([the Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md), settled with the owner on 6 November).
+
+### Redlamp's catalog
+
+- **Redlamp keeps themes as families,** each a matched dark and light pair, so a choice survives an appearance change. A family is either authored directly or ten colours (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, and `primaryRoles`, which keeps a brand colour to the places it's allowed), mapped to tokens. Its catalog is Neutral, Redlamp, and twenty ported from omoi-station: Kanagawa, Tokyo Night, Moonlight, Catppuccin, Rosé Pine, Nord, Everforest, Gruvbox, Dracula, Solarized, One Dark, Monokai, Ocean, Sakura, Copper, Vinyl Noir, Neon Dusk, Burnt Tape, Phantom Frequency and Velvet Static. Around them: a tint from 0 (the theme's tones in grey) to 1, native controls in the theme's accent or the system's, the panels' translucency (solid under Reduce Transparency), and the palette in a theme of its own, which come in Mac-M5 (Owner, 6 Nov).
+- **Its tokens are a photo editor's** (labels, tracks, thumbs, wells, an edited dot), so jaw maps the ten colours to a chat's roles itself, below.
+- **Copied, not linked** (Owner, 26 Oct), **under jaw's licence** (Owner, 6 Nov). `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 200 lines in `JawThemes/Sources/RedlampCatalog.swift`: `ThemePalette`, `PrimaryRoles`, the HSL parser, the families' ten colours in Redlamp's slot order, and the brand's nine colours the Redlamp family is made of. Its owner relicensed Redlamp's catalog for jaw under jaw's MIT licence ("I own redlamp, MIT is fine"), so the copy carries jaw's licence with a line saying whose it is, and there's no `docs/licenses/redlamp.txt`. `scripts/sync-themes` copies it from a checkout of Redlamp at a pinned commit with `git show`, never touching the checkout, and with `--check` says what differs and what Redlamp's main has changed since, Neutral's tokens included; CI has no checkout of Redlamp, so there it says so and checks nothing.
+- **Held readable** (Owner, 6 Nov): mapped by the table below, then held as Omarchy's are, every colour at 3:1 on the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1, and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, readable over exact: 37 of the 42 halves move a little, a photo editor's faint labels most. Neutral is Redlamp's standard greys with the system's accent, read in both appearances and again when it changes.
+
+### Omarchy's themes, from jawd
+
+- **Asked after each hello** with `themes`, never before the first frame; jawd answers at once, and its answer holds while the app runs. The slots' Omarchy themes are remembered with their colours (`themeDarkColours`, `themeLightColours`), so the first frame is drawn in them before jawd answers, and a theme jawd no longer serves is drawn as Tokyo Night in its slot, the choice kept.
+- **Mapped as the terminal maps them:** `theme.rs`'s `Roles::of`, ported to Swift with the same keys, bands and straight line toward the ground or the text, so the Mac lands on the terminal's colours, then held at 3:1 on the surface the Mac draws its list and bubbles on, which moves 9 of the 23 a little (Owner, 6 Nov). The Settings and themes design's table has each role's key.
+
+### jaw's own theme
+
+- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Its light half is Tokyo Night Day, Tokyo Night's own light palette. Omarchy's Tokyo Night and Redlamp's, a lighter take, are in their own sections of the gallery.
+
+### The roles
+
+Every colour the app draws is asked for by what it's for, as `theme.rs` asks, never by hue:
+
+| Role | jaw's (ooze's Tokyo Night) | A Redlamp family |
+| --- | --- | --- |
+| The window's ground | bg `#1a1b26` | `background` |
+| The sidebar, the list, their bubbles | surface `#24283b` | `card` |
+| Text | fg `#c0caf5` | `foreground` |
+| Secondary text: previews, times | muted `#737aa2` | `muted` |
+| Quieter text, ticks not yet read | comment `#565f89` | `muted` at 62%, Redlamp's tertiary |
+| Separators | gutter `#3b4261` | `border` |
+| Focus, selection, unread counts | blue `#7aa2f7`, selection `#283457` | `primary`, or `neutral` where `primaryRoles` keeps it out |
+| Links, read ticks | blue `#7aa2f7` | as the accent |
+| Your bubbles | blue at 18% over the ground | `primary` at 18% over `background` (12% in light), `neutral` where `primaryRoles` keeps it out |
+| Mentions, the "new" marker | orange `#ff9e64` | `accent` |
+| Online, typing | green `#9ece6a` | `success` |
+| Failed, destructive | red `#f7768e` | `destructive` |
+| Group senders | red, yellow, blue, purple, cyan, green, orange, teal | eight hues 45° apart from `primary`'s, each lightened or darkened until it reads at 4.5:1 on their bubble |
+
+- **The slots** (Owner, 6 Nov): a theme for dark and one for light, kept in the app's preferences as `themeDark` and `themeLight` (`jaw`, `omarchy:<id>` or `redlamp:<id>`), both Jaw's Tokyo Night at first, the single `theme` key read into both once. A theme with both halves fills both; one of Omarchy's, which have one mode each, fills the slot of its mode; ⌥-click fills only the slot chosen for. Jaw draws the dark slot's theme while the Mac is dark, and the light one's while it's light.
+- **Tint, appearance and translucency** as Redlamp's, in Mac-M5: the tint pulls every role toward the grey of its own lightness; appearance is dark, light or the system's, as built; the sidebar's glass shows through by the translucency setting, solid under Reduce Transparency. Increase Contrast draws borders and secondary text a step stronger.
+- **Switching a theme is live:** the roles are read as views draw, and every window redraws on the change, with no relaunch.
+- **The Settings' Appearance pane** has the appearance, the two slots as tiles, each its theme's card at half size, and the gallery: Jaw's, Omarchy's and Redlamp's sections of cards three across, each a small chat in the half the slot would take (an unread row, their bubble with a mention of you, yours with its ticks in the link colour), as Redlamp's gallery shows each theme as a small panel. The arrows move through the cards, choosing each as they reach it, and while jawd's themes aren't in, Omarchy's section says why.
+```
+
+In "Code", line 488, `  JawThemes/                Redlamp's families (copied), jaw's own, the roles` becomes `  JawThemes/                the roles, jaw's own, Omarchy's mapping, Redlamp's families (copied), the slots`.
+
+In "Testing", line 501, `in both looks, in jaw's theme light and dark and two of Redlamp's, compared with references` becomes `in both looks, in any of the themes, Jaw's, Omarchy's or Redlamp's, light and dark, compared with references`.
+
+In "Milestones", line 515, Mac-M5's `**Polish, and it's jaw:** Redlamp's themes, the animations,` becomes `**Polish, and it's jaw:** the themes' tint and translucency, the animations,`.
+
+- [ ] **Step 2: The Mac plan**
+
+In `docs/plans/2026-10-26-jaw-mac-plan.md`:
+
+- Line 35 becomes `- **Redlamp's themes are copied, with a check that keeps them in step:** jaw needs the families, not Redlamp's controls. Brought forward with Omarchy's by [the Settings and themes plan](2026-11-06-jaw-mac-settings-and-themes-plan.md) (6 November); Mac-M5 step 1 keeps what's left.`
+- Mac-M5's step 1 becomes:
+
+```markdown
+1. **Themes:** what [the Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md) left for Mac-M5 (Owner, 6 Nov): the tint, the sidebar's translucency, native controls in the theme's accent, and the palette in a theme of its own. Redlamp's families copied with `scripts/sync-themes` and held readable, Omarchy's from jawd mapped as the terminal maps them, the senders' colours checked at 4.5:1, a slot for dark and one for light, and the Appearance pane's gallery of small chats came before, on `mac-settings-themes`.
+```
+
+- In Mac-M5's step 6, `Appearance (now with Redlamp's families),` becomes `Appearance (its slots and gallery since 6 November),`, and the step's first words, `**Settings, whole:**`, become `**Settings, whole,** each pane a tab in the Settings window's toolbar beside Appearance, Messages and Panes:`.
+- In "Alongside", line 171 becomes:
+
+```markdown
+- **`scripts/sync-themes`** came with the Settings and themes plan. It reads a checkout of Redlamp, whose repository is private, so CI, which has none, doesn't run it; it's run by hand when Redlamp's catalog moves, and `--check` says what Redlamp's main has changed since the pinned commit.
+```
+
+- [ ] **Step 3: The parity plan**
+
+In `docs/plans/2026-10-27-jaw-mac-parity-plan.md`:
+
+- Line 27: `The viewer, Redlamp's themes, the animations,` becomes `The viewer, the animations,`.
+- Step 3.5's heading, its first paragraph and its first bullet stay; its second and third bullets, ``- **Both sets of themes** (Owner, 27 Oct): …`` and ``- **The check:** `settings.set` and the `settings` push.``, become:
+
+```markdown
+- **Both sets of themes** (Owner, 27 Oct), **together** (Owner, 6 Nov): Settings is a window of its own whose Appearance pane has a slot for dark and one for light, filled from a gallery of Jaw's Tokyo Night, Omarchy's 23, read from jawd's `themes` and mapped onto the Mac's roles as the terminal maps them onto its own, and Redlamp's 22 families, brought forward from Mac-M5 ([the Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md) and [its plan](2026-11-06-jaw-mac-settings-and-themes-plan.md)). What's left of 3.5 is jawd's own settings, with P5.
+- **The check:** `settings.set` and the `settings` push, which stay in `mac/parity.toml` until the Mac sets jawd's settings. The Mac asks `themes`, which the terminal never needs to, as it reads Omarchy's themes from jaw-proto, so that's no gap.
+```
+
+- Phase 4, line 202: `and Mac-M5 (Redlamp's themes, the animations,` becomes `and Mac-M5 (the themes' tint, translucency and native controls, the animations,`.
+- The owner's second answer, line 221, becomes:
+
+```markdown
+2. **Themes:** both, Omarchy's from jawd's `themes` first and Redlamp's in Mac-M5 (3.5, Phase 4); on 6 November he brought Redlamp's forward, so both come in 3.5.
+```
+
+- [ ] **Step 4: The Mac README**
+
+In `mac/README.md`, line 25:
+- `` `revert`, `settings`, `terminal-panes` `` becomes `` `revert`, `settings`, which opens Settings, and `settings:appearance`, `settings:messages` or `settings:panes`, which open it on that pane, `terminal-panes` ``.
+- `(or the sheet over it)` becomes `(or the sheet over it, or Settings with its toolbar once a step has opened it)`.
+- ``such as `-appearance light`, which is read before what's saved and isn't saved`` becomes ``such as `-appearance light`, or `-themeDark omarchy:gruvbox` for the theme in the dark slot (`jaw`, `omarchy:<id>` or `redlamp:<id>`), which is read before what's saved and isn't saved``.
+
+Line 39: `` `--theme <id>` `` becomes `` `--theme jaw|omarchy:<id>|redlamp:<id>` ``.
+
+- [ ] **Step 5: The parity canvas's Mac cells**
+
+In `/Users/pedrogomes/.cursor/projects/Users-pedrogomes-src-jaw/canvases/jaw-feature-parity.canvas.tsx`, the parity workstream's, change only these two strings, each the `m:` cell of its row (line 348, "A settings panel"; line 349, "Themes"):
+
+- `m: ["works", "a sheet: Appearance, Messages and Panes"]` becomes `m: ["works", "a sheet: Appearance, Messages and Panes; a window with the toolbar's tabs on mac-settings-themes"]`.
+- `m: ["partial", "jaw's Tokyo Night, dark and light; Omarchy's from jawd's themes next, Redlamp's in Mac-M5"]` becomes `m: ["partial", "jaw's Tokyo Night, dark and light; a slot for each, from a gallery of Jaw's, Omarchy's 23 and Redlamp's 22, on mac-settings-themes"]`.
+
+If either isn't there as quoted, the workstream has changed it since: leave the canvas as it is and say so in the report. The board and the cells' states are the workstream's to move when this lands.
+
+- [ ] **Step 6: Check the docs**
+
+Run: `make check-parity` and `make check-audit`.
+Expected: both exit 0. `scripts/check-data-audit.py`'s `DATA_PATHS` name nothing under `mac/`, `scripts/`, `protocol/` or `docs/`, so there's nothing for the audit to find, as the Global Constraints say.
+
+Run: `rg -n "MPL|Redlamp's themes, the animations|now with Redlamp's families|runs in CI after it|join them in Mac-M5" docs/plans/2026-10-26-jaw-mac-design.md docs/plans/2026-10-26-jaw-mac-plan.md docs/plans/2026-10-27-jaw-mac-parity-plan.md`
+Expected: no match (rg exits 1): none of the old words for Redlamp's licence, Mac-M5's themes or `sync-themes` in CI is left.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add docs/plans/2026-10-26-jaw-mac-design.md docs/plans/2026-10-26-jaw-mac-plan.md docs/plans/2026-10-27-jaw-mac-parity-plan.md mac/README.md
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+The Mac's docs say what the Settings and themes plan built: the Mac design's Settings is a window of its own with the toolbar's tabs, its Themes a slot for dark and one for light filled from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd mapped as the terminal maps them and held on the surface, and Redlamp's 22 families copied under jaw's MIT by their owner and held readable, with links and read ticks in a role of their own, the tint and translucency left for Mac-M5; the Mac plan's Mac-M5 keeps what's left of its themes, and sync-themes is run by hand, since CI has no checkout of Redlamp; the parity plan's step 3.5 has both sets of themes together, its check keeping settings.set and the settings push for jawd's own settings; and the README gives --keys settings:<pane>, a theme in a slot by argument and the harness's --theme for any theme
+EOF
+```
+
+- [ ] **Step 8: Leave the branch ready**
+
+Run: `git fetch origin && git log --oneline HEAD..origin/main`
+Expected: nothing; if main has moved, `git rebase origin/main`, then every test again on the build Mac (`test JawKit`, `test JawThemes`, `test JawUITests`, `test JawHarnessTests`, `build`) and `make check-parity`, each exiting 0.
+
+Run: `scripts/sync-themes --check`
+Expected: `sync-themes: jaw's copy is Redlamp's catalog at 9fa9d9155`.
+
+Run: `rm -rf mac/build/settings && make prune-builds`
+Expected: the scratch pictures gone, and `prune-builds` saying what it freed from this worktree's `target/` and the others'.
+
+Report: the branch's commits (`git log --oneline origin/main..HEAD`, eleven: the design, the owner's answers, this plan, then one for each of Tasks 1 to 8), each test run's count, what the pictures showed, any decision a task took that this plan didn't, whether the parity canvas's two cells changed, and that the budgets, `--bench launch` and `--bench idle` with Settings open, are left for the controller to measure with a Release build. Don't push: the controller lands it.
