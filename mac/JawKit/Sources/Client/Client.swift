@@ -582,6 +582,8 @@ public final class Client: Sendable {
             return event(.link(step), generation, urgent: false)
         case let .notice(notice):
             return event(.notice(notice), generation, urgent: false)
+        case let .job(job):
+            return event(.job(job), generation, urgent: false)
         case let .push(method, params):
             return event(.push(method: method, params: params), generation, urgent: false)
         case let .badPush(method, why):
@@ -894,6 +896,8 @@ public enum Event: Sendable {
     case connection(Connection)
     case link(LinkStep)
     case notice(Notice)
+    /// How far a copy of one of your files has got.
+    case job(Job)
     /// Any other push.
     case push(method: String, params: JSONValue)
     /// Something jawd sent that isn't jaw's protocol, said rather than dropped in silence.

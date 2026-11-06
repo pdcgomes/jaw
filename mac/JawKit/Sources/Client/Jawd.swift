@@ -110,6 +110,14 @@ public final class Jawd {
         ask("send.contact", carding.params, .sendContact(carding), expect: .sent)
     }
 
+    /// Sends files to a chat with the key the box made for them, a message each, as a message is
+    /// sent: asked again with that key if the answer was lost, and handed back whole if jawd turns
+    /// them down.
+    public func sendMedia(chat: String, files: [SendMedia.File], quality: Variant, reply: String?, key: String) {
+        let attaching = Attaching(params: SendMedia(chat: chat, files: files, quality: quality, reply: reply, key: key), first: now())
+        ask("send.media", attaching.params, .sendMedia(attaching), expect: .sentMedia)
+    }
+
     @discardableResult
     public func react(chat: String, message: String, emoji: String) -> String {
         let key = Self.key()
@@ -241,8 +249,10 @@ public final class Jawd {
         ask("link.cancel", NoParams(), .quiet)
     }
 
-    public func status() {
-        ask("status", NoParams?.none, .status, expect: .status)
+    /// jawd's status: shown, as the Help menu asks for it, or read for what the app needs to know of
+    /// it, what jawd is missing, as `.statusRead`.
+    public func status(shown: Bool = true) {
+        ask("status", NoParams?.none, shown ? .status : .statusRead, expect: .status)
     }
 
     /// Asks for the panes jawd keeps for `interface`, by the name it gives in hello. They come as
@@ -280,9 +290,10 @@ public final class Jawd {
         return ticket
     }
 
-    /// Stops a message's download and anything waiting to be done for it (`media.cancel`).
-    public func cancel(chat: String, message: String) {
-        ask("media.cancel", MediaCancel(message: message, chat: chat), .did("stopping the download"))
+    /// Stops a message's download and anything waiting to be done for it, or a file of yours on its
+    /// way (`media.cancel`); what's stopped is said as `what` if jawd doesn't.
+    public func cancel(chat: String, message: String, what: String = "stopping the download") {
+        ask("media.cancel", MediaCancel(message: message, chat: chat), .did(what))
     }
 
     /// Asks `find` for the palette, which keeps only the answer to the latest one, numbered `id`.
@@ -421,6 +432,8 @@ public final class Jawd {
             out.append(.link(step))
         case let .notice(notice):
             out.append(.notice(notice.text, notice.tone))
+        case let .job(job):
+            out.append(.job(job))
         case let .push(method, params):
             out.append(.push(method: method, params: params))
         case let .unreadable(why):
@@ -436,6 +449,8 @@ public final class Jawd {
             out.append(.sent(key: polling.params.key ?? "", message: sent.message, row: sent.row))
         case let (.sendContact(carding), .sent(sent)):
             out.append(.sent(key: carding.params.key ?? "", message: sent.message, row: sent.row))
+        case let (.sendMedia(attaching), .sentMedia(sent)):
+            out.append(.mediaSent(key: attaching.params.key ?? "", messages: sent.messages, rows: sent.rows))
         case let (.act(acting), _):
             out.append(.acted(key: acting.key, said: acting.done))
         case let (.owed(key, owed), _):
@@ -448,6 +463,8 @@ public final class Jawd {
             out.append(.members(chat: chat, info.members))
         case let (.status, .status(status)):
             out.append(.status(status))
+        case let (.statusRead, .status(status)):
+            out.append(.statusRead(status))
         case let (.layout, .layout(kept)):
             out.append(.layout(kept))
         case let (.save(ticket, message), .saved(saved)):
@@ -488,6 +505,12 @@ public final class Jawd {
     /// Contact cards being sent, as `Sending` is a message.
     struct Carding {
         let params: SendContact
+        let first: Date
+    }
+
+    /// Files being sent, as `Sending` is a message.
+    struct Attaching {
+        let params: SendMedia
         let first: Date
     }
 
@@ -539,6 +562,7 @@ public final class Jawd {
         case send(Sending)
         case sendPoll(Polling)
         case sendContact(Carding)
+        case sendMedia(Attaching)
         case act(Acting)
         case move(Moving)
     }
@@ -564,6 +588,7 @@ public final class Jawd {
         case send(Sending)
         case sendPoll(Polling)
         case sendContact(Carding)
+        case sendMedia(Attaching)
         case act(Acting)
         case retry
         case owed(OwedKey, Owed)
@@ -573,6 +598,8 @@ public final class Jawd {
         case info(String)
         case members(String)
         case status
+        /// `status` read, not shown.
+        case statusRead
         /// Panes asked for, named as opening them is said: "opening the terminal's panes".
         case layout(String)
         /// `media.fetch` for a message, and `media.save` under its ticket.
@@ -650,6 +677,11 @@ public final class Jawd {
                                           why: Self.awayTooLong))
             case let .sendContact(carding):
                 ask("send.contact", carding.params, .sendContact(carding), expect: .sent)
+            case let .sendMedia(attaching) where away(attaching.first):
+                out.append(.mediaUnsent(chat: attaching.params.chat, key: attaching.params.key ?? "", files: attaching.params.files,
+                                        why: Self.awayTooLong))
+            case let .sendMedia(attaching):
+                ask("send.media", attaching.params, .sendMedia(attaching), expect: .sentMedia)
             case let .act(acting) where away(acting.first):
                 out.append(.acted(key: acting.key,
                                   said: "jawd was away too long to tell whether it was done, so look in the chat before \(acting.what) again"))
@@ -692,6 +724,14 @@ public final class Jawd {
             }
             let why = failure.code == ErrorCode.unknownMethod ? Self.whyNot(failure, "sending contacts") : Self.whyUnsent(failure)
             return [.contactUnsent(chat: chat, key: key, cards: carding.params.cards, why: why)]
+        case let .sendMedia(attaching):
+            let chat = attaching.params.chat, key = attaching.params.key ?? ""
+            if failure == .lost {
+                again.append(.sendMedia(attaching))
+                return [.unsure(chat: chat, key: key)]
+            }
+            let why = failure.code == ErrorCode.unknownMethod ? Self.whyNot(failure, "sending files") : Self.whyFilesUnsent(failure)
+            return [.mediaUnsent(chat: chat, key: key, files: attaching.params.files, why: why)]
         case let .act(acting):
             if failure == .lost {
                 again.append(.act(acting))
@@ -740,9 +780,17 @@ public final class Jawd {
             }
             return [.filed(.added(item: moving.item, to: moving.to)),
                     .notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
-        case .status, .quiet:
+        case .status, .statusRead, .quiet:
             return []
         }
+    }
+
+    /// Why jawd didn't take files, for the box: as `whyUnsent`, a file jawd names by its path named by
+    /// its name, as the strip shows it.
+    public nonisolated static func whyFilesUnsent(_ failure: Failure) -> String {
+        let why = whyUnsent(failure)
+        guard case let .jawd(e) = failure, let path = e.data?["path"]?.string, !path.isEmpty else { return why }
+        return why.replacingOccurrences(of: path, with: (path as NSString).lastPathComponent)
     }
 
     /// What to say about a request jawd turned down: one it doesn't serve yet comes later.
@@ -805,6 +853,12 @@ public enum JawUpdate: Sendable {
     case pollUnsent(chat: String, key: String, poll: SendPoll, why: String)
     /// Contact cards jawd didn't take: they go back to their form whole, with why.
     case contactUnsent(chat: String, key: String, cards: [SendContact.Card], why: String)
+    /// Files jawd has, as the box's key named them: their messages and their rows, the album's first.
+    case mediaSent(key: String, messages: [String], rows: [MessageRow])
+    /// Files jawd didn't take: they go back to their box whole, with why.
+    case mediaUnsent(chat: String, key: String, files: [SendMedia.File], why: String)
+    /// How far a copy of one of your files has got.
+    case job(Job)
     /// A message or an action whose answer was lost, to be asked for again once jawd is back.
     case unsure(chat: String, key: String)
     /// An action jawd answered for, and what to say of it, if anything.
@@ -817,6 +871,8 @@ public enum JawUpdate: Sendable {
     case chatStarted(ChatRow)
     case notStarted(String)
     case status(Status)
+    /// jawd's status, read rather than shown.
+    case statusRead(Status)
     /// The panes jawd keeps for an interface, as `layout.get` answered.
     case layout(KeptLayout)
     /// A chat looked up outside the caller's windows, and what was found of it.

@@ -2,13 +2,14 @@ import Foundation
 
 /// What a request's result is read as, so each line is decoded once, into the value it is.
 public enum Expect: Sendable, Hashable {
-    case json, sent, chat, info, chatInfo, status, layout, saved, folder
+    case json, sent, sentMedia, chat, info, chatInfo, status, layout, saved, folder
 }
 
 /// A request's answer, read as what it was asked for.
 public enum Reply: Sendable, Hashable {
     case json(JSONValue)
     case sent(Sent)
+    case sentMedia(SentMedia)
     case chat(ChatRow)
     case info(MessageInfo)
     case chatInfo(ChatInfo)
@@ -56,6 +57,7 @@ enum Incoming: Sendable {
     case connection(Connection)
     case link(LinkStep)
     case notice(Notice)
+    case job(Job)
     case push(String, JSONValue)
     /// A line that isn't jaw's protocol.
     case skip
@@ -90,6 +92,7 @@ struct IncomingLine: Decodable {
                 case .nothing: value = .reply(id, .json(.null))
                 case .reply(.json): value = try .reply(id, .json(c.decode(JSONValue.self, forKey: .result)))
                 case .reply(.sent): value = try .reply(id, .sent(c.decode(Sent.self, forKey: .result)))
+                case .reply(.sentMedia): value = try .reply(id, .sentMedia(c.decode(SentMedia.self, forKey: .result)))
                 case .reply(.chat): value = try .reply(id, .chat(c.decode(ChatStarted.self, forKey: .result).chat))
                 case .reply(.info): value = try .reply(id, .info(c.decode(MessageInfo.self, forKey: .result)))
                 case .reply(.chatInfo): value = try .reply(id, .chatInfo(c.decode(ChatInfo.self, forKey: .result)))
@@ -119,6 +122,7 @@ struct IncomingLine: Decodable {
             case "connection": value = try .connection(c.decode(Connection.self, forKey: .params))
             case "link": value = try .link(c.decode(LinkStep.self, forKey: .params))
             case "notice": value = try .notice(c.decode(Notice.self, forKey: .params))
+            case "job": value = try .job(c.decode(Job.self, forKey: .params))
             default: value = try .push(method, c.decodeIfPresent(JSONValue.self, forKey: .params) ?? .null)
             }
         } catch {

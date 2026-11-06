@@ -316,7 +316,7 @@ final class AppModel {
             if let row, let filing { folderAct(.add(item: filing.id, to: row.id), name: filing.name) }
         case let .notNamed(why):
             window?.sidebar.notNamed(why)
-        case .push, .chats, .layout, .folders, .roster:
+        case .push, .chats, .layout, .folders, .roster, .mediaSent, .mediaUnsent, .job, .statusRead:
             break
         }
     }

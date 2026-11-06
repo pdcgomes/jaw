@@ -53,6 +53,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "messages.watch", "watch.move": .messages
         case "library.watch": .library
         case "send.text", "send.poll", "send.contact": .reply(.sent)
+        case "send.media": .reply(.sentMedia)
         case "chat.start": .reply(.chat)
         case "message.info": .reply(.info)
         case "chat.info": .reply(.chatInfo)
@@ -67,7 +68,8 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         let value = try incoming(name, want)
         switch value {
         case .skip, .bad: Issue.record("\(name) doesn't decode: \(value)")
-        case let .push(method, _) where ["chats", "messages", "library", "typing", "resync", "connection", "notice", "link", "folders", "roster"].contains(method):
+        case let .push(method, _) where ["chats", "messages", "library", "typing", "resync", "connection", "notice", "link", "folders", "roster",
+                                         "job"].contains(method):
             Issue.record("\(name) decodes only as an untyped push")
         default: break
         }
@@ -284,6 +286,29 @@ func pushed(_ line: String) -> Incoming {
         ContactCard(name: "Inês Gomes", phones: [.init(number: "+351913002210", whatsapp: "+351913002210")]),
     ], "each card's name and numbers, the second on WhatsApp")
     #expect(row.plain == "Dr.ª Marta Lopes, Inês Gomes", "its words are the cards' names")
+}
+
+@Test func `send.media's request is its fixture, its answer reads as the album and its two messages, and a job push as a job`() throws {
+    let request = try written(id: 64, "send.media", SendMedia(chat: "351912345678@s.whatsapp.net", files: [
+        SendMedia.File(path: "~/Pictures/lake.jpg", caption: "the lake on Sunday"),
+        SendMedia.File(path: "/Users/me/Movies/swim.mov", kind: .video),
+    ], quality: .hd, reply: "3EB0A1B2C3D4E5F6", key: "jaw-7c2e19a4"))
+    #expect(try request == JSONValue.parse(fixture("send.media.request.json")))
+
+    guard case let .reply(_, .sentMedia(sent)) = try incoming("send.media.result.json", .reply(.sentMedia)) else {
+        Issue.record("send.media.result.json isn't send.media's answer")
+        return
+    }
+    #expect(sent.messages == ["3EB0D7A16C2B9F04E1A3C5", "3EB0E2F93B7A1C6D58049F"] && sent.album == "3EB0C5A18E24D97B3F60A1")
+    #expect(sent.rows.map(\.id) == ["3EB0C5A18E24D97B3F60A1", "3EB0D7A16C2B9F04E1A3C5", "3EB0E2F93B7A1C6D58049F"])
+    #expect(sent.rows.map(\.kind) == [.album, .image, .video] && sent.rows.allSatisfy { $0.mine && $0.status == .pending })
+    #expect(sent.rows[1].plain == "the lake on Sunday" && sent.rows[1].media?.path == nil, "its caption, and no copy yet")
+
+    guard case let .job(job) = try incoming("job.push.json", .nothing) else {
+        Issue.record("job.push.json isn't a job")
+        return
+    }
+    #expect(job == Job(id: "upload:131", kind: .upload, message: "3EB0D7A16C2B9F04E1A3C5", variant: .sd, progress: 0.42))
 }
 
 @Test func `a contact row without a vCard, or with a name past 256 characters, reads as far as it can`() throws {
