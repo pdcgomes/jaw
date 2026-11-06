@@ -33,7 +33,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var editorSheet: NSWindow?
     var sidebarToggle: IconButton?
     var displayLink: CADisplayLink?
-    var settings: NSWindow?
 
     init(model: AppModel) {
         self.model = model
@@ -363,19 +362,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
         pollSheet = sheet
         pollForm = form
-        window.beginSheet(sheet)
-    }
-
-    /// Settings, in a sheet over the window: modal to it, centred, Done or Esc to close.
-    func showSettings() {
-        guard let window, settings == nil else { return }
-        let view = SettingsView(preferences: model.preferences, accent: model.roles.accent) { [weak self] in
-            guard let self, let sheet = settings else { return }
-            window.endSheet(sheet)
-            settings = nil
-        }
-        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
-        settings = sheet
         window.beginSheet(sheet)
     }
 

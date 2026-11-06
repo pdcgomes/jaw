@@ -93,9 +93,9 @@ extension HarnessScene {
     static var screensOverlays: HarnessScene {
         HarnessScene(
             id: "screens-overlays", title: "With overlays", symbol: "macwindow.on.rectangle",
-            synopsis: "Lisbon Climbing open with the palette, the glance or Settings over it, and Ana Ribeiro open with the glance listing Lisbon Climbing",
+            synopsis: "Lisbon Climbing open with the palette or the glance over it, and Ana Ribeiro open with the glance listing Lisbon Climbing",
             section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
-                                        EmptyChatView.self, BottomBar.self, StatusLine.self, PaletteView.self, GlanceView.self, SettingsView.self],
+                                        EmptyChatView.self, BottomBar.self, StatusLine.self, PaletteView.self, GlanceView.self],
             width: 1180,
         ) { OverlaysScene(conditions: $0) }
     }
@@ -335,8 +335,8 @@ private struct FoldedScene: View {
     }
 }
 
-/// Lisbon Climbing open with the palette, the glance and Settings each open over it, and Ana Ribeiro
-/// open with the glance over her chat, listing Lisbon Climbing, each where the window puts it.
+/// Lisbon Climbing open with the palette and the glance each open over it, and Ana Ribeiro open with
+/// the glance over her chat, listing Lisbon Climbing, each where the window puts it.
 private struct OverlaysScene: View {
     let conditions: Conditions
 
@@ -356,11 +356,6 @@ private struct OverlaysScene: View {
                 title: "The glance, with Ana Ribeiro open",
                 note: "The app's fault, as in Three panes: under the glance, Ana's empty chat cuts its line at \"goes to…\". The glance lists the chat that needs you, Lisbon Climbing: \"@\" in the mention colour, \"3 unread\" and its newest three, \"Ana climb.pt/sintra\", \"You voice\" and \"Inês album\", as the app's glance names media by its kind's bare word. One card asks for less than its panel's least, so it's 520 by 260, centred. The status line's right shows what needs you: \"@ Lisbon Climbing\" in the mention colour, then \"⌘J glance\". A picture can't hold the panel's shadow.",
                 screen: Screen(open: [Samples.direct]), conditions: conditions, overlay: .glance,
-            )
-            ScreenBand(
-                title: "Settings",
-                note: "The app's fault, most likely: its sheet is 432 points tall, 16 short of the 448 its view takes here, which would cut 8 from its top and its foot; look in the app. It's centred in the window, as the app's sheet is on the build Mac. Appearance is chosen, the system's appearance and Jaw (Tokyo Night) under it; the segment and Done are grey, as in a window that isn't key. A picture can't hold a sheet's material or shadow, so it's on the window's colour with the separator's shadow.",
-                screen: Screen(open: [Samples.group]), conditions: conditions, overlay: .settings,
             )
         }
     }

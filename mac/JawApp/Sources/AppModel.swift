@@ -58,6 +58,8 @@ final class AppModel {
     /// gone, or jawd's words for refusing to look it up.
     var unopened: [String: String] = [:]
     let glance = Glance()
+    /// Settings' window, made the first time it's shown.
+    var settings: SettingsWindowController?
     var focusMode = false
     /// Everything the app does, made once; the menus, the palette and the keys sheet read it.
     lazy var commands: [Command] = makeCommands()
@@ -346,7 +348,14 @@ final class AppModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.05) { [weak self] in self?.window?.refresh() }
     }
 
+    /// Shows Settings, on `pane` when one's asked for, or brings it to the front.
+    func showSettings(_ pane: SettingsPane? = nil) {
+        if settings == nil { settings = SettingsWindowController(preferences: preferences, keeps: launch.snapshot == nil) }
+        settings?.show(pane, over: window?.window)
+    }
+
     func restyle() {
+        settings?.window?.appearance = preferences.nsAppearance
         window?.restyle()
         for c in panes.values {
             c.spec = spec
@@ -583,7 +592,14 @@ final class AppModel {
         }
     }
 
+    /// Closes the focused pane, or Settings when the key Close Pane was chosen by was pressed in its
+    /// window, which passes ⌘W on to the menu bar where its W key types something else, as on a
+    /// Hebrew layout (`SettingsWindow.pressed(_:)`).
     func closeFocusedPane() {
+        if let settings = settings?.window as? SettingsWindow, settings.pressed(NSApp.currentEvent) {
+            settings.performClose(nil)
+            return
+        }
         guard let grid, let at = focusedSlot, grid.slots.count > 1 else {
             window?.window?.performClose(nil)
             return

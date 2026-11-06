@@ -16,8 +16,10 @@ extension AppModel {
 
         // Jaw
         add(Command("about", "About Jaw", place: .app, send: #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
-        add(Command("settings", "Settings…", phrase: "Settings", detail: "appearance and messages", key: Shortcut(","), place: .app, group: 1)
-            { [weak self] in self?.window?.showSettings() })
+        add(Command("settings", "Settings…", phrase: "Settings", detail: "appearance, messages and panes", key: Shortcut(","), place: .app, group: 1)
+            { [weak self] in self?.showSettings() })
+        add(Command("theme", "Choose a Theme", phrase: "Choose a theme", detail: "Settings › Appearance", place: nil)
+            { [weak self] in self?.showSettings(.appearance) })
         add(Command("hide", "Hide Jaw", key: Shortcut("h"), place: .app, group: 2, send: #selector(NSApplication.hide(_:))))
         add(Command("hide.others", "Hide Others", key: Shortcut("h", [.command, .option]), place: .app, group: 2,
                     send: #selector(NSApplication.hideOtherApplications(_:))))

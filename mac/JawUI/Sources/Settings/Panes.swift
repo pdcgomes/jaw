@@ -2,48 +2,17 @@ import AppKit
 import JawThemes
 import SwiftUI
 
-/// Settings, in a sheet over the window: Appearance, Messages and Panes, and Done.
-public struct SettingsView: View {
+/// Settings › Appearance: dark, light or the system's, and the theme.
+public struct AppearancePane: View {
     @Bindable var preferences: Preferences
-    /// The theme's accent, the outline's colour unless one's picked.
-    let accent: RGBA
-    let done: () -> Void
-    @State var section = 0
 
-    public init(preferences: Preferences, accent: RGBA, done: @escaping () -> Void) {
+    public init(preferences: Preferences) {
         self.preferences = preferences
-        self.accent = accent
-        self.done = done
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            // Sections chosen with a segmented control inside the sheet: a tab view draws its tabs
-            // across its top edge, half above it, where a sheet has nothing to hold them.
-            Picker("Section", selection: $section) {
-                Text("Appearance").tag(0)
-                Text("Messages").tag(1)
-                Text("Panes").tag(2)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 330)
-            .padding(.top, Space.xl)
-            tabs
-            HStack {
-                Spacer()
-                Button("Done", action: done).keyboardShortcut(.defaultAction)
-            }
-            .padding(Space.l)
-        }
-        .focusEffectDisabled()
-    }
-
-    var tabs: some View {
-        Group {
-            switch section {
-        case 0:
-            Form {
+        Form {
+            Section {
                 Picker("Appearance", selection: $preferences.appearance) {
                     Text("The system's").tag(Appearance.system)
                     Text("Dark").tag(Appearance.dark)
@@ -55,19 +24,37 @@ public struct SettingsView: View {
                         Text(family.name == "jaw" ? "Jaw (Tokyo Night)" : family.name).tag(family.id)
                     }
                 }
-                Text("Redlamp's themes come in a later version.").font(.footnote).foregroundStyle(.secondary)
+            } footer: {
+                Text("Redlamp's themes come in a later version.")
             }
-            .formStyle(.grouped)
-        case 1:
-            Form {
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
+    }
+}
+
+/// Settings › Messages: bubbles or lines, comfortable or compact, the text size, the font, and
+/// whether photos and videos go in HD.
+public struct MessagesPane: View {
+    @Bindable var preferences: Preferences
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    public var body: some View {
+        Form {
+            Section {
                 Picker("Messages look like", selection: $preferences.look) {
                     ForEach(Look.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
+            } footer: {
                 Text(preferences.look == .bubbles
                     ? "Theirs on the left, yours on the right."
                     : "The terminal's layout: names on the left, yours from a third of the way across.")
-                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section {
                 Picker("Spacing", selection: $preferences.density) {
                     ForEach(Density.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
@@ -81,13 +68,35 @@ public struct SettingsView: View {
                 Picker("Font", selection: $preferences.font) {
                     ForEach(MessageFont.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
-                Toggle("Send photos and videos in HD", isOn: $preferences.sendHD)
-                Text("A sharper copy of each goes as well, as WhatsApp's HD sends it. Tab in the box switches what's there; ⌥ as you click Send sends HD.")
-                    .font(.footnote).foregroundStyle(.secondary)
             }
-            .formStyle(.grouped)
-        default:
-            Form {
+            Section {
+                Toggle("Send photos and videos in HD", isOn: $preferences.sendHD)
+            } footer: {
+                Text("A sharper copy of each goes as well, as WhatsApp's HD sends it. Tab in the box switches what's there; ⌥ as you click Send sends HD.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.messages.size.width, height: SettingsPane.messages.size.height)
+    }
+}
+
+/// Settings › Panes: how much the panes without the keys are dimmed, and the focused pane's outline.
+public struct PanesPane: View {
+    @Bindable var preferences: Preferences
+    @Environment(\.colorScheme) private var scheme
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+    }
+
+    /// The theme's accent in the appearance Settings is drawn in, the outline's colour unless one's picked.
+    var accent: RGBA {
+        preferences.style(dark: scheme == .dark).roles.accent
+    }
+
+    public var body: some View {
+        Form {
+            Section {
                 LabeledContent("Dim the other panes") {
                     HStack {
                         Slider(value: $preferences.paneDim, in: Preferences.paneDims)
@@ -99,21 +108,20 @@ public struct SettingsView: View {
                     HStack {
                         ColorPicker("", selection: Binding(
                             get: { (preferences.paneOutlineColour ?? accent).color },
-                            set: { preferences.paneOutlineColour = RGBA(NSColor($0)) }
+                            set: { preferences.paneOutlineColour = RGBA(NSColor($0)) },
                         ), supportsOpacity: false)
-                        .labelsHidden()
+                            .labelsHidden()
                         Button("The theme's accent") { preferences.paneOutlineColour = nil }
                             .disabled(preferences.paneOutlineColour == nil)
                     }
                 }
                 .disabled(!preferences.paneOutline)
+            } footer: {
                 Text("With more than one pane, the one with the keys is outlined inside its edge, and the others dimmed, as iTerm does.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            .formStyle(.grouped)
             }
         }
-        .frame(width: 480, height: 360)
+        .formStyle(.grouped)
+        .frame(width: SettingsPane.panes.size.width, height: SettingsPane.panes.size.height)
     }
 }
 

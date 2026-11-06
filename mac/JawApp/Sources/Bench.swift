@@ -109,7 +109,7 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let contacts = key.hasPrefix("contact:") || key.hasPrefix("contact-form:")
-            let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
+            let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("settings:") || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
                 || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:") || key == "roster"
@@ -140,7 +140,14 @@ enum Bench {
             if key.hasPrefix("type:") { (NSApp.keyWindow ?? model.window?.window)?.firstResponder?.insertText(String(key.dropFirst(5))) }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
-            if key == "settings" { model.window?.showSettings() }
+            if key == "settings" { model.showSettings() }
+            if key.hasPrefix("settings:") {
+                if let pane = SettingsPane(rawValue: String(key.dropFirst(9))) {
+                    model.showSettings(pane)
+                } else {
+                    FileHandle.standardError.write(Data("\(key): no such pane\n".utf8))
+                }
+            }
             if key == "terminal-panes" { model.openTerminalPanes() }
             if key.hasPrefix("vote:"), let c = model.conversation, let poll = c.newestPoll { c.vote(String(key.dropFirst(5)), in: poll.id) }
             if key.hasPrefix("poll"), let c = model.conversation {
@@ -521,7 +528,8 @@ enum Bench {
         // The window's frame view, so the toolbar is drawn too.
         let glance = model.glance.isOpen ? model.glance.panel.contentView : EmojiPicker.shared.panel.isVisible ? EmojiPicker.shared.panel.contentView : nil
         guard let view = glance ?? model.window?.contactSheet?.contentView ?? model.window?.cardsSheet?.contentView
-            ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
+            ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView
+            ?? model.settings?.window.flatMap({ $0.isVisible ? $0.contentView?.superview : nil })
             ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }

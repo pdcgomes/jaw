@@ -69,12 +69,11 @@ struct ControllerSpecimen: NSViewControllerRepresentable {
 
 /// A whole window's content at the screen's size, as the window holds it, made from a `Screen`, with
 /// the title bar's buttons over it where the window puts them, and over both, when one is open, the
-/// palette, the glance or Settings, each a view where the window puts its panel or its sheet, so a
-/// picture holds it.
+/// palette or the glance, each a view where the window puts its panel, so a picture holds it.
 struct ScreenSpecimen: View {
     /// What's open over the window, which the app shows in a window of its own above it.
     enum Overlay {
-        case palette, glance, settings
+        case palette, glance
     }
 
     let screen: Screen
@@ -89,7 +88,6 @@ struct ScreenSpecimen: View {
             switch overlay {
             case .palette: PaletteOver(roles: conditions.roles)
             case .glance: GlanceOver(screen: screen, roles: conditions.roles)
-            case .settings: SettingsOver(conditions: conditions)
             case nil: EmptyView()
             }
         }
@@ -139,44 +137,6 @@ private struct GlanceOver: View {
         let size = GlanceView.size(state.chats.count)
         GlanceView(state: state, roles: roles) { _, _ in }
             .frame(width: max(size.width, GlanceView.least.width), height: max(size.height, GlanceView.least.height))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// Settings as `MainWindowController.showSettings()` shows them, in a sheet at its own size, centred
-/// in the window as macOS puts a sheet, on the window's colour, which a sheet sits on, with a shadow
-/// from the theme's separator. Its preferences are the harness's own, emptied once a launch, so each
-/// launch starts from the app's defaults, whatever was chosen in Settings in the last, and the look,
-/// the density, the text size and the font are the scene's.
-private struct SettingsOver: View {
-    /// The harness's own defaults for Settings, emptied as they're made, the first time Settings is
-    /// drawn in a launch.
-    private static let defaults: UserDefaults = {
-        let suite = "\(Bundle.main.bundleIdentifier ?? "JawHarness").settings"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        return defaults
-    }()
-
-    let roles: Roles
-    @State private var preferences: Preferences
-
-    init(conditions: Conditions) {
-        roles = conditions.roles
-        let preferences = Preferences(defaults: Self.defaults)
-        preferences.look = conditions.look
-        preferences.density = conditions.density
-        preferences.textSize = conditions.textSize
-        preferences.font = conditions.font
-        _preferences = State(initialValue: preferences)
-    }
-
-    var body: some View {
-        SettingsView(preferences: preferences, accent: roles.accent) {}
-            .fixedSize()
-            .background(Color(nsColor: .windowBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: Radius.panel))
-            .shadow(color: roles.separator.color, radius: Space.l)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
