@@ -348,7 +348,8 @@ extension MessageLayout.Builder {
             default: m.viewOnce ? "1.circle" : "photo"
             }
             let words = m.media.flatMap { Self.comingWords($0) }
-            if words == nil || m.media?.state == .local {
+            // One of yours on its way says how far it's got over its well instead.
+            if words == nil || m.media?.state == .local, sending(item: nil) == nil {
                 symbol(icon, m.kind == .video || m.kind == .gif ? 34 : 26, roles.secondary, centredIn: r)
                 if m.kind != .videoNote { pill(pictureLabel, in: r) }
             }
@@ -649,7 +650,7 @@ extension MessageLayout.Builder {
             parts.append(.fill(tile, well.cgColor, Radius.small))
             drawingOver = true
             if source.isEmpty {
-                symbol(item.kind == "video" ? "play.circle.fill" : "photo", 20, roles.secondary, centredIn: tile)
+                if sending(item: i) == nil { symbol(item.kind == "video" ? "play.circle.fill" : "photo", 20, roles.secondary, centredIn: tile) }
             } else {
                 slots.append(PictureSlot(rect: tile, radius: Radius.small, source: source, message: m.id, item: i))
             }

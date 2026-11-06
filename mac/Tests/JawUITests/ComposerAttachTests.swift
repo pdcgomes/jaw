@@ -156,11 +156,20 @@ func type(_ text: String, in c: ComposerController) {
     #expect(made == ["dance2.gif", "lake.jpg"], "a GIF going as what it is and a photo, not the GIF going as a document")
 }
 
-@MainActor @Test func `files that come back before the box is drawn show once it is`() {
+@MainActor @Test func `files that come back before the box is drawn show once it is, with their caption, not the draft`() {
     let c = ComposerController(chat: Samples.direct)
-    c.unsent(files: [file("lake.jpg")], caption: "", why: "no connection", hd: false)
+    c.unsent(files: [file("lake.jpg")], caption: "the lake", why: "no connection", hd: false)
     c.view.frame = NSRect(x: 0, y: 0, width: 640, height: 200)
     #expect(!c.strip.isHidden && c.strip.tiles.map(\.name) == ["lake.jpg"])
+    #expect(c.textView.string == "the lake" && c.bar.stringValue == "Not sent: no connection")
+}
+
+@MainActor @Test func `files that come back past 30 with those attached since say how many were left out`() {
+    let (c, _) = box()
+    c.attach((0 ..< 29).map { file("since \($0).jpg") })
+    c.unsent(files: [file("lake.jpg"), file("wall.jpg"), file("ridge.jpg")], caption: "", why: "no connection", hd: false)
+    #expect(c.attachments.files.count == 30 && c.attachments.files.prefix(3).map(\.name) == ["lake.jpg", "wall.jpg", "ridge.jpg"])
+    #expect(c.bar.stringValue == "Not sent: no connection; 2 attached since left out, 30 at most")
 }
 
 @MainActor @Test func `what's dropped on the box attaches files and images, and words are the field's`() throws {

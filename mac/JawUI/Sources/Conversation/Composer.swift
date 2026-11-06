@@ -212,7 +212,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             completions.bottomAnchor.constraint(equalTo: scroll.topAnchor, constant: -4),
             completions.widthAnchor.constraint(equalToConstant: 280),
         ])
-        if let draft = chat.draft, !draft.isEmpty {
+        // Words that came back before the box was drawn are kept over the draft.
+        if textView.string.isEmpty, let draft = chat.draft, !draft.isEmpty {
             textView.string = draft
             draftSent = draft
         }
@@ -299,7 +300,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     }
 
     func resize() {
-        guard let lm = textView.textLayoutManager else { return }
+        guard isViewLoaded, let lm = textView.textLayoutManager else { return }
         lm.ensureLayout(for: lm.documentRange)
         let used = lm.usageBoundsForTextContainer.height + textView.textContainerInset.height * 2
         let line = (textView.font?.boundingRectForFont.height ?? 16)
@@ -482,14 +483,15 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     public func unsent(files: [AttachedFile], caption: String, why: String, hd: Bool) {
         var back = Attachments(hd: hd)
         back.add(files)
-        back.add(attachments.files)
+        let left = back.add(attachments.files)
         AttachedFile.discard(attachments.files.filter { !back.files.contains($0) })
         attachments = back
+        let words = left > 0 ? "\(why); \(left) attached since left out, \(SendMedia.filesMost) at most" : why
         if caption.isEmpty {
-            unsentWhy = why
+            unsentWhy = words
             showBar()
         } else {
-            unsent(text: caption, why: why)
+            unsent(text: caption, why: words)
         }
     }
 

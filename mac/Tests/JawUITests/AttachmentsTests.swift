@@ -56,16 +56,24 @@ func inFolder<T>(_ body: (URL) throws -> T) throws -> T {
     #expect(a.params(caption: " \n\t").map(\.caption) == [nil, nil])
 }
 
-@Test func `discarding takes only the folder the app made for a file, and never a file from the Finder`() throws {
+@Test func `discarding takes only the folder the app made for a file, never a file from the Finder or one beside it`() throws {
     try inFolder { folder in
         let finder = folder.appending(path: "lake.jpg")
         try Data([1]).write(to: finder)
-        let made = try Pasted.write(Data([2]), named: "Pasted image.png", into: folder)
-        let written = AttachedFile(url: made, folder: made.deletingLastPathComponent())
-        AttachedFile.discard([AttachedFile(url: finder), written])
+        AttachedFile.discard([AttachedFile(url: finder)])
         #expect(FileManager.default.fileExists(atPath: finder.path), "the Finder's file stays where it is")
-        #expect(!FileManager.default.fileExists(atPath: made.deletingLastPathComponent().path), "the app's own folder goes")
-        #expect(FileManager.default.fileExists(atPath: folder.path), "and nothing above it")
+
+        // Two files a drag promised, received into one folder as AppKit asks, each then moved to its own.
+        let landing = folder.appending(path: "landing")
+        try FileManager.default.createDirectory(at: landing, withIntermediateDirectories: true)
+        try Data([2]).write(to: landing.appending(path: "IMG_1.HEIC"))
+        try Data([3]).write(to: landing.appending(path: "IMG_2.HEIC"))
+        let one = try #require(ComposerController.alone(landing.appending(path: "IMG_1.HEIC"), in: folder))
+        let two = try #require(ComposerController.alone(landing.appending(path: "IMG_2.HEIC"), in: folder))
+        #expect(one.written && one.folder != two.folder && one.url.deletingLastPathComponent() == one.folder)
+        AttachedFile.discard([one])
+        #expect(!FileManager.default.fileExists(atPath: one.url.path) && FileManager.default.fileExists(atPath: two.url.path),
+                "taking one out leaves the other")
     }
 }
 

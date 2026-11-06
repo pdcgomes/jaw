@@ -92,13 +92,27 @@ func laid(_ m: MessageRow, sending: [String: Sending]) -> Laid {
     #expect(tile.sending && tile.stateAct! == (.stop, "Stop Sending"), "an album's item of yours too")
 }
 
+/// The symbols and pictures drawn over a message's pictures: a video's ▶, a download's ↓, the ring's ×.
+func overImages(_ l: Laid) -> Int {
+    l.over.count { if case .image = $0 { true } else { false } }
+}
+
 @Test func `a forward of yours on its way, which jawd doesn't upload, is drawn and offered as any file, its download among it`() throws {
     var forward = outgoing()
     forward.forwarded = 1
     let offer = try #require(MediaOffer.of(forward))
     #expect(!offer.sending && !offer.outbox && offer.stateAct! == (.fetch, "Download"))
-    #expect(laid(forward, sending: ["OUT": Sending(step: .uploading, percent: 70)]).regions.contains { $0.1 == .media(item: nil) })
-    #expect(rings(laid(forward, sending: ["OUT": Sending(step: .uploading, percent: 70)])).isEmpty, "no job of jawd's is a forward's")
+    let drawn = laid(forward, sending: ["OUT": Sending(step: .uploading, percent: 70)])
+    #expect(rings(drawn).isEmpty, "no job of jawd's is a forward's")
+    #expect(overImages(drawn) == overImages(laid(outgoing(), sending: [:])) + 1, "its ↓ drawn, as a file of yours from here has none")
+}
+
+@Test func `a photo or a video on its way with nothing to draw it from yet shows only its ring, no ▶ or what it is under it`() {
+    for kind in [MessageKind.video, .image] {
+        let going = laid(outgoing(kind), sending: ["OUT": Sending(step: .making, percent: 10)])
+        #expect(overImages(going) == 1, "\(kind): the ring's × alone over its well")
+        #expect(overImages(laid(outgoing(kind), sending: [:])) == 1, "\(kind): with no job yet, what it is, as before")
+    }
 }
 
 /// A pane of `rows`, once they're in its table.

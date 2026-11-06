@@ -393,7 +393,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let m = rows[i]
         layouts.prepare([(m, contexts[i])], width: layoutWidth, spec: spec) { [weak self] in
             guard let self, let at = rows.firstIndex(where: { $0.id == m.id }) else { return }
-            layouts.keep(m.id, only: contexts[at], width: layoutWidth, spec: spec)
+            layouts.keep(rows[at], only: contexts[at], width: layoutWidth, spec: spec)
             guard !reloading else { return }
             table.reloadData(forRowIndexes: [at], columnIndexes: [0])
         }
