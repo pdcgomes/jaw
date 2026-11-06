@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="The engine's Go code from proto/engine, with buf v1.74.0 and protoc-gen-go at the version engine/go.mod pins"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+go="${GO:-go}"
+# protoc-gen-go is built again whenever engine/go.mod is newer than it.
+if [ ! -x target/tools/protoc-gen-go ] || [ engine/go.mod -nt target/tools/protoc-gen-go ]; then
+    (cd engine && "$go" build -o ../target/tools/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go)
+fi
+"$go" run github.com/bufbuild/buf/cmd/buf@v1.74.0 generate proto/engine --template proto/engine/buf.gen.yaml

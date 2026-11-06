@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Generate the engine's code again, and fail if it or proto/whatsapp/ differs from what's committed"
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/../.."
+"$here/proto"
+python3 scripts/sync-protos.py --check
+git diff --exit-code -- engine/internal/link/enginepb
