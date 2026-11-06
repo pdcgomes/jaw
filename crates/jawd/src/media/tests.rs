@@ -2400,6 +2400,40 @@ async fn a_phone_that_cant_be_reached_is_asked_again_and_one_that_cant_be_asked_
     assert_eq!(rig.media.status().waiting_for_phone, 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_whose_wait_ends_while_the_scheduler_looks_is_tried_again_with_nothing_else_to_wake_it() {
+    let wait = Duration::from_secs(1);
+    let rig = rig(Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+    // What sync brings in as the engine connects is in before the photo comes, so it can't wake the
+    // scheduler after the look.
+    let quiet = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.world.fetched().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut committed = rig.store.committed();
+        while let Ok(Ok(())) = tokio::time::timeout(Duration::from_millis(500), committed.changed()).await {}
+    });
+    assert!(quiet.await.is_ok(), "jaw.db never went quiet once the app state was fetched");
+    let lake = Picture::lake(640, 480);
+    rig.world.expire(&lake.direct_path);
+    rig.world.fail_asks(1, true);
+    rig.photo(&lake, ANA, ANA, "3EB0DUE").await;
+    let waiting = |row: &Value| row["media"]["error"] == "the server answered 404";
+    rig.until(ANA, "3EB0DUE", "waiting to be tried again", waiting).await;
+    let ended = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.media.inner.schedule.running() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    assert!(ended.await.is_ok(), "the job whose ask couldn't reach the phone never ended");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Begun well within its wait and ended past it, with nothing to wake the scheduler after it.
+    rig.media.look_slowly(wait * 2);
+    rig.until(ANA, "3EB0DUE", "downloaded from the phone's upload once tried again", previewed).await;
+    let asks = rig.world.asked().iter().filter(|k| matches!(k, pb::command::Kind::MediaRetry(_))).count();
+    assert_eq!(asks, 2, "the ask that couldn't reach the phone, then the one that did");
+}
+
 /// The audit's A3: a photo that arrives while a window shows history is done ahead of what the
 /// window shows after it.
 #[tokio::test(flavor = "multi_thread")]

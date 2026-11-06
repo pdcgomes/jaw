@@ -353,6 +353,14 @@ impl Media {
         self.inner.sending.keeping_held.load(SeqCst)
     }
 
+    /// Has the scheduler look at what's wanted now and take `pause` once it has read it, as a busy
+    /// machine's look may.
+    #[cfg(test)]
+    pub fn look_slowly(&self, pause: Duration) {
+        *self.inner.schedule.next_look_pause.lock().expect("schedule") = pause;
+        self.inner.schedule.wake();
+    }
+
     /// What moves on each time a copy of a file to send changes state, for whatever waits for one.
     pub fn copies_changed(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.sending.changes()

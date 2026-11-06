@@ -114,6 +114,9 @@ pub(super) struct Schedule {
     /// at most, and how much was passed over past that since jawd started.
     pub progress_behind: AtomicU64,
     pub progress_passed: AtomicU64,
+    /// How long the next look takes once it has read what's wanted, as a test has it.
+    #[cfg(test)]
+    pub(super) next_look_pause: Mutex<Duration>,
 }
 
 impl Schedule {
@@ -159,9 +162,11 @@ impl Schedule {
         self.later.lock().expect("schedule").get(copy).is_some_and(|(at, _)| *at > Instant::now())
     }
 
-    /// When the next copy waiting may be tried again.
-    fn next_try(&self) -> Option<Instant> {
-        self.later.lock().expect("schedule").values().map(|(at, _)| *at).filter(|at| *at > Instant::now()).min()
+    /// When the next copy waiting may be tried again, of those whose wait ends after `looked`, when
+    /// the last look began: one whose wait ended during the look may have been passed over by it,
+    /// so it's due now.
+    fn next_try(&self, looked: Instant) -> Option<Instant> {
+        self.later.lock().expect("schedule").values().map(|(at, _)| *at).filter(|at| *at > looked).min()
     }
 }
 
@@ -280,7 +285,7 @@ async fn run(inner: Arc<Inner>) {
         if room && let Err(e) = take(&inner).await {
             eprintln!("jawd: can't read which media is wanted: {e:#}");
         }
-        let next = if room { inner.schedule.next_try() } else { Some(Instant::now() + disk::POLL) };
+        let next = if room { inner.schedule.next_try(looked) } else { Some(Instant::now() + disk::POLL) };
         tokio::select! {
             () = woken => {}
             changed = committed.changed() => {
@@ -316,6 +321,8 @@ impl Drop for Slot {
 /// again: every copy an interface asked for, beside a job a window's want began for it, then copies
 /// nobody asked for while fewer than UNASKED_AT_ONCE are, what arrived live first.
 async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    let pause = std::mem::take(&mut *inner.schedule.next_look_pause.lock().expect("schedule"));
     let waiting = inner.schedule.later.lock().expect("schedule").len();
     for pass in Pass::ALL {
         let (priority, most) = (pass.priority(), pass.most());
@@ -358,6 +365,10 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
                 break;
             }
         }
+    }
+    #[cfg(test)]
+    if !pause.is_zero() {
+        tokio::time::sleep(pause).await;
     }
     Ok(())
 }
