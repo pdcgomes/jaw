@@ -35,13 +35,13 @@ public enum Ticks {
         ctx.restoreGState()
     }
 
-    /// How many ticks a status has, and in which colour: one sent, two delivered, two in the accent
+    /// How many ticks a status has, and in which colour: one sent, two delivered, two in the link colour
     /// read; nil for the states said in words or symbols.
     public static func of(_ status: MessageStatus?, _ roles: Roles) -> (Int, RGBA)? {
         switch status {
         case .sent: (1, roles.tertiary)
         case .delivered: (2, roles.tertiary)
-        case .read, .played: (2, roles.accent)
+        case .read, .played: (2, roles.link)
         case .pending, .failed, nil: nil
         }
     }

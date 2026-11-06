@@ -485,7 +485,7 @@ public enum MessageLayout {
                     a[.ctFont] = fonts.italic
                     a[.ctColour] = roles.secondary.cgColor
                 case .link:
-                    a[.ctColour] = roles.accent.cgColor
+                    a[.ctColour] = roles.link.cgColor
                     a[.ctUnderline] = CTUnderlineStyle.single.rawValue
                     a[.jawLink] = span.url ?? span.s
                 case .mention:

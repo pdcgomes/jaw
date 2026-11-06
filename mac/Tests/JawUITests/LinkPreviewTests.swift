@@ -188,3 +188,27 @@ func thumbnail(_ path: String, in root: String, jpeg: Bool = true) -> CGImage? {
         }
     }
 }
+
+@Test func `links and read ticks are drawn in the link colour, not the accent`() throws {
+    var roles = Catalog.jaw.dark
+    roles.link = RGBA(0x449DAB)
+    #expect(Ticks.of(.read, roles)?.1 == roles.link && Ticks.of(.played, roles)?.1 == roles.link)
+    #expect(Ticks.of(.delivered, roles)?.1 == roles.tertiary)
+    let s = LayoutSpec(style: Style(roles: roles), me: ["person:1"])
+    let message = try #require(Samples.messages.first { $0.spans.contains { $0.t == .link } })
+    let frame = try #require(laid(message, s).text?.frame)
+    var colours: [CGColor] = []
+    for line in CTFrameGetLines(frame) as! [CTLine] {
+        for run in CTLineGetGlyphRuns(line) as! [CTRun] {
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            if attributes[NSAttributedString.Key.jawLink] != nil, let colour = attributes[NSAttributedString.Key.ctColour] {
+                colours.append(colour as! CGColor)
+            }
+        }
+    }
+    #expect(!colours.isEmpty && colours.allSatisfy { $0 == roles.link.cgColor }, "a link's run is in the link colour")
+    let history = laid(sampleLink("L2"), s)
+    #expect(history.parts.contains { part in
+        if case let .fill(rect, colour, _) = part { rect.width == 3 && colour == roles.link.cgColor } else { false }
+    }, "a link's card with no thumbnail marks its edge in the link colour")
+}

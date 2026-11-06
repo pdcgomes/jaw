@@ -312,7 +312,7 @@ enum LibraryDrawing {
         let r = c.roles
         let l = item.link
         d.under.append(.fill(icon, well(c).cgColor, Radius.small + 2))
-        symbol("link", 13, r.accent, centredIn: icon, into: &d.under)
+        symbol("link", 13, r.link, centredIn: icon, into: &d.under)
         if let preview = l?.preview {
             d.slot = PictureSlot(rect: icon, radius: Radius.small + 2, fit: .fill, source: PictureSource(small: preview, jpeg: true), message: item.id)
         }
@@ -322,7 +322,7 @@ enum LibraryDrawing {
         if let marks = marked(item, then: who(item, c), c) {
             details = marks
         } else {
-            let out = NSMutableAttributedString(string: host, attributes: [.ctFont: small, .ctColour: r.accent.cgColor])
+            let out = NSMutableAttributedString(string: host, attributes: [.ctFont: small, .ctColour: r.link.cgColor])
             out.append(NSAttributedString(string: " · " + who(item, c), attributes: [.ctFont: small, .ctColour: r.secondary.cgColor]))
             details = CTLineCreateWithAttributedString(out)
         }

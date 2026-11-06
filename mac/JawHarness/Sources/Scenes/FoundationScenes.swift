@@ -30,7 +30,7 @@ private struct RolesScene: View {
         [
             ("ground", roles.ground), ("surface", roles.surface), ("selection", roles.selection), ("text", roles.text),
             ("secondary", roles.secondary), ("tertiary", roles.tertiary), ("separator", roles.separator),
-            ("accent", roles.accent), ("yours", roles.yours), ("mention", roles.mention), ("online", roles.online),
+            ("accent", roles.accent), ("link", roles.link), ("yours", roles.yours), ("mention", roles.mention), ("online", roles.online),
             ("selected online", roles.selectedOnline), ("failed", roles.failed),
         ]
     }
@@ -38,7 +38,7 @@ private struct RolesScene: View {
     var textColours: [(String, RGBA)] {
         [
             ("text", roles.text), ("secondary", roles.secondary), ("tertiary", roles.tertiary), ("accent", roles.accent),
-            ("mention", roles.mention), ("online", roles.online), ("failed", roles.failed),
+            ("link", roles.link), ("mention", roles.mention), ("online", roles.online), ("failed", roles.failed),
         ]
     }
 
@@ -60,7 +60,7 @@ private struct RolesScene: View {
             }
             SpecimenGroup(
                 title: "The text colours",
-                note: "Secondary and tertiary text, the accent's links and counts, mentions, online and failed, each as it's drawn on the ground and on the surface. Each is text, so each wants 4.5:1 on both; one under it is a colour to look at.",
+                note: "Secondary and tertiary text, the accent's counts, the links and read ticks, mentions, online and failed, each as it's drawn on the ground and on the surface. Each is text, so each wants 4.5:1 on both; one under it is a colour to look at.",
                 roles: roles,
             ) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: Space.l)], spacing: Space.l) {

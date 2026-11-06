@@ -18,8 +18,10 @@ public struct Roles: Sendable, Hashable {
     public var tertiary: RGBA
     /// Separators and borders at rest.
     public var separator: RGBA
-    /// Focus, selection, links, read ticks, unread counts.
+    /// Focus, selection, unread counts.
     public var accent: RGBA
+    /// Links and read ticks: the accent in Jaw's and Redlamp's themes, the terminal's cyan in Omarchy's.
+    public var link: RGBA
     /// Your bubbles.
     public var yours: RGBA
     /// Mentions, and the "new" marker.
@@ -80,7 +82,7 @@ public enum Catalog {
             secondary: RGBA(0x737AA2),
             tertiary: RGBA(0x565F89),
             separator: RGBA(0x3B4261),
-            accent: blue,
+            accent: blue, link: blue,
             yours: blue.opacity(0.18).over(bg),
             mention: orange,
             online: green,
@@ -106,7 +108,7 @@ public enum Catalog {
             secondary: RGBA(0x6172B0).mixed(with: RGBA(0x1A1B26), 0.15),
             tertiary: RGBA(0x848CB5),
             separator: RGBA(0xA8AECB),
-            accent: blue,
+            accent: blue, link: blue,
             yours: blue.opacity(0.12).over(bg),
             mention: orange,
             online: green,

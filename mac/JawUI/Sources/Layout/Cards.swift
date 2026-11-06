@@ -167,7 +167,7 @@ extension MessageLayout.Builder {
         return CGSize(width: w, height: ceil(m.link?.preview == nil ? words : max(words, Self.thumbnail + 12)))
     }
 
-    /// Where a link's words start in its card: after its thumbnail, or after the accent's bar.
+    /// Where a link's words start in its card: after its thumbnail, or after its bar in the link colour.
     var linkTextInset: CGFloat {
         m.link?.preview == nil ? 12 : 6 + Self.thumbnail + 10
     }
@@ -679,7 +679,7 @@ extension MessageLayout.Builder {
             symbol("link", 18, roles.secondary, centredIn: thumb)
             slots.append(PictureSlot(rect: thumb, radius: Radius.small, source: PictureSource(small: path, jpeg: true), message: m.id))
         } else {
-            parts.append(.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height), roles.accent.cgColor, 1.5))
+            parts.append(.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height), roles.link.cgColor, 1.5))
         }
         let x = r.minX + linkTextInset, most = linkTextWidth(r.width)
         var top = r.minY + ((r.height - linkWordsHeight(width: most)) / 2).rounded()
