@@ -4,9 +4,9 @@ import JawThemes
 import JawUI
 
 /// A window as values: jawd's situation, the chats in the list, who's typing in them, the chats open
-/// in panes (the first with the keys), the layout's name, focus mode and the window's size. The
-/// harness makes a `WindowContent` from one as the app makes one from jawd's windows, and shows it as
-/// of `Samples.now`.
+/// in panes (the first with the keys), the layout's name, focus mode, the window's size and the
+/// message selected in the first pane. The harness makes a `WindowContent` from one as the app makes
+/// one from jawd's windows, and shows it as of `Samples.now`.
 struct Screen {
     var situation = Situation(reach: .up, linked: true, connection: Connection(state: .online))
     var chats: [ChatRow] = Samples.chats
@@ -18,6 +18,8 @@ struct Screen {
     var focusMode = false
     var width: CGFloat = 1180
     var height: CGFloat = 780
+    /// The message selected in the first open chat's pane, as a click or the keys select one.
+    var selected: String?
 
     /// The app's title bar: how tall it is, and where its buttons are from the window's top left, the
     /// window's three and the sidebar's beside them.
@@ -69,11 +71,12 @@ struct Screen {
 
     /// The window's content made from this screen in `conditions`: the sidebar; the chat list holding
     /// `chats`, the first open one selected; a conversation for each open chat, `Samples`' messages in
-    /// the group's, kept alive as the content's children; and the bar, with the layout's name. Its safe
-    /// area leaves the title bar's height at the top, as the app's window leaves it, and each
-    /// conversation's header knows where the window's buttons are. It's laid out at its size once it's
-    /// folded, so each conversation has its pane's width before its rows come on the next turn, as in
-    /// the app, whose window lays the content out before jawd's rows arrive.
+    /// the group's, `selected` selected in the first, kept alive as the content's children; and the
+    /// bar, with the layout's name. Its safe area leaves the title bar's height at the top, as the
+    /// app's window leaves it, and each conversation's header knows where the window's buttons are.
+    /// It's laid out at its size once it's folded, so each conversation has its pane's width before
+    /// its rows come on the next turn, as in the app, whose window lays the content out before jawd's
+    /// rows arrive.
     @MainActor
     func content(_ conditions: Conditions) -> WindowContent {
         let roles = conditions.roles
@@ -108,6 +111,7 @@ struct Screen {
             if i == 0 {
                 box = c.composer.view
                 list.select(chat.id)
+                c.select(selected)
             }
         }
         var focused = 1

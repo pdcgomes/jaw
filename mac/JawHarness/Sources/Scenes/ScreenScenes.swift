@@ -53,7 +53,7 @@ extension HarnessScene {
     static var screensPanes: HarnessScene {
         HarnessScene(
             id: "screens-panes", title: "Three panes", symbol: "rectangle.split.3x1",
-            synopsis: "Lisbon Climbing, Ana Ribeiro and Mãe side by side in the layout called Work, the first with the keys",
+            synopsis: "Lisbon Climbing, Ana Ribeiro and Mãe side by side in the layout called Work, the first with the keys, and in a window too short for its messages, one of them selected",
             section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
                                         EmptyChatView.self, BottomBar.self, StatusLine.self],
             width: 1180,
@@ -251,17 +251,26 @@ private struct OneChatScene: View {
 }
 
 /// Lisbon Climbing, Ana Ribeiro and Mãe open side by side in the layout called Work, Lisbon Climbing
-/// with the keys; Ana's and Mãe's chats have no messages among `Samples`.
+/// with the keys; Ana's and Mãe's chats have no messages among `Samples`. Then the same in a window
+/// too short for Lisbon Climbing's messages, Ana's link selected among them.
 private struct ThreePanesScene: View {
     let conditions: Conditions
 
     var body: some View {
-        ScreenBand(
-            title: "Three panes, the first with the keys",
-            note: "The app's fault, to fix in JawUI: an empty chat's words keep to one line, cut short, whatever its pane, so Ana's and Mãe's \"No messages with … yet. What you type goes to…\" run over the panes beside them and off the window's edge. Lisbon Climbing's pane has the keys, outlined in the accent, its cards' second lines cut short; the others are dimmed, faintly, by the app's default 18%. Mãe's header says \"muted\"; the box is Lisbon Climbing's, the bar says Work, and the status line's right is empty, as the one chat that needs you is open. A picture can't hold the sidebar's selection, the header's blur or a key window's buttons.",
-            screen: Screen(open: [Samples.group, Samples.direct, Self.mae], layout: "Work"),
-            conditions: conditions,
-        )
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenBand(
+                title: "Three panes, the first with the keys",
+                note: "The app's fault, to fix in JawUI: an empty chat's words keep to one line, cut short, whatever its pane, so Ana's and Mãe's \"No messages with … yet. What you type goes to…\" run over the panes beside them and off the window's edge. Lisbon Climbing's pane has the keys, outlined in the accent, its cards' second lines cut short; the others are dimmed, faintly, by the app's default 18%. Mãe's header says \"muted\"; the box is Lisbon Climbing's, the bar says Work, and the status line's right is empty, as the one chat that needs you is open. A picture can't hold the sidebar's selection, the header's blur or a key window's buttons.",
+                screen: Screen(open: [Samples.group, Samples.direct, Self.mae], layout: "Work"),
+                conditions: conditions,
+            )
+            ScreenBand(
+                title: "At 1180 by 560 points, Ana's link selected",
+                note: "Lisbon Climbing's pane, shorter, opens at its first unread with its messages running on past its foot, and Ana's link is selected, its band across the pane: Inês's album is cut where the outline runs, and the band stops at the outline on either side, nothing of either drawn between the outline and the pane's edge, where there's only the ground. The other panes, the box and the bar are as above.",
+                screen: Screen(open: [Samples.group, Samples.direct, Self.mae], layout: "Work", height: 560, selected: "K6"),
+                conditions: conditions,
+            )
+        }
     }
 
     /// Mãe's chat, which `Samples` has only among its chats.
@@ -280,7 +289,7 @@ private struct LibraryScreenScene: View {
     var body: some View {
         ScreenBand(
             title: "Lisbon Climbing beside its library",
-            note: "The library's pane has the keys, outlined in the accent, the chat's dimmed beside it; its header says Lisbon Climbing and how many it shared, the strip every kind with its count, and every kind's shelves hold only the group's items: its photos and videos, files, links and Inês's voice message, each saying who without saying where. The box under the panes says the library's keys in place of a composer.",
+            note: "The library's pane has the keys, outlined in the accent, the chat's dimmed beside it; its header says Lisbon Climbing and how many it shared, the strip every kind with its count, and every kind's shelves hold only the group's items: its photos and videos, files, links and Inês's voice message, each saying who without saying where; the links run on past the pane's foot, cut where the outline runs, nothing of them between it and the pane's edge. The box under the panes says the library's keys in place of a composer.",
             screen: Screen(open: [Samples.group], library: .chat(id: Samples.group.id, name: Samples.group.name)),
             conditions: conditions,
         )

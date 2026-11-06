@@ -368,7 +368,9 @@ public struct PaneLook: Hashable, Sendable {
 }
 
 /// Over a pane and letting the pointer through: the dimming of a pane without the keys, and the
-/// focused pane's outline, drawn inside it with rounded corners.
+/// focused pane's outline, drawn inside it with rounded corners and the ground outside it, so
+/// nothing the pane draws to its edge, a row scrolled past its foot or a selected message's band,
+/// shows past the outline.
 @MainActor
 final class Shade: NSView {
     var roles: Roles?
@@ -401,6 +403,11 @@ final class Shade: NSView {
         if focused, let outline = look.outline {
             let r = bounds.insetBy(dx: Self.inset, dy: Self.inset)
             let path = NSBezierPath(roundedRect: r, xRadius: Radius.field, yRadius: Radius.field)
+            let outside = NSBezierPath(rect: bounds)
+            outside.append(path)
+            outside.windingRule = .evenOdd
+            roles.ground.nsColor.setFill()
+            outside.fill()
             path.lineWidth = Stroke.hairline
             outline.opacity(0.7).nsColor.setStroke()
             path.stroke()
