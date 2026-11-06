@@ -13,7 +13,7 @@ func scratchPreferences(_ name: String) throws -> Preferences {
     let suite = "jaw.tests.\(name)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
-    return Preferences(defaults: defaults)
+    return Preferences(defaults: defaults, accent: .blue)
 }
 
 @MainActor @Test func `Settings' panes are the toolbar's icon tabs, each its name over its symbol, in the toolbar's order`() throws {

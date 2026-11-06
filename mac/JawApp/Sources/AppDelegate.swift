@@ -40,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         { _ in
             MainActor.assumeIsolated { AppDelegate.shared?.model.restyle() }
         }
+        NotificationCenter.default.addObserver(forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppDelegate.shared?.model.preferences.systemColoursChanged() }
+        }
     }
 
     func applicationWillTerminate(_: Notification) {

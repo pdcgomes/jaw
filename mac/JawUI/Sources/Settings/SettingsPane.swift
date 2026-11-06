@@ -25,7 +25,7 @@ public enum SettingsPane: String, CaseIterable, Sendable {
 
     public var size: NSSize {
         switch self {
-        case .appearance: NSSize(width: 500, height: 180)
+        case .appearance: NSSize(width: 500, height: 230)
         case .messages: NSSize(width: 500, height: 360)
         case .panes: NSSize(width: 500, height: 220)
         }

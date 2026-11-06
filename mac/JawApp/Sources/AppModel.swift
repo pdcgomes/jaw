@@ -110,7 +110,7 @@ final class AppModel {
     init(launch: Launch) {
         self.launch = launch
         agent = Agent(launch: launch)
-        preferences = Preferences()
+        preferences = Preferences(keeps: launch.snapshot == nil)
     }
 
     var dark: Bool {

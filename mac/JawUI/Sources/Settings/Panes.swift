@@ -2,7 +2,7 @@ import AppKit
 import JawThemes
 import SwiftUI
 
-/// Settings › Appearance: dark, light or the system's, and the theme.
+/// Settings › Appearance: dark, light or the system's, and the theme in each slot.
 public struct AppearancePane: View {
     @Bindable var preferences: Preferences
 
@@ -19,17 +19,35 @@ public struct AppearancePane: View {
                     Text("Light").tag(Appearance.light)
                 }
                 .pickerStyle(.inline)
-                Picker("Theme", selection: $preferences.theme) {
-                    ForEach(Catalog.families) { family in
-                        Text(family.name == "jaw" ? "Jaw (Tokyo Night)" : family.name).tag(family.id)
+                ForEach(Slot.allCases, id: \.self) { slot in
+                    let listed = preferences.themes.filter { $0.roles(slot) != nil }
+                    Picker(slot.title, selection: pick(slot)) {
+                        ForEach(listed) { theme in
+                            Text("\(theme.name(slot)), \(theme.source.title)").tag(theme.id)
+                        }
+                        if !listed.contains(where: { $0.id == preferences.slots[slot] }) {
+                            Text("\(preferences.slots[slot]), drawn as \(Catalog.jawTheme.name(slot))").tag(preferences.slots[slot])
+                        }
                     }
                 }
             } footer: {
-                Text("Redlamp's themes come in a later version.")
+                Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
             }
         }
         .formStyle(.grouped)
         .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
+    }
+
+    /// A slot's menu: choosing a theme fills the slots as a click on its card will (`Slots.choosing`).
+    func pick(_ slot: Slot) -> Binding<String> {
+        Binding(
+            get: { preferences.slots[slot] },
+            set: { id in
+                if let theme = preferences.themes.first(where: { $0.id == id }) {
+                    preferences.slots = preferences.slots.choosing(theme, for: slot)
+                }
+            },
+        )
     }
 }
 

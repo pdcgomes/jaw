@@ -65,7 +65,25 @@ public final class Preferences {
     public var textSize: CGFloat { didSet { save() } }
     public var font: MessageFont { didSet { save() } }
     public var appearance: Appearance { didSet { save() } }
-    public var theme: String { didSet { save() } }
+    /// The theme in each slot, by ID, kept as `themeDark` and `themeLight`.
+    public var slots: Slots {
+        didSet {
+            made = [:]
+            save()
+        }
+    }
+
+    /// The system's accent in each appearance, which Neutral draws in, read again by
+    /// `systemColoursChanged()`, and not kept, as it's the system's.
+    public var accent: SystemAccent {
+        didSet {
+            guard accent != oldValue else { return }
+            made = [:]
+            listed = nil
+            tell()
+        }
+    }
+
     /// How much panes without the keys are dimmed, 0 to 0.6.
     public var paneDim: Double { didSet { save() } }
     /// Whether the focused pane is outlined, and in what colour: nil for the theme's accent.
@@ -76,11 +94,21 @@ public final class Preferences {
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored public var changed: [() -> Void] = []
+    /// Each slot's roles and every theme there is, worked out once until what they rest on changes,
+    /// since the app reads its style on every layout.
+    @ObservationIgnored var made: [Slot: Roles] = [:]
+    @ObservationIgnored var listed: [Theme]?
+    /// Whether what changes is written to `defaults`: a snapshot's preferences aren't, as every
+    /// checkout's snapshots on the build Mac share the app's preferences.
+    @ObservationIgnored let keeps: Bool
 
     public static let textSizes: ClosedRange<CGFloat> = 11 ... 17
     public static let paneDims: ClosedRange<Double> = 0 ... 0.6
 
-    public init(defaults: UserDefaults = .standard) {
+    /// `accent` is the system's unless one's given, as the tests give macOS's blue; `keeps` is false
+    /// for a snapshot, which reads what's kept and writes nothing back.
+    public init(defaults: UserDefaults = .standard, accent: SystemAccent? = nil, keeps: Bool = true) {
+        self.keeps = keeps
         self.defaults = defaults
         look = Look(rawValue: defaults.string(forKey: "look") ?? "") ?? .bubbles
         density = Density(rawValue: defaults.string(forKey: "density") ?? "") ?? .comfortable
@@ -88,7 +116,11 @@ public final class Preferences {
         textSize = size == 0 ? 13 : min(max(size, Self.textSizes.lowerBound), Self.textSizes.upperBound)
         font = MessageFont(rawValue: defaults.string(forKey: "font") ?? "") ?? .system
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system
-        theme = defaults.string(forKey: "theme") ?? Catalog.jaw.id
+        // The theme key holds the one theme there was before the slots: it's read into both while
+        // they're unset, and left as it is, so an earlier build still reads it.
+        let theme = defaults.string(forKey: "theme") ?? Catalog.jaw.id
+        slots = Slots(dark: defaults.string(forKey: "themeDark") ?? theme, light: defaults.string(forKey: "themeLight") ?? theme)
+        self.accent = accent ?? .current()
         paneDim = defaults.object(forKey: "paneDim") == nil ? 0.18 : min(max(defaults.double(forKey: "paneDim"), 0), 0.6)
         paneOutline = defaults.object(forKey: "paneOutline") == nil ? true : defaults.bool(forKey: "paneOutline")
         paneOutlineColour = defaults.object(forKey: "paneOutlineColour") == nil ? nil : RGBA(UInt32(truncatingIfNeeded: defaults.integer(forKey: "paneOutlineColour")))
@@ -96,16 +128,24 @@ public final class Preferences {
     }
 
     func save() {
-        defaults.set(look.rawValue, forKey: "look")
-        defaults.set(density.rawValue, forKey: "density")
-        defaults.set(Double(textSize), forKey: "textSize")
-        defaults.set(font.rawValue, forKey: "font")
-        defaults.set(appearance.rawValue, forKey: "appearance")
-        defaults.set(theme, forKey: "theme")
-        defaults.set(paneDim, forKey: "paneDim")
-        defaults.set(paneOutline, forKey: "paneOutline")
-        if let c = paneOutlineColour { defaults.set(Int(c.hex), forKey: "paneOutlineColour") } else { defaults.removeObject(forKey: "paneOutlineColour") }
-        defaults.set(sendHD, forKey: "sendHD")
+        if keeps {
+            defaults.set(look.rawValue, forKey: "look")
+            defaults.set(density.rawValue, forKey: "density")
+            defaults.set(Double(textSize), forKey: "textSize")
+            defaults.set(font.rawValue, forKey: "font")
+            defaults.set(appearance.rawValue, forKey: "appearance")
+            defaults.set(slots.dark, forKey: "themeDark")
+            defaults.set(slots.light, forKey: "themeLight")
+            defaults.set(paneDim, forKey: "paneDim")
+            defaults.set(paneOutline, forKey: "paneOutline")
+            if let c = paneOutlineColour { defaults.set(Int(c.hex), forKey: "paneOutlineColour") } else { defaults.removeObject(forKey: "paneOutlineColour") }
+            defaults.set(sendHD, forKey: "sendHD")
+        }
+        tell()
+    }
+
+    /// Tells the app to draw again, as something it draws from has changed.
+    func tell() {
         for change in changed {
             change()
         }
@@ -121,8 +161,31 @@ public final class Preferences {
     }
 
     public func style(dark: Bool) -> Style {
-        Style(roles: Catalog.family(theme).roles(dark: dark), look: look, density: density, textSize: textSize,
-              font: font)
+        Style(roles: roles(dark ? .dark : .light), look: look, density: density, textSize: textSize, font: font)
+    }
+
+    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. The
+    /// slots and the accent are read before what's made, so a view drawn from them redraws as they change.
+    public func roles(_ slot: Slot) -> Roles {
+        let slots = self.slots, accent = self.accent
+        if let roles = made[slot] { return roles }
+        let roles = Catalog.roles(slot, of: slots, omarchy: [], accent: accent)
+        made[slot] = roles
+        return roles
+    }
+
+    /// Every theme there is to choose, in the gallery's order.
+    public var themes: [Theme] {
+        let accent = self.accent
+        if let listed { return listed }
+        let themes = Catalog.themes(omarchy: [], accent: accent)
+        listed = themes
+        return themes
+    }
+
+    /// Reads the system's accent again, as the app does when AppKit says the system's colours changed.
+    public func systemColoursChanged() {
+        accent = .current()
     }
 
     /// How the panes say which has the keys, in a theme's roles.
@@ -142,5 +205,17 @@ public final class Preferences {
 public extension RGBA {
     var nsColor: NSColor {
         NSColor(srgbRed: r, green: g, blue: b, alpha: a)
+    }
+}
+
+public extension SystemAccent {
+    /// The system's accent as AppKit draws it now, in a dark appearance and in a light one.
+    @MainActor static func current() -> SystemAccent {
+        func drawn(_ name: NSAppearance.Name) -> RGBA {
+            var colour = SystemAccent.blue.dark
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance { colour = RGBA(NSColor.controlAccentColor) }
+            return colour
+        }
+        return SystemAccent(dark: drawn(.darkAqua), light: drawn(.aqua))
     }
 }
