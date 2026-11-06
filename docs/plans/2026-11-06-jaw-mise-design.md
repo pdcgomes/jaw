@@ -39,7 +39,7 @@ JAW_NOTARY_PROFILE = "driftstation-notarize"
 
 `.gitignore` gains `.mise.local.toml`, as Redlamp's has it.
 
-Checked on 6 November with mise 2026.9.7 on this Mac: a tool marked for another system is neither listed nor installed, and one marked `macos` is; a task run from a subfolder runs at the repository's root, with these settings; and `mise run` runs the tasks of a checkout whose `mise.toml` was never trusted, as a new worktree's is, settings and all, while `mise exec`, `mise ls` and `mise install` refuse it until it's trusted, asking in a terminal and failing in an agent's shell. So the two scripts that run Tuist through `mise exec` trust their own checkout's `mise.toml` first: `mac/scripts/bundle` when it builds the app here, and `mac/scripts/build-mac` on the build Mac, which trusts `mac/mise.toml` today and trusts the root's instead.
+Checked on 6 November with mise 2026.9.7 on this Mac: a tool marked for another system is neither listed nor installed, and one marked `macos` is; a task run from a subfolder runs at the repository's root, with these settings; and `mise run` runs the tasks of a checkout whose `mise.toml` was never trusted, as a new worktree's is, settings and all, while `mise ls` refuses it until it's trusted, and `mise exec`, in an agent's shell, trusts it on its own (as Task 2's implementer and reviewer found). So the two scripts that run Tuist through `mise exec` say the trust rather than leave it to mise, trusting their own checkout's `mise.toml` first: `mac/scripts/bundle` when it builds the app here, and `mac/scripts/build-mac` on the build Mac, which trusts `mac/mise.toml` today and trusts the root's instead.
 
 ## The tasks
 

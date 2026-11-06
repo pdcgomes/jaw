@@ -22,7 +22,7 @@
 - Records keep their words: `docs/audits/`, `docs/reviews/`, `docs/releases/` (but for 0.1.0's notes and checklist while 0.1.0 is still to be released, Task 14, Step 12), and every dated plan but `2026-10-16-jaw-design.md` and `2026-10-26-jaw-mac-design.md`. A dated statement of what was run names the script (`scripts/perf.py`), not a command that didn't exist then.
 - Commits in jaw's style: one subject in prose saying what changed and why, ending "Docs only" or "Tests only" where that's all it is.
 - Until Task 14 deletes it, the Makefile keeps working, so every commit before it leaves both ways usable.
-- In this worktree, after Task 2: `mise trust -q mise.toml` once, since `mise exec` and `mise ls` refuse an untrusted config (`mise run` doesn't).
+- In this worktree, after Task 2: `mise trust -q mise.toml` once, since `mise ls` refuses an untrusted config (`mise run` doesn't, and `mise exec` trusts one on its own).
 - A PATH with no mise on it, for the checks that say so, made once:
 
   ```bash
@@ -761,7 +761,7 @@ mise run mac                                # Jaw.app with jawd, jaw-engine and 
 mise run mac-test                           # mac/scripts/test-built-from, then the four suites above
 ```
 
-replace `` makes `Jaw.xcworkspace` for Xcode.`` with `` makes `Jaw.xcworkspace` for Xcode; in a new checkout mise first asks to trust jaw's `mise.toml`.``, `` only when `make mac` built it`` with `` only when `mise run mac` built it``, `` `make check-parity` fails`` with `` `mise run check-parity` fails``, `` `make perf-mac` is still to come`` with `` `mise run perf-mac` is still to come``, and `` as `make mac`'s has`` with `` as `mise run mac`'s has``.
+replace `` (`mise.toml` here pins Tuist, SwiftFormat and SwiftLint)`` with `` (the repository's `mise.toml` pins Tuist, SwiftFormat and SwiftLint)``, `` makes `Jaw.xcworkspace` for Xcode.`` with `` makes `Jaw.xcworkspace` for Xcode; in a new checkout mise first asks to trust jaw's `mise.toml`.``, `` only when `make mac` built it`` with `` only when `mise run mac` built it``, `` `make check-parity` fails`` with `` `mise run check-parity` fails``, `` `make perf-mac` is still to come`` with `` `mise run perf-mac` is still to come``, and `` as `make mac`'s has`` with `` as `mise run mac`'s has``.
 - [ ] **Step 6: The rest of the documents.**
   - `protocol/README.md`: `` jaw then says to run `make install` again.`` becomes `` jaw then says to install it again with `mise run install`.``
   - `marketing/jaw-in-a-minute/README.md`: `` measured by `make perf` on 25 October 2026`` becomes `` measured by `scripts/perf.py` on 25 October 2026``; `marketing/jaw-in-a-minute/jaw.py`: `measured by make perf on 25 Oct 2026` becomes `measured by scripts/perf.py on 25 Oct 2026`.
@@ -871,7 +871,7 @@ sudo rm -rf /tmp/jaw-mise/rootonly
 
 ### Task 18: Clean up and report
 
-- [ ] **Step 1:** `mise run prune-builds`, then `rm -rf /tmp/jaw-mise`.
+- [ ] **Step 1:** `mise run prune-builds`, then `rm -rf /tmp/jaw-mise`, and the build Mac's copy of this checkout, `ssh build-mac 'rm -rf ~/src/build-mac/jaw/jaw-mise'`.
 - [ ] **Step 2:** Bring the canvas up to date: every step's state, the log, what's left for the owner.
 - [ ] **Step 3:** Once it has landed, `git -C ~/src/jaw worktree remove ~/src/jaw-mise && git -C ~/src/jaw branch -d mise`, which removes its `target/` with it, as the disk rule asks of a landed branch.
 - [ ] **Step 4:** Report: what landed, the audit's verdict, CI's result, the gate's, any test judged a flake, the owner's sudo check (Task 17, Step 5), the coordinator to be told, and, if 0.1.0 wasn't tagged first, that its notes and checklist now say mise's commands, or that tagging the commit before the landing releases it with make as they first said. Then the Mac app's release gets its own design, from the design's "Later".
