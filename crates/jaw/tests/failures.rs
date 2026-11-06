@@ -379,7 +379,9 @@ fn with_the_phone_offline_older_history_waits_and_says_so_while_messages_still_g
     jawd.until("the phone's older messages", |s| {
         s.connection.state == ConnectionState::Online && stored(s) >= before + 7
     });
-    let frame = jawd.snapshot("");
+    // The phone's older messages come from an hour before the oldest the chat had, so for an hour or
+    // so after midnight they're the day before's, and the day's divider takes two rows of the frame.
+    let frame = snapshot_with(jawd.home(), "", (110, 30), &[], None);
     assert!(header(&frame).contains("jaw  online"), "{frame}");
     assert!(frame.contains("an older message from the phone, 3 of 3"), "{frame}");
     let sent = lines_with(&frame, "still goes");
