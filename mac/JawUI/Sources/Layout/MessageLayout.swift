@@ -4,8 +4,35 @@ import Foundation
 import JawKit
 import JawThemes
 
+/// How far a file of yours on its way has got, as jawd's last job for it said: its copy being made,
+/// or uploading, a whole percent, so a message lays out at most so many ways.
+public struct Sending: Sendable, Hashable {
+    public enum Step: Sendable, Hashable {
+        case making, uploading
+    }
+
+    public var step: Step
+    public var percent: Int
+
+    public init(step: Step, percent: Int) {
+        self.step = step
+        self.percent = percent
+    }
+
+    public init(_ job: Job) {
+        step = job.kind == .upload ? .uploading : .making
+        percent = min(max(Int((job.progress * 100).rounded()), 0), 100)
+    }
+
+    /// As the terminal says it.
+    public var words: String {
+        "\(step == .uploading ? "uploading" : "making it ready") \(percent)%"
+    }
+}
+
 /// What a message's lines depend on beyond the message: whether its sender's name and its time
-/// show, the day above it, and whether a long one is unfolded.
+/// show, the day above it, whether a long one is unfolded, and how far its files of yours on their
+/// way have got.
 public struct MessageContext: Sendable, Hashable {
     public var group: Bool
     /// The sender changed, or five minutes passed: a run starts here.
@@ -17,6 +44,8 @@ public struct MessageContext: Sendable, Hashable {
     public var unfolded: Bool
     /// How many unread messages start here, for the "2 new" rule above the first of them.
     public var newAbove: Int
+    /// Its files on their way, by message: its own, or its album's items'.
+    public var sending: [String: Sending] = [:]
 
     public init(group: Bool, firstOfRun: Bool, showTime: Bool, day: String?, unfolded: Bool = false,
                 newAbove: Int = 0)

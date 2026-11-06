@@ -75,6 +75,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     /// The choices of the vote last asked in each poll, by its message, until its row shows them or
     /// jawd says it wasn't done.
     var asked: [String: [String]] = [:]
+    /// How far each file of yours on its way in the window has got, by its message, as jawd's last
+    /// job for it said, until it's uploaded or sent.
+    var sending: [String: Sending] = [:]
     /// The newest message seen at the bottom, from which what arrives below is counted.
     var seen: String?
     var askedPlace: Place?
@@ -355,7 +358,40 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 }
             }
         }
+        if !sending.isEmpty {
+            let going = rows.filter { $0.mine && $0.status == .pending }
+            let held = Set(going.flatMap { [$0.id] + ($0.album?.items.map(\.id) ?? []) })
+            sending = sending.filter { held.contains($0.key) }
+            for i in rows.indices where rows[i].mine && rows[i].status == .pending {
+                cs[i].sending = sending(in: rows[i])
+            }
+        }
         contexts = cs
+    }
+
+    /// The files of yours on their way in `m`, by message: its own, or its album's items'.
+    func sending(in m: MessageRow) -> [String: Sending] {
+        guard m.mine, m.status == .pending else { return [:] }
+        let ids = [m.id] + (m.album?.items.map(\.id) ?? [])
+        return sending.filter { ids.contains($0.key) }
+    }
+
+    /// How far a copy of a file of yours has got, as jawd's job says: the row it's in laid out again
+    /// and drawn when that changes what it shows. A copy uploaded is done, its tick saying the rest;
+    /// a download's job, or one for a message the window doesn't hold, changes nothing.
+    public func took(_ job: Job) {
+        guard job.kind == .transcode || job.kind == .upload,
+              let i = rows.firstIndex(where: { $0.id == job.message || $0.album?.items.contains { $0.id == job.message } == true })
+        else { return }
+        let now = job.kind == .upload && job.progress >= 1 ? nil : Sending(job)
+        guard sending[job.message] != now else { return }
+        sending[job.message] = now
+        contexts[i].sending = sending(in: rows[i])
+        let m = rows[i]
+        layouts.prepare([(m, contexts[i])], width: layoutWidth, spec: spec) { [weak self] in
+            guard let self, !reloading, let at = rows.firstIndex(where: { $0.id == m.id }) else { return }
+            table.reloadData(forRowIndexes: [at], columnIndexes: [0])
+        }
     }
 
     func relayout() {
@@ -599,6 +635,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         }()
         let m = rows[row]
         cell.message = m
+        cell.sending = contexts[row].sending
         cell.roles = spec.style.roles
         cell.pictures = pictures
         cell.laid = layouts.laid(m, width: layoutWidth, spec: spec, context: contexts[row])

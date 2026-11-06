@@ -15,6 +15,11 @@ public struct MediaOffer: Sendable, Hashable {
     /// Its name as `media.save` names a copy: the message's own name for it, or its ID and the
     /// file's extension.
     public let name: String
+    /// A file of yours on its way, waiting to send, which Stop Sending stops.
+    public let sending: Bool
+    /// Yours from the outbox, waiting to send or failed: its state is that of jawd's own copy, made
+    /// or being made, never one to download.
+    public let outbox: Bool
 
     /// What's done with a file.
     public enum Act: Sendable, Hashable {
@@ -38,14 +43,16 @@ public struct MediaOffer: Sendable, Hashable {
     /// never keeps.
     public static func of(_ m: MessageRow, item: Int? = nil) -> MediaOffer? {
         guard !m.deleted, !m.viewOnce else { return nil }
+        let sending = m.mine && m.status == .pending, outbox = m.mine && (m.status == .pending || m.status == .failed)
         if m.kind == .album {
             guard let items = m.album?.items, !items.isEmpty else { return nil }
             let i = min(max(item ?? 0, 0), items.count - 1)
             guard let media = items[i].media else { return nil }
-            return MediaOffer(message: items[i].id, chat: m.chat, item: i, kind: items[i].kind == "video" ? .video : .image, media: media)
+            return MediaOffer(message: items[i].id, chat: m.chat, item: i, kind: items[i].kind == "video" ? .video : .image, media: media,
+                              sending: sending, outbox: outbox)
         }
         guard [.image, .video, .gif, .videoNote, .sticker, .audio, .document].contains(m.kind), let media = m.media else { return nil }
-        return MediaOffer(message: m.id, chat: m.chat, item: nil, kind: m.kind, media: media)
+        return MediaOffer(message: m.id, chat: m.chat, item: nil, kind: m.kind, media: media, sending: sending, outbox: outbox)
     }
 
     /// The file of a library item: a photo's or a video's, as its message's row has it, or a file's
@@ -76,12 +83,14 @@ public struct MediaOffer: Sendable, Hashable {
         return of(m).map { [$0] } ?? []
     }
 
-    init(message: String, chat: String, item: Int?, kind: MessageKind, media: Media) {
+    init(message: String, chat: String, item: Int?, kind: MessageKind, media: Media, sending: Bool = false, outbox: Bool = false) {
         self.message = message
         self.chat = chat
         self.item = item
         self.kind = kind
         self.media = media
+        self.sending = sending
+        self.outbox = outbox
         name = Self.named(media, id: message)
     }
 
@@ -126,9 +135,12 @@ public struct MediaOffer: Sendable, Hashable {
         act == .saveHD || act == .save && isHere && media.hdPath != nil ? .hd : nil
     }
 
-    /// What its state lets you do about it, as the menu says it: nothing once it's here.
+    /// What its state lets you do about it, as the menu says it: nothing once it's here; for a file of
+    /// yours on its way, stopping it, and nothing once it's failed, Send Again being the message's.
     public var stateAct: (Act, String)? {
-        switch media.state {
+        if sending { return (.stop, "Stop Sending") }
+        if outbox { return nil }
+        return switch media.state {
         case .local: nil
         case .remote: (.fetch, media.error == nil ? "Download" : "Try Again")
         case .downloading: (.stop, "Stop Downloading")
@@ -139,7 +151,9 @@ public struct MediaOffer: Sendable, Hashable {
 
     /// The same, as the palette says it.
     public var statePhrase: String? {
-        switch media.state {
+        if sending { return "Stop sending this file" }
+        if outbox { return nil }
+        return switch media.state {
         case .local, .waitingForPhone: nil
         case .remote: media.error == nil ? "Download this file" : "Try downloading this file again"
         case .downloading: "Stop downloading this file"

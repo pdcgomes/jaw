@@ -375,11 +375,31 @@ extension MessageLayout.Builder {
         }
     }
 
+    /// Whether the message is yours from the outbox, waiting to send or failed, so its file is drawn as
+    /// one sent from here, never as one to download: before its copy is made, jawd's row says no state.
+    var outgoing: Bool {
+        m.mine && (m.status == .pending || m.status == .failed)
+    }
+
+    /// How far your file, or your album's item `item`'s, has got on its way while it waits to send,
+    /// as the last job for it said; nil before its first and once it's uploaded.
+    func sending(item: Int?) -> Sending? {
+        guard m.mine, m.status == .pending else { return nil }
+        let items = m.album?.items ?? []
+        let id = item.flatMap { items.indices.contains($0) ? items[$0].id : nil } ?? m.id
+        return context.sending[id]
+    }
+
     /// What a file's state says over its picture, and what a click there does: ↓ and its size while
     /// it's remote; a ring filling as it comes, with × to stop it; why it can't come, in jawd's
     /// words, with "Try again" or "Ask the phone again"; "Waiting for your phone"; nothing once it's
-    /// here. `small` is a tile's or a sticker's room, which says what's done without why.
+    /// here. One of yours on its way says how far it's got instead. `small` is a tile's or a
+    /// sticker's room, which says what's done without why.
     mutating func coming(_ r: CGRect, _ media: Media?, item: Int?, small: Bool) {
+        if outgoing {
+            if let s = sending(item: item) { going(r, s, item: item, small: small) }
+            return
+        }
         guard let media, media.state != .local else { return }
         let side: CGFloat = small ? 36 : 44
         let circle = CGRect(x: (r.midX - side / 2).rounded(), y: (r.midY - side / 2).rounded(), width: side, height: side)
@@ -401,6 +421,20 @@ extension MessageLayout.Builder {
                    side * 0.38, roles.text, centredIn: circle)
             if let words = Self.comingWords(media, short: small) { band(words, in: r) }
         }
+    }
+
+    /// A file of yours on its way, over its picture: a ring filling as its copy is made, then as it
+    /// uploads, with × to stop it, and how far it's got across its foot where there's room.
+    mutating func going(_ r: CGRect, _ s: Sending, item: Int?, small: Bool) {
+        let side: CGFloat = small ? 36 : 44
+        let circle = CGRect(x: (r.midX - side / 2).rounded(), y: (r.midY - side / 2).rounded(), width: side, height: side)
+        put(.fill(circle, roles.ground.opacity(0.6).cgColor, side / 2))
+        let centre = CGPoint(x: circle.midX, y: circle.midY), radius = side / 2 - 4
+        put(.ring(centre, radius, 1, roles.text.opacity(0.25).cgColor, 3))
+        put(.ring(centre, radius, max(CGFloat(s.percent) / 100, 0.02), roles.text.cgColor, 3))
+        symbol("xmark", side * 0.3, roles.text, centredIn: circle)
+        regions.append((circle, .stop(item: item)))
+        if !small { band((why: s.words, act: nil), in: r) }
     }
 
     /// Why a file isn't here and what can be done, as its card says it: jawd's words, then the act.
@@ -476,9 +510,13 @@ extension MessageLayout.Builder {
     mutating func voice(_ r: CGRect) {
         let circle = CGRect(x: r.minX, y: r.midY - 16, width: 32, height: 32)
         parts.append(.fill(circle, roles.accent.cgColor, 16))
-        symbol(m.kind == .voice ? "play.fill" : "music.note", 12, roles.isDark ? roles.ground : RGBA(0xFFFFFF), centredIn: circle)
+        // An audio file of yours on its way: × in its circle to stop it, how far it's got for its length.
+        let going = m.kind == .audio ? sending(item: nil) : nil
+        symbol(going != nil ? "xmark" : m.kind == .voice ? "play.fill" : "music.note", 12, roles.isDark ? roles.ground : RGBA(0xFFFFFF),
+               centredIn: circle)
+        if going != nil { regions.append((circle, .stop(item: nil))) }
         let seconds = m.media?.seconds ?? m.voice?.seconds
-        let length = line(seconds.map(Format.length) ?? "", fonts.time, roles.secondary)
+        let length = line(going?.words ?? seconds.map(Format.length) ?? "", fonts.time, roles.secondary)
         let lw = width(of: length)
         parts.append(.line(length, CGPoint(x: r.maxX - lw, y: r.midY + ascent(fonts.time) / 2 - 1)))
         let left = circle.maxX + 8, right = r.maxX - lw - 8
@@ -505,19 +543,30 @@ extension MessageLayout.Builder {
             : mime.hasPrefix("audio") ? "music.note" : mime.hasPrefix("video") ? "film" : "doc.text"
         symbol(symbolName, 15, roles.accent, centredIn: icon)
         let x = icon.maxX + 10
-        let state = m.media?.state ?? .local
+        // Yours from the outbox is drawn as it goes, whatever its state says before its copy is made.
+        let going = sending(item: nil)
+        let state: MediaState = outgoing ? .local : m.media?.state ?? .local
         let action = CGRect(x: r.maxX - 28, y: r.midY - 14, width: 28, height: 28)
-        let right = state == .local ? r.maxX : action.minX - 8
+        let right = state == .local && going == nil ? r.maxX : action.minX - 8
         text(name, fonts.name, roles.text, x: x, top: r.minY + 4, most: right - x)
         let pages = m.media?.pages.map { "\($0) page\($0 == 1 ? "" : "s")" }
         let detail = ([ext.isEmpty ? nil : ext, Self.bytes(m.media?.bytes), pages] as [String?]).compactMap(\.self).joined(separator: " · ")
         let second = r.minY + 6 + lineHeight(fonts.name)
-        if let media = m.media, let words = Self.comingWords(media) {
+        if let going {
+            text(going.words, fonts.small, roles.secondary, x: x, top: second, most: right - x)
+        } else if !outgoing, let media = m.media, let words = Self.comingWords(media) {
             parts.append(.line(whyAndAct(words, colour: roles.secondary, most: right - x), CGPoint(x: x, y: second + ascent(fonts.small))))
         } else {
             text(detail.isEmpty ? "a file" : detail, fonts.small, roles.secondary, x: x, top: second, most: right - x)
         }
-        if state != .local {
+        if let going {
+            parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))
+            let centre = CGPoint(x: action.midX, y: action.midY)
+            parts.append(.ring(centre, 11, 1, roles.accent.opacity(0.25).cgColor, 2.5))
+            parts.append(.ring(centre, 11, max(CGFloat(going.percent) / 100, 0.02), roles.accent.cgColor, 2.5))
+            symbol("xmark", 9, roles.accent, centredIn: action)
+            regions.append((action, .stop(item: nil)))
+        } else if state != .local {
             parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))
             switch state {
             case .downloading:

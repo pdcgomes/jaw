@@ -61,6 +61,8 @@ final class MessageView: NSView {
     }
 
     var message: MessageRow?
+    /// How far its files of yours on their way have got, by message, as its layout has them.
+    var sending: [String: Sending] = [:]
     /// Told of a click: where it landed in the layout, and how many clicks it was.
     var clicked: ((MessageView, CGPoint, Int) -> Void)?
     /// Told of VoiceOver's press; says whether it did anything.
@@ -274,15 +276,23 @@ final class MessageView: NSView {
         let who = m.mine ? "You" : (m.from?.name ?? "")
         let reactions = m.reactions.map { "\($0.n) \($0.emoji)" }.joined(separator: ", ")
         let hd = m.media?.hd == true ? "HD" : ""
-        let file = m.media.flatMap(Self.said) ?? ""
+        let outgoing = m.mine && (m.status == .pending || m.status == .failed)
+        let file = m.media.flatMap { Self.said($0, sending: sending[m.id], outgoing: outgoing) } ?? ""
         let items = m.album?.items ?? []
         let tiles = items.enumerated().compactMap { i, item in
-            item.media.flatMap(Self.said).map { "\(item.kind == "video" ? "video" : "photo") \(i + 1) of \(items.count): \($0)" }
+            item.media.flatMap { Self.said($0, sending: sending[item.id], outgoing: outgoing) }
+                .map { "\(item.kind == "video" ? "video" : "photo") \(i + 1) of \(items.count): \($0)" }
         }.joined(separator: "; ")
         return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", hd, file, tiles, Format.clock(m.at),
                 m.status?.rawValue ?? "", reactions]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+    }
+
+    /// A file's state as VoiceOver says it, a file of yours from the outbox saying how far it's got on
+    /// its way, if it's going, and nothing of downloading it.
+    nonisolated static func said(_ media: Media, sending: Sending?, outgoing: Bool) -> String? {
+        outgoing ? sending?.words : said(media)
     }
 
     /// A file's state as VoiceOver says it, nothing once it's here: jawd's whole words and what can
