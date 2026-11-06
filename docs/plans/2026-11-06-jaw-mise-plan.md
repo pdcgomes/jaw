@@ -11,14 +11,15 @@
 ## Global Constraints
 
 - Work in `~/src/jaw-mise`, on the branch `mise`. Scratch goes under `/tmp/jaw-mise/` only, removed in Task 18.
-- Nothing lands on main before `v0.1.0` is tagged and published. Don't push the branch to GitHub before 0.1.0's checklist (`docs/releases/0.1.0-publish.md`) has made the repository public: its step 5 deletes every branch on GitHub but main first.
+- The owner's word, 6 November at 21:19: work overnight and land on main when done, so it's ready in the morning, without waiting for `v0.1.0`. If `v0.1.0` isn't tagged when this lands, 0.1.0's notes and checklist, which are still to be run against the new main, say mise's commands (Task 14, Step 12). The branch goes to GitHub only for its CI, after the audit, and is deleted there once it has landed, so 0.1.0's checklist (`docs/releases/0.1.0-publish.md`, step 5) finds no branch of it.
+- The owner answered neither question of 6 November, then said to start: so built-from counts mise's tasks and settings as the design's "What jawd is built from" says, and the plan is carried out a fresh subagent to a task, each reviewed, with a review of the whole branch before the gate.
 - The data-integrity rule (`.cursor/rules/data-integrity.mdc`): Task 13's commit touches the data layer, so it gets the database expert's audit and the `Data-Audit:` trailer (Task 16). Never skip, fake or self-write the audit.
 - The disk rule: `export CARGO_INCREMENTAL=0` in every shell that builds here; `df -h /System/Volumes/Data` before the first build, stopping below 150 GB free; `mise run prune-builds` between rounds and before the final report.
 - Never stop processes by name; stop only PIDs you started. Never run the Go engine on a folder holding a `session.db`: scratch homes use `jawd --engine demo`.
 - Every task script: `#!/usr/bin/env bash`, `#MISE description="…"`, `#MISE alias="…"` where the design's table gives one, `set -euo pipefail`; the repository found from the script's own path; executable; bash 3.2 only (no associative arrays, `mapfile` or `${x,,}`); another task called by its script (`"$here/engine"`), never by `mise run` or `depends`.
 - Environment variables, with make's defaults: `GO` (`go`), `CARGO` (`cargo`), `JAW_VERSION` (through `scripts/version`), `PREFIX` (`/usr/local`), `BINDIR` (`$PREFIX/bin`), `LIBEXECDIR` (`$PREFIX/libexec/jaw`), `DESTDIR` (empty).
 - Text names a task as `mise run <task>`; a message reads as a sentence: "mise run build builds it".
-- Records keep their words: `docs/audits/`, `docs/reviews/`, `docs/releases/`, and every dated plan but `2026-10-16-jaw-design.md` and `2026-10-26-jaw-mac-design.md`. A dated statement of what was run names the script (`scripts/perf.py`), not a command that didn't exist then.
+- Records keep their words: `docs/audits/`, `docs/reviews/`, `docs/releases/` (but for 0.1.0's notes and checklist while 0.1.0 is still to be released, Task 14, Step 12), and every dated plan but `2026-10-16-jaw-design.md` and `2026-10-26-jaw-mac-design.md`. A dated statement of what was run names the script (`scripts/perf.py`), not a command that didn't exist then.
 - Commits in jaw's style: one subject in prose saying what changed and why, ending "Docs only" or "Tests only" where that's all it is.
 - Until Task 14 deletes it, the Makefile keeps working, so every commit before it leaves both ways usable.
 - In this worktree, after Task 2: `mise trust -q mise.toml` once, since `mise exec` and `mise ls` refuse an untrusted config (`mise run` doesn't).
@@ -769,6 +770,11 @@ replace `` makes `Jaw.xcworkspace` for Xcode.`` with `` makes `Jaw.xcworkspace` 
 - [ ] **Step 7: The rules.** In `.cursor/rules/data-integrity.mdc`, `` `make check-audit` must pass locally; the pre-push hook (`make hooks`) refuses`` becomes `` `mise run check-audit` must pass locally; the pre-push hook (`mise run setup`) refuses``. In `.cursor/rules/disk-space.mdc`: the description's `When and how to run make prune-builds` becomes `When and how to run mise run prune-builds`; `` `make prune-builds` deletes those`` becomes `` `mise run prune-builds` deletes those``; and `` - `make prune-builds`, from any checkout that has it (origin/main since ae37609): it covers`` becomes `` - `mise run prune-builds` (`make prune-builds` in a checkout from before the move to mise, or `python3 scripts/prune-builds.py` in any since ae37609): it covers``.
 - [ ] **Step 8: The Mac's comments.** `mac/Project.swift`: `` `make mac` signs releases`` becomes `` `mise run mac` signs releases``, and `make mac-test runs them in their own` becomes `mise run mac-test runs them in their own`. `mac/parity.toml`: `` `make check-parity` fails when the`` becomes `` `mise run check-parity` fails when the``.
 - [ ] **Step 9: The Makefile goes.** `git rm -q Makefile`.
+- [ ] **Step 12 (before Step 10): 0.1.0's notes and checklist, while 0.1.0 is still to be released.** If `git ls-remote --tags origin v0.1.0` lists nothing, 0.1.0 will be cut from a main without make, so:
+  - `docs/releases/0.1.0.md`: `make install PREFIX=~/.local  # jaw and jawd in ~/.local/bin, jaw-engine in ~/.local/libexec/jaw` becomes `PREFIX=~/.local mise run install  # jaw and jawd in ~/.local/bin, jaw-engine in ~/.local/libexec/jaw`, and `make uninstall PREFIX=~/.local` becomes `PREFIX=~/.local mise run uninstall`.
+  - `docs/releases/0.1.0-publish.md`: `` `scripts/release.sh`, which step 4 runs`` becomes `` `mise run release`, which step 4 runs``; `` passes `make check-generated`, `make lint`, `make test` under the flakes rule and `make check-audit` `` becomes `` passes `mise run check-generated`, `mise run lint`, `mise run test` under the flakes rule and `mise run check-audit` ``; `` which `scripts/release.sh` needs`` becomes `` which `mise run release` needs``; `cd ~/src/jaw-v0.1.0 && scripts/release.sh` becomes `cd ~/src/jaw-v0.1.0 && mise run release`; `make -C /tmp/jaw-v0.1.0-check/jaw-0.1.0 install PREFIX=/tmp/jaw-v0.1.0-check/prefix` becomes `PREFIX=/tmp/jaw-v0.1.0-check/prefix /tmp/jaw-v0.1.0-check/jaw-0.1.0/mise/tasks/install`; and `` `make uninstall PREFIX=~/.local` first`` becomes `` `PREFIX=~/.local mise run uninstall` first``. Its history stays: main's Linux job "failing at `make lint`" on 5 November.
+  - Thursday's `docs/releases/0.1.0-spare-number-session.md` is a record, and stays.
+  - These go in a commit of their own, after Step 11's: "0.1.0's notes and checklist say mise's commands, since 0.1.0 is to be cut from a main without make (the owner's word to land the move to mise before it): … Docs only". If `v0.1.0` is tagged by then, this step is skipped.
 - [ ] **Step 10: Nothing current names make.**
 
 ```bash
@@ -814,9 +820,23 @@ Expected: `audited`, and one commit, Task 13's, with the trailer.
 
 ---
 
-### Task 17: Before landing, once `v0.1.0` is out
+### Task 17: Landing
 
-- [ ] **Step 1: Wait for the release.** `git ls-remote --tags origin v0.1.0` lists the tag, and `gh repo view pdcgomes/jaw --json visibility --jq .visibility` says `PUBLIC`.
+- [ ] **Step 1: The sudo path, with a stand-in for sudo,** since the owner is away and an agent's shell can't answer sudo. A folder made unwritable has `install` take the sudo branch; a `sudo` on the PATH that logs its command, makes the folder writable and runs it shows the copy alone went through it:
+
+```bash
+mkdir -p /tmp/jaw-mise/fakesudo /tmp/jaw-mise/ro
+printf '%s\n' '#!/bin/sh' 'echo "sudo $*" >> /tmp/jaw-mise/sudo.log' 'chmod -R u+w /tmp/jaw-mise/ro' 'exec "$@"' > /tmp/jaw-mise/fakesudo/sudo
+chmod +x /tmp/jaw-mise/fakesudo/sudo && chmod 555 /tmp/jaw-mise/ro
+env PATH="/tmp/jaw-mise/fakesudo:$PATH" PREFIX=/tmp/jaw-mise/ro mise run install
+cat /tmp/jaw-mise/sudo.log; ls /tmp/jaw-mise/ro/bin
+chmod 555 /tmp/jaw-mise/ro/bin /tmp/jaw-mise/ro/libexec/jaw /tmp/jaw-mise/ro/libexec /tmp/jaw-mise/ro
+env PATH="/tmp/jaw-mise/fakesudo:$PATH" PREFIX=/tmp/jaw-mise/ro mise run uninstall
+cat /tmp/jaw-mise/sudo.log; find /tmp/jaw-mise/ro -type f | wc -l
+chmod -R u+w /tmp/jaw-mise/ro && rm -rf /tmp/jaw-mise/ro /tmp/jaw-mise/fakesudo /tmp/jaw-mise/sudo.log
+```
+
+  Expected: `sudo mkdir -p …` and `sudo install -m 755 …` lines for the copy only (none for cargo or go), `jaw` and `jawd` in `bin`; then `sudo rm -f …` lines and `0`. The real check stays for the owner (Step 5).
 - [ ] **Step 2: Catch up with main.** `git fetch origin && git rebase origin/main`. If `mac-perf` has landed, move its make lines into tasks: `python3 mac/scripts/test-perf` in `mise/tasks/mac-test` after jawd's debug build, and `mise/tasks/perf-mac`:
 
 ```bash
@@ -834,7 +854,7 @@ mac/scripts/build-mac perf "$@"
   If `mac-menus` has landed, check that its `JawHarnessTests` line is already in `mise/tasks/mac-test`. If either lands after this one, it moves its own lines as it rebases. If the rebase changed anything in the data layer, the database expert audits again (Task 16).
 - [ ] **Step 3: The gate again.** Task 15's steps, with `mise run check-audit` passing.
 - [ ] **Step 4: CI.** `git push -u origin mise`, then `gh run list --repo pdcgomes/jaw --branch mise --limit 1` and `gh run view <its ID> --repo pdcgomes/jaw`. Expected: `data-audit` and `parity` pass, and the test job fails nowhere that main's latest run doesn't.
-- [ ] **Step 5: The owner's sudo check,** since an agent's shell can't answer sudo. Ask him to run, in his own terminal:
+- [ ] **Step 5: The owner's sudo check, for the morning report,** since an agent's shell can't answer sudo. He runs, in his own terminal:
 
 ```bash
 cd ~/src/jaw-mise
@@ -845,7 +865,7 @@ PREFIX=/tmp/jaw-mise/rootonly mise run uninstall   # asks again if sudo has forg
 sudo rm -rf /tmp/jaw-mise/rootonly
 ```
 
-- [ ] **Step 6: Hand over.** Tell the owner it's ready to land, and that the coordinator needs telling, since its briefs and gate scripts call make's targets. When he says to land it: from `~/src/jaw-mise` (never a scratch worktree), `git fetch origin && git rebase origin/main`, the gate again if main moved, then `git push origin HEAD:main`, which the pre-push hook checks.
+- [ ] **Step 6: Land,** as the owner said to: from `~/src/jaw-mise`, never a scratch worktree, `git fetch origin && git rebase origin/main`, the gate again if main moved, then `git push origin HEAD:main`, which the pre-push hook checks. Then `git push origin --delete mise`, and `gh run list --repo pdcgomes/jaw --branch main --limit 1` shows main's CI started on the landed commit. The morning report tells the owner the coordinator needs telling, since its briefs and gate scripts call make's targets.
 
 ---
 
@@ -853,4 +873,5 @@ sudo rm -rf /tmp/jaw-mise/rootonly
 
 - [ ] **Step 1:** `mise run prune-builds`, then `rm -rf /tmp/jaw-mise`.
 - [ ] **Step 2:** Bring the canvas up to date: every step's state, the log, what's left for the owner.
-- [ ] **Step 3:** Report: what landed or waits, the audit's verdict, CI's result, the gate's, any test judged a flake, and what stays (`~/src/jaw-mise` until it lands, then `git worktree remove ~/src/jaw-mise && git branch -d mise`, which removes its `target/` with it). Then the Mac app's release gets its own design, from the design's "Later".
+- [ ] **Step 3:** Once it has landed, `git -C ~/src/jaw worktree remove ~/src/jaw-mise && git -C ~/src/jaw branch -d mise`, which removes its `target/` with it, as the disk rule asks of a landed branch.
+- [ ] **Step 4:** Report: what landed, the audit's verdict, CI's result, the gate's, any test judged a flake, the owner's sudo check (Task 17, Step 5), the coordinator to be told, and, if 0.1.0 wasn't tagged first, that its notes and checklist now say mise's commands, or that tagging the commit before the landing releases it with make as they first said. Then the Mac app's release gets its own design, from the design's "Later".
