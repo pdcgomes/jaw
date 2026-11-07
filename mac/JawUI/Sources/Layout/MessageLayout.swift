@@ -201,6 +201,8 @@ public final class Laid: @unchecked Sendable {
                 ctx.saveGState()
                 ctx.translateBy(x: point.x, y: point.y + y)
                 ctx.scaleBy(x: 1, y: -1)
+                // The graphics state doesn't hold the text matrix, so text drawn earlier in the context may have left one.
+                ctx.textMatrix = .identity
                 ctx.textPosition = .zero
                 CTLineDraw(line, ctx)
                 ctx.restoreGState()
