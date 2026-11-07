@@ -343,6 +343,16 @@ echo more >> .MISE/config.toml
 git update-index --assume-unchanged .MISE/config.toml
 says "a .MISE/config.toml on origin/main changed, which git is told to assume unchanged" changed \
     "main at $m, with files jawd is built from whose changes git is told to ignore"
+copy assumed-setting
+echo '[env]' >> mise.toml
+git update-index --assume-unchanged mise.toml
+says "mise.toml changed, which git is told to assume unchanged" changed \
+    "main at $at, with files jawd is built from whose changes git is told to ignore"
+copy skipped-setting
+echo '[env]' >> mise.toml
+git update-index --skip-worktree mise.toml
+says "mise.toml changed, which git is told to skip" changed \
+    "main at $at, with files jawd is built from whose changes git is told to ignore"
 copy skipped
 echo more >> crates/lib.rs
 git update-index --skip-worktree crates/lib.rs
