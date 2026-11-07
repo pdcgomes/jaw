@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Every commit since origin/main that touches the data layer names an approved audit (scripts/check-data-audit.py)"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+exec python3 scripts/check-data-audit.py origin/main HEAD

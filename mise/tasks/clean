@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="cargo clean: this checkout's whole target/, which costs it a full build (mise run prune-builds frees most of it without one)"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+"${CARGO:-cargo}" clean

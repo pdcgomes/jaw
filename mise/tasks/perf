@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Every budget in the design, on release builds against a made-up million-message account, as one table in target/perf/ (scripts/perf.py says how; -- --quick leaves out the slowest, -- --small checks the harness)"
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/../.."
+"$here/engine"
+"${CARGO:-cargo}" build --release -p jawd -p jaw
+"${CARGO:-cargo}" test --release -p jawd --bin jawd --no-run
+python3 scripts/perf.py "$@"
