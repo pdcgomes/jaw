@@ -142,8 +142,9 @@ public struct ThemeCard: View {
 }
 
 /// A gallery section's cards, three across in rows of their own, each the half `slot` would take and
-/// ticked when it's the slot's theme: a click chooses it, and ⌥-click or its menu's Use for Dark Only
-/// (or Light Only) chooses it for that slot alone; VoiceOver's press and its named action do the same.
+/// ticked when it's the slot's theme: a click chooses it, and ⌥-click, ⌥ read from the click itself, or
+/// its menu's Use for Dark Only (or Light Only) chooses it for that slot alone; VoiceOver's press and its
+/// named action do the same.
 /// The rows are laid out whole, not lazily, so the gallery can scroll to any card an arrow reaches.
 public struct GalleryGrid: View {
     let themes: [Theme]
@@ -176,7 +177,8 @@ public struct GalleryGrid: View {
     func card(_ theme: Theme) -> some View {
         ThemeCard(theme: theme, slot: slot, roles: theme.roles(slot) ?? Catalog.jaw.roles(dark: slot.isDark),
                   ticked: slots[slot] == theme.id, label: Gallery.label(theme, for: slot, slots))
-            .onTapGesture { choose(theme, NSEvent.modifierFlags.contains(.option)) }
+            .onTapGesture { choose(theme, false) }
+            .highPriorityGesture(TapGesture().modifiers(.option).onEnded { choose(theme, true) })
             .contextMenu {
                 Button("Use for \(slot.title) Only") { choose(theme, true) }
             }

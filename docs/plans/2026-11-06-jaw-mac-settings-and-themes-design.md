@@ -74,6 +74,7 @@ From the top:
 - One with both halves, Tokyo Night or any of Redlamp's, fills both slots, each with its own half, so the choice holds when the Mac changes appearance, as Redlamp's families are made to.
 - One of Omarchy's, which have one mode each, fills the slot of its mode and leaves the other as it is.
 - ⌥-click, or Use for Dark Only (or Light Only) in a card's menu, fills only the slot chosen for, so dark and light can come from different families.
+- A click on the theme already chosen for the slot shown changes nothing, with ⌥ or without (Owner, 7 Nov).
 - The arrow keys move through the cards, each chosen as it's reached, as the terminal previews a theme as it moves through its list.
 - A slot holds only a theme of its own mode. At first both hold Jaw's Tokyo Night (Owner, 26 Oct and 6 Nov).
 

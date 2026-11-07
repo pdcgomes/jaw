@@ -18,10 +18,12 @@ public struct Slots: Sendable, Hashable {
         }
     }
 
-    /// The slots once `theme` is chosen for `slot`: one with both halves fills both, each with its own
-    /// half, unless `only`, as ⌥-click is, which fills `slot` alone; one with a single half fills the
+    /// The slots once `theme` is chosen for `slot`: as they are where `slot` holds it already, whatever its
+    /// halves and `only` (the owner's, 7 November); else one with both halves fills both, each with its
+    /// own half, unless `only`, as ⌥-click is, which fills `slot` alone; one with a single half fills the
     /// slot of its mode, so a slot never holds a theme of the other mode.
     public func choosing(_ theme: Theme, for slot: Slot, only: Bool = false) -> Slots {
+        guard theme.id != self[slot] else { return self }
         var next = self
         switch (theme.dark != nil, theme.light != nil) {
         case (true, true) where only:

@@ -66,9 +66,11 @@ public struct AppearancePane: View {
                 }
                 .padding(SettingsPane.margin)
                 .contentShape(Rectangle())
-                .simultaneousGesture(TapGesture().onEnded {
-                    preferences.arrowsFrom = nil
+                .simultaneousGesture(TapGesture().onEnded { [preferences] in
                     clicked += 1
+                    // Ends the run once a card's own tap, which SwiftUI runs after this one, has chosen
+                    // from its start.
+                    DispatchQueue.main.async { preferences.arrowsFrom = nil }
                 })
             }
             .background(ArrowKeys(clicked: clicked) { arrow in move(arrow, in: gallery, proxy) })
@@ -76,17 +78,17 @@ public struct AppearancePane: View {
         .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
     }
 
-    /// Makes `each` the slot the gallery chooses for, as a click on its tile does, which ends the
-    /// arrows' run.
+    /// Makes `each` the slot the gallery chooses for, as a click on its tile does, which chooses no theme:
+    /// it ends the arrows' run keeping what they show, as Settings closing does.
     func pick(_ each: Slot) {
         preferences.choosing = each
         clicked += 1
     }
 
-    /// Fills the slots with `theme` as a click on its card does, from the slots as they are, which ends
+    /// Fills the slots with `theme` as a click on its card does, from the owner's own slots, which ends
     /// the arrows' run, and gives the gallery the keys again.
     func choose(_ theme: Theme, only: Bool) {
-        preferences.slots = preferences.slots.choosing(theme, for: slot, only: only)
+        preferences.choose(theme, for: slot, only: only)
         clicked += 1
     }
 

@@ -75,6 +75,20 @@ func servedThemes() throws -> [OmarchyTheme] {
     #expect(wrong == Slots(dark: "omarchy:nord", light: "omarchy:catppuccin-latte"), "a slot never holds a theme of the other mode")
 }
 
+@Test func `choosing the theme the slot chosen for holds changes nothing, whatever its halves and with ⌥ or without, as the owner has it`() throws {
+    let themes = Catalog.themes(omarchy: try servedThemes(), accent: .blue)
+    func theme(_ id: String) throws -> Theme {
+        try #require(themes.first { $0.id == id })
+    }
+    let slots = Slots(dark: "jaw", light: "omarchy:white")
+    #expect(try slots.choosing(theme("jaw"), for: .dark) == slots, "Tokyo Night again for the dark slot leaves White in the light one")
+    #expect(try slots.choosing(theme("jaw"), for: .dark, only: true) == slots)
+    let nord = Slots(dark: "redlamp:nord", light: "jaw")
+    #expect(try nord.choosing(theme("redlamp:nord"), for: .dark) == nord, "a family chosen for dark alone stays so")
+    #expect(try slots.choosing(theme("jaw"), for: .light) == Slots(dark: "jaw", light: "jaw"),
+            "a theme the other slot holds is chosen as any other is, both its halves filling both")
+}
+
 @Test func `Neutral draws in the accent it's given, in each appearance, and Redlamp's families don't change with it`() throws {
     let purple = SystemAccent(dark: RGBA(0xBF5AF2), light: RGBA(0xAF52DE))
     let neutral = try #require(Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: purple))

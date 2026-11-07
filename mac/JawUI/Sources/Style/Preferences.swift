@@ -224,13 +224,20 @@ public final class Preferences {
     }
 
     /// Fills the slots as the gallery's arrows reach `theme`, in `slot`, previewing it from the slots
-    /// they started from, as the terminal previews a theme as it moves through its list: those slots as
-    /// they were where it's the theme they started on, or as a click there would fill them, so the other
-    /// slot takes a theme with both halves only while the arrows rest on it, and → ← loses nothing.
+    /// they started from, as the terminal previews a theme as it moves through its list: as a click there
+    /// would fill those, so they're as they were where it's the theme they started on, the other slot
+    /// takes a theme with both halves only while the arrows rest on it, and → ← loses nothing.
     public func preview(_ theme: Theme, for slot: Slot) {
         let start = arrowsFrom ?? slots
-        slots = theme.id == start[slot] ? start : start.choosing(theme, for: slot)
+        slots = start.choosing(theme, for: slot)
         arrowsFrom = start
+    }
+
+    /// Fills the slots as a click on `theme`'s card in `slot`'s gallery does, or ⌥-click where `only`, and
+    /// its menu and VoiceOver's actions, from the owner's own slots, those the arrows started from while
+    /// they run, never what they show, which ends their run.
+    public func choose(_ theme: Theme, for slot: Slot, only: Bool) {
+        slots = (arrowsFrom ?? slots).choosing(theme, for: slot, only: only)
     }
 
     /// The line the Omarchy section shows in place of jawd's themes, or nil once they're in.

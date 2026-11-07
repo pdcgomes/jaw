@@ -99,6 +99,43 @@ func press(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags = [], in window
     try await Task.sleep(for: .milliseconds(100))
 }
 
+/// A click at `point` in `window`, through its own event handling, as the bench's `click:` makes one,
+/// with `modifiers` held, as ⌥ is for a click that fills the slot shown alone.
+@MainActor
+func click(_ point: NSPoint, _ modifiers: NSEvent.ModifierFlags = [], in window: NSWindow) async throws {
+    for (type, pressure) in [(NSEvent.EventType.leftMouseDown, Float(1)), (.leftMouseUp, 0)] {
+        window.sendEvent(try #require(NSEvent.mouseEvent(with: type, location: point, modifierFlags: modifiers,
+                                                         timestamp: ProcessInfo.processInfo.systemUptime,
+                                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                         clickCount: 1, pressure: pressure)))
+    }
+    try await Task.sleep(for: .milliseconds(100))
+}
+
+/// Where the card of `id`'s `half` is in `host`'s window, the dark gallery's or a tile's: the middle of
+/// the tallest stretch of rows that half's ground fills in the pane as it's drawn, so the gallery's card
+/// rather than a tile's half-size one where both show, as SwiftUI's views, unlike AppKit's, don't say
+/// where they are.
+@MainActor
+func card(_ id: String, _ half: Slot = .dark, of preferences: Preferences, in host: NSView) throws -> NSPoint {
+    let ground = try #require(preferences.themes.first { $0.id == id }?.roles(half)?.ground)
+    let wanted = [ground.r, ground.g, ground.b].map { Int(($0 * 255).rounded()) }
+    let image = try picture(host, on: RGBA(0x1E1E1E))
+    let p = pixels(image)
+    func filled(_ x: Int, _ y: Int) -> Bool {
+        (0 ..< 3).allSatisfy { abs(Int(p[(y * image.width + x) * 4 + $0]) - wanted[$0]) <= 1 }
+    }
+    var stretches: [[Int]] = []
+    for y in 0 ..< image.height where (0 ..< image.width).contains(where: { filled($0, y) }) {
+        if let last = stretches.last?.last, y - last <= 4 { stretches[stretches.count - 1].append(y) } else { stretches.append([y]) }
+    }
+    let rows = try #require(stretches.max { $0.count < $1.count }, "\(id)'s card is in sight")
+    let xs = rows.flatMap { y in (0 ..< image.width).filter { filled($0, y) } }
+    let (top, bottom) = (try #require(rows.first), try #require(rows.last))
+    let (left, right) = (try #require(xs.min()), try #require(xs.max()))
+    return NSPoint(x: CGFloat(left + right) / 4, y: host.bounds.height - CGFloat(top + bottom) / 4)
+}
+
 @MainActor @Test(.timeLimit(.minutes(1))) func `the arrows choose card after card with no click and no keyboard navigation, previewing each from where they started, and the gallery scrolls to each`() async throws {
     let preferences = try scratchPreferences("gallery-keys")
     preferences.served = try allOmarchy()
@@ -157,45 +194,19 @@ func press(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags = [], in window
     let (window, host) = appearanceWindow(preferences)
     defer { window.close() }
     #expect(await eventually { window.firstResponder is ArrowCatcher })
-    /// A click at `point`, in the window, through its own event handling, as the bench's `click:` makes one.
-    func click(_ point: NSPoint) async throws {
-        for (type, pressure) in [(NSEvent.EventType.leftMouseDown, Float(1)), (.leftMouseUp, 0)] {
-            window.sendEvent(try #require(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                                                             timestamp: ProcessInfo.processInfo.systemUptime,
-                                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                                                             clickCount: 1, pressure: pressure)))
-        }
-        try await Task.sleep(for: .milliseconds(100))
-    }
-    /// Where the dark slot's card for `id` is in the window: the middle of what its theme's ground fills
-    /// in the pane as it's drawn, as SwiftUI's views, unlike AppKit's, don't say where they are.
-    func card(_ id: String) throws -> NSPoint {
-        let ground = try #require(preferences.themes.first { $0.id == id }?.dark?.ground)
-        let wanted = [ground.r, ground.g, ground.b].map { Int(($0 * 255).rounded()) }
-        let image = try picture(host, on: RGBA(0x1E1E1E))
-        let p = pixels(image)
-        var (minX, minY, maxX, maxY) = (Int.max, Int.max, Int.min, Int.min)
-        for y in 0 ..< image.height {
-            for x in 0 ..< image.width where (0 ..< 3).allSatisfy({ abs(Int(p[(y * image.width + x) * 4 + $0]) - wanted[$0]) <= 1 }) {
-                (minX, minY, maxX, maxY) = (min(minX, x), min(minY, y), max(maxX, x), max(maxY, y))
-            }
-        }
-        try #require(maxX >= minX, "\(id)'s card is in sight")
-        return NSPoint(x: CGFloat(minX + maxX) / 4, y: host.bounds.height - CGFloat(minY + maxY) / 4)
-    }
-    let left: UInt16 = 123
+    let (left, right): (UInt16, UInt16) = (123, 124)
     preferences.slots = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
     try await press(left, in: window)
     #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "the arrows rest on Jaw's card")
     window.makeFirstResponder(nil)
-    try await click(try card("omarchy:ethereal"))
-    #expect(preferences.slots == Slots(dark: "omarchy:ethereal", light: "jaw"), "a card's click chooses it as a click does, from the slots as they are")
+    try await click(try card("jaw", of: preferences, in: host), in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "a click on it chooses what the arrows showed")
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "and gives the gallery the keys")
-    try await press(left, in: window)
+    try await press(right, in: window)
     #expect(preferences.slots == Slots(dark: "omarchy:catppuccin", light: "jaw"),
-            "and ends the arrows' run, so they go on from what it chose, not from where the run began")
+            "and ends the arrows' run, so they go on from what it chose, and White, which it let go, doesn't come back")
     window.makeFirstResponder(nil)
-    try await click(NSPoint(x: Space.xs, y: host.bounds.height - Space.xs))
+    try await click(NSPoint(x: Space.xs, y: host.bounds.height - Space.xs), in: window)
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "a click on the pane's ground gives them back too")
     func views(_ view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { views($0) }
@@ -205,9 +216,59 @@ func press(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags = [], in window
                               "the appearance's radio buttons, which SwiftUI draws, have a view of AppKit's to take the keys")
     let row = radios.convert(radios.bounds, to: nil)
     window.makeFirstResponder(nil)
-    try await click(NSPoint(x: row.maxX - Space.l, y: row.midY))
+    try await click(NSPoint(x: row.maxX - Space.l, y: row.midY), in: window)
     #expect(preferences.appearance == .light, "a click on Light, the last radio button, sets the appearance, as it did")
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "and gives the gallery the keys")
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `a click on the theme chosen for the slot shown changes nothing, and while the arrows run a click chooses from where they started`() async throws {
+    let preferences = try scratchPreferences("gallery-click-rules")
+    preferences.served = try allOmarchy()
+    let (window, host) = appearanceWindow(preferences)
+    defer { window.close() }
+    #expect(await eventually { window.firstResponder is ArrowCatcher })
+    let left: UInt16 = 123
+    let atStart = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
+    preferences.slots = Slots(dark: "jaw", light: "omarchy:white")
+    try await click(try card("jaw", of: preferences, in: host), in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "omarchy:white"),
+            "a plain click on Tokyo Night, the dark slot's theme, leaves both slots as they were, the owner's rule of 7 November")
+    preferences.slots = Slots(dark: "jaw", light: "omarchy:white")
+    try await click(try card("jaw", of: preferences, in: host), .option, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "omarchy:white"), "and so does ⌥-click")
+
+    preferences.slots = atStart
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "the arrows from Catppuccin rest on Tokyo Night, filling both slots")
+    try await click(try card("jaw", of: preferences, in: host), .option, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "omarchy:white"),
+            "⌥-click on it fills the dark slot from where they started, the light one White as it was then")
+
+    preferences.slots = atStart
+    try await press(left, in: window)
+    try await click(try card("omarchy:catppuccin", of: preferences, in: host), in: window)
+    #expect(preferences.slots == atStart, "a click back on Catppuccin, where the arrows started, puts both back as they were")
+
+    preferences.slots = atStart
+    try await press(left, in: window)
+    try await click(try card("jaw", of: preferences, in: host), in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "a plain click on the card the arrows rest on gives what they showed")
+
+    preferences.slots = atStart
+    let (right, down): (UInt16, UInt16) = (124, 125)
+    for arrow in [down, down, down, right] {
+        try await press(arrow, in: window)
+    }
+    #expect(preferences.slots == Slots(dark: "omarchy:nord", light: "omarchy:white"), "↓ ↓ ↓ → from Catppuccin rests on Omarchy's Nord")
+    func views(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { views($0) }
+    }
+    let document = try #require(views(host).lazy.compactMap { $0 as? NSScrollView }.first?.documentView)
+    document.scroll(NSPoint(x: 0, y: document.isFlipped ? 0 : document.bounds.height - document.visibleRect.height))
+    try await Task.sleep(for: .milliseconds(100))
+    try await click(try card("omarchy:white", .light, of: preferences, in: host), in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:nord", light: "omarchy:white") && preferences.choosing == .light,
+            "a click on the Light tile, scrolled back to, chooses no theme: it ends the run with Nord kept and White as it was, and shows the light gallery")
 }
 
 @Test func `a slot's tile says its theme and its source, that it's in use or when it would be, and why it draws Tokyo Night`() throws {
