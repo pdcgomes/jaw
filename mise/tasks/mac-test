@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="mac/scripts/test-built-from, jawd's debug build, then JawKit, JawThemes, JawUITests and JawHarnessTests, on the build Mac when it answers (mac/scripts/build-mac)"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+mac/scripts/test-built-from
+"${CARGO:-cargo}" build -p jawd --bin jawd
+for scheme in JawKit JawThemes JawUITests JawHarnessTests; do
+    mac/scripts/build-mac test "$scheme"
+done

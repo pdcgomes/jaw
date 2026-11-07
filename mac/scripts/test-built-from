@@ -46,7 +46,7 @@ says() {
     fi
 }
 
-# refuses <case> [<folder> [<since>]]: built-from fails, printing nothing for make mac to record
+# refuses <case> [<folder> [<since>]]: built-from fails, printing nothing for mise run mac to record
 refuses() {
     if got="$("$built_from" "${2:-$PWD}" ${3:+"$3"} 2> /dev/null)"; then
         fail "$1" "$(printf 'it succeeded:\n%s' "$got")"
@@ -68,7 +68,7 @@ inside() {
 base="$scratch/base"
 git init -q -b main "$base"
 inside "$base"
-mkdir -p crates engine proto protocol mac/scripts docs scripts
+mkdir -p crates engine proto protocol mac/scripts docs scripts mise/tasks
 printf '.DS_Store\ntarget/\n' > .gitignore
 echo '[workspace]' > Cargo.toml
 echo '# the lock' > Cargo.lock
@@ -76,7 +76,8 @@ echo 'pub fn jawd() {}' > crates/lib.rs
 echo 'package main' > engine/main.go
 echo 'syntax = "proto3";' > proto/engine.proto
 echo '# the protocol' > protocol/README.md
-echo 'engine:' > Makefile
+echo '[tools]' > mise.toml
+echo 'go build' > mise/tasks/engine
 echo 'git describe' > scripts/version
 echo '# the tag' > VERSION
 echo '# a check' > scripts/check.py
@@ -107,7 +108,7 @@ ahead() {
 # aged: everything jawd is built from in this checkout last written in 2000, and $since in 2001
 since="$scratch/since"
 aged() {
-    find Cargo.toml Cargo.lock crates engine proto protocol Makefile scripts/version VERSION -exec touch -t 200001010000 {} +
+    find Cargo.toml Cargo.lock crates engine proto protocol mise.toml mise scripts/version VERSION -exec touch -t 200001010000 {} +
     touch -t 200101010000 "$since"
 }
 
@@ -265,7 +266,7 @@ for new in go.work .cargo/config.toml; do
     says "a new $new that origin/main's .gitignore leaves out" changed "main at $m, $changed"
 done
 n=0
-for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work GNUmakefile; do
+for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work mise.local.toml .mise.toml .mise.local.toml .mise/config.toml .config/mise.toml .config/mise/config.toml .tool-versions mise/tasks/new; do
     n=$((n + 1))
     copy "new-$n"
     mkdir -p "$(dirname "$new")"
@@ -273,7 +274,7 @@ for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work GNUmake
     says "a new $new" changed "main at $at, $changed"
 done
 n=0
-for input in Makefile scripts/version VERSION; do
+for input in mise.toml mise/tasks/engine scripts/version VERSION; do
     n=$((n + 1))
     copy "input-$n"
     echo more >> "$input"

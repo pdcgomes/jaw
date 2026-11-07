@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Jaw.app with jawd, jaw-engine and jaw inside, each signed, saying what it was built from, in mac/build/release/ (mac/scripts/bundle)"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+exec mac/scripts/bundle

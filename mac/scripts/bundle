@@ -1,10 +1,10 @@
 #!/bin/sh
-# `make mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed, saying what it
+# `mise run mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed, saying what it
 # was built from.
 #
 # jawd and jaw are built for release here, since the build Mac has no Rust or Go, jawd with its
 # Info.plist, which its own build embeds, so macOS asks for the microphone in jaw's words, and
-# jaw-engine by make engine, which stamps it with the version jaw and jawd say; the app is built in
+# jaw-engine by mise/tasks/engine, which stamps it with the version jaw and jawd say; the app is built in
 # Release on the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
 # helpers go into Contents/Helpers, and what mac/scripts/built-from says into its Info.plist
 # (JawBuiltFrom and JawBuiltAt), since only a Jaw from origin/main or a release's tag on it starts its
@@ -33,7 +33,7 @@ rm -f target/release/jawd target/release/jaw
 echo "==> jawd, jaw and jaw-engine for release"
 cargo build --release -p jawd --bin jawd --quiet
 cargo build --release -p jaw --bin jaw --quiet
-make -s engine
+mise/tasks/engine
 
 echo "==> Jaw.app in Release"
 rm -rf "$app"
@@ -54,7 +54,7 @@ cp target/release/jawd target/release/jaw target/engine/jaw-engine "$app/Content
 jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
 again="$(mac/scripts/built-from "$repo" "$stamp")"
 if [ "$again" != "$built" ]; then
-    echo "==> the checkout changed while make mac built it: run it again" >&2
+    echo "==> the checkout changed while mise run mac built it: run it again" >&2
     exit 1
 fi
 from="$(echo "$built" | sed -n 1p)"
