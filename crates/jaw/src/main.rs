@@ -308,7 +308,7 @@ fn link(socket: &Path, phone: Option<String>, out: &mut impl std::io::Write) -> 
                 writeln!(out, "Linked {phone}. jawd is fetching your history; jaw status says how far it has got.")?;
                 return Ok(());
             }
-            LinkStep::Failed { reason } => bail!(reason),
+            LinkStep::Failed { reason, .. } => bail!(reason),
         }
     }
 }

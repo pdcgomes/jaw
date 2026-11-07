@@ -883,11 +883,16 @@ fn link_step(step: pb::link::Step) -> pb::Event {
     pb::Event { seq: 0, kind: Some(pb::event::Kind::Link(pb::Link { step: Some(step) })) }
 }
 
-/// The made-up phone linking the account again, as jaw-engine says a link that has finished: done,
-/// just before the account's Connected.
-pub(super) fn linked_again() -> [pb::Event; 2] {
-    let linked = pb::Linked { jid: ME.into(), push_name: "Pedro".into(), ..Default::default() };
-    [link_step(pb::link::Step::Done(linked)), connected()]
+/// A made-up phone linking the account `jid` (the made-up account's, ME, or another number's), as
+/// jaw-engine says a link that has finished: done, just before the account's Connected.
+pub(super) fn linked_again(jid: &str) -> [pb::Event; 2] {
+    let name = if jid == ME { "Pedro" } else { "" };
+    let linked = pb::Linked { jid: jid.into(), push_name: name.into(), ..Default::default() };
+    let mut connected = connected();
+    if let Some(pb::event::Kind::Connection(connection)) = connected.kind.as_mut() {
+        (connection.jid, connection.push_name) = (jid.into(), name.into());
+    }
+    [link_step(pb::link::Step::Done(linked)), connected]
 }
 
 impl Default for DemoEngine {
@@ -1686,10 +1691,17 @@ impl Sender {
         Ok(pb::reply::Kind::Done(pb::Done {}))
     }
 
-    /// Links the made-up account as a phone would: refused while it's linked, as jaw-engine
-    /// refuses; otherwise a made-up QR code, or a code to type on the phone, and SCANNED later the
-    /// phone links the same account again, unless linking started again or was cancelled.
+    /// Links an account as a phone would: refused while one is linked, as jaw-engine refuses;
+    /// otherwise a made-up QR code, which the made-up account's phone scans, or a code to type on
+    /// the phone of the number given, and SCANNED later that phone links its account, unless
+    /// linking started again or was cancelled. An account other than the one jaw.db keeps
+    /// (`account`) is refused as jaw-engine refuses it as it pairs, and the device stays gone.
     fn link_start(&self, start: pb::LinkStart) -> Result<pb::reply::Kind, EngineError> {
+        self.world.ask(pb::command::Kind::LinkStart(start.clone()));
+        let number = match start.phone.chars().filter(char::is_ascii_digit).collect::<String>() {
+            phone if phone.is_empty() => ME.split('@').next().unwrap_or_default().to_string(),
+            phone => phone,
+        };
         let n = {
             let mut device = self.world.device.lock().expect("the demo world");
             if !device.gone {
@@ -1711,14 +1723,20 @@ impl Sender {
                 return;
             }
             tokio::time::sleep(SCANNED).await;
+            let refused = !start.account.is_empty() && number != start.account;
             {
                 let mut device = sender.world.device.lock().expect("the demo world");
                 if !device.gone || device.linking != n {
                     return;
                 }
-                device.gone = false;
+                device.gone = refused;
             }
-            for event in linked_again() {
+            if refused {
+                let refused = pb::Refused { account: start.account, other: number };
+                sender.send(link_step(pb::link::Step::Refused(refused))).await;
+                return;
+            }
+            for event in linked_again(&format!("{number}@s.whatsapp.net")) {
                 if !sender.send(event).await {
                     return;
                 }
@@ -2278,7 +2296,7 @@ mod tests {
         assert_eq!(instance.commands.call(cancel).await, done);
         let late = next_within(&mut rx, SCANNED + Duration::from_millis(500)).await;
         assert!(late.is_none() && !world.linked(), "a cancelled link was taken: {late:?}");
-        let by_phone = pb::LinkStart { phone: "351910000001".into() };
+        let by_phone = pb::LinkStart { phone: "351910000001".into(), ..Default::default() };
         assert_eq!(instance.commands.call(pb::command::Kind::LinkStart(by_phone)).await, done);
         let Some(pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Code(code)) })) =
             next_within(&mut rx, Duration::from_secs(5)).await
@@ -2296,6 +2314,59 @@ mod tests {
             panic!("no connection after the link")
         };
         assert_eq!((connection.state(), connection.jid.as_str()), (pb::connection::State::Connected, ME));
+        assert!(world.linked());
+    }
+
+    /// The step linking says next, within SCANNED and a little more.
+    async fn next_step(rx: &mut mpsc::Receiver<Incoming>) -> pb::link::Step {
+        match next_within(rx, SCANNED + Duration::from_secs(5)).await {
+            Some(pb::event::Kind::Link(pb::Link { step: Some(step) })) => step,
+            other => panic!("not a link step: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn another_numbers_phone_is_refused_as_jaw_engine_refuses_it_unless_jaw_db_keeps_no_account() {
+        let world = Arc::new(World::default());
+        world.device.lock().unwrap().gone = true;
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = DemoEngine::sharing(vec![connected()], world.clone()).start(tx).await.unwrap();
+        assert_eq!(
+            connection_state(next_within(&mut rx, Duration::from_secs(5)).await),
+            pb::connection::State::Unlinked
+        );
+        let done = Ok(pb::reply::Kind::Done(pb::Done {}));
+        let start = |phone: &str, account: &str| {
+            pb::command::Kind::LinkStart(pb::LinkStart { phone: phone.into(), account: account.into() })
+        };
+        assert_eq!(instance.commands.call(start("+351 919 999 999", "351910000001")).await, done);
+        assert!(matches!(next_step(&mut rx).await, pb::link::Step::Code(_)));
+        let refused = pb::Refused { account: "351910000001".into(), other: "351919999999".into() };
+        assert_eq!(next_step(&mut rx).await, pb::link::Step::Refused(refused), "the number typed is another's");
+        assert!(!world.linked(), "and its device isn't kept");
+        assert!(next_within(&mut rx, Duration::from_millis(300)).await.is_none(), "nor anything more said");
+
+        // The made-up account's phone scans the code: the account jaw.db keeps links again.
+        assert_eq!(instance.commands.call(start("", "351910000001")).await, done);
+        assert!(matches!(next_step(&mut rx).await, pb::link::Step::Qr(_)));
+        let pb::link::Step::Done(linked) = next_step(&mut rx).await else { panic!("not linked again") };
+        assert_eq!(linked.jid, ME);
+        assert_eq!(
+            connection_state(next_within(&mut rx, Duration::from_secs(5)).await),
+            pb::connection::State::Connected
+        );
+
+        // A jaw.db that keeps no account's messages takes any number.
+        assert_eq!(instance.commands.call(pb::command::Kind::Logout(pb::Logout {})).await, done);
+        assert_eq!(instance.commands.call(start("351919999999", "")).await, done);
+        assert!(matches!(next_step(&mut rx).await, pb::link::Step::Code(_)));
+        let other = "351919999999@s.whatsapp.net";
+        let pb::link::Step::Done(linked) = next_step(&mut rx).await else { panic!("another number not linked") };
+        assert_eq!(linked.jid, other);
+        let Some(pb::event::Kind::Connection(connection)) = next_within(&mut rx, Duration::from_secs(5)).await else {
+            panic!("no connection after the link")
+        };
+        assert_eq!((connection.state(), connection.jid.as_str()), (pb::connection::State::Connected, other));
         assert!(world.linked());
     }
 

@@ -1243,7 +1243,7 @@ impl View {
                 text.push(Line::from("The QR code needs a bigger window;"));
                 text.push(Line::from("p links with a code typed on the phone instead."));
             }
-            Some(LinkStep::Failed { reason }) => {
+            Some(LinkStep::Failed { reason, .. }) => {
                 text.push(Line::from(Span::styled(format!("Linking failed: {reason}"), Style::new().fg(t.warn))));
             }
             _ => text.push(Line::from(Span::styled("Asking WhatsApp for a code…", Style::new().fg(t.comment)))),

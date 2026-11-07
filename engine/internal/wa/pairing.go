@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
@@ -37,6 +38,23 @@ type pairing struct {
 	timer  *time.Timer
 	// linkFinishing and linkLongest, but in the tests.
 	finishing, longest time.Duration
+	// The number of the account whose messages jaw.db keeps, as the last LinkStart named it, or
+	// empty: the phone may link only that account (mayPair).
+	account string
+}
+
+// keep notes the account LinkStart named.
+func (p *pairing) keep(account string) {
+	p.Lock()
+	defer p.Unlock()
+	p.account = account
+}
+
+// keeps is the account the last LinkStart named.
+func (p *pairing) keeps() string {
+	p.Lock()
+	defer p.Unlock()
+	return p.account
 }
 
 func (p *pairing) wait() time.Duration {
@@ -85,6 +103,22 @@ func (whatsmeowReach) connected(client *whatsmeow.Client) bool { return client.I
 // finished.
 func (e *Engine) half(client *whatsmeow.Client) bool {
 	return client != nil && e.pairing.client.Load() == client
+}
+
+// mayPair is whatsmeow's PrePairCallback: the phone has paired the account jid, and whatsmeow
+// hasn't given the device its ID or saved it yet. Until jaw has a way to choose what becomes of the
+// messages jaw.db keeps, only their account links (LinkStart's account): another is refused here,
+// so nothing of it is kept, and whatsmeow tells WhatsApp, which has the phone say the link failed,
+// disconnects the client and says PairError, when the engine says why (refused).
+func (e *Engine) mayPair(jid types.JID) bool {
+	account := e.pairing.keeps()
+	return account == "" || jid.User == account
+}
+
+// refused tells jawd that the phone paired the account other, which mayPair refused.
+func (e *Engine) refused(other types.JID) {
+	refused := &enginepb.Refused{Account: e.pairing.keeps(), Other: other.User}
+	e.step(&enginepb.Link{Step: &enginepb.Link_Refused{Refused: refused}})
 }
 
 // paired notes that the phone has paired client's device, as whatsmeow's PairSuccess says once

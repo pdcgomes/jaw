@@ -696,9 +696,12 @@ async fn answer(state: &State, request: Request) -> Reply {
         "link.start" => {
             let params = if request.params.is_null() { serde_json::json!({}) } else { request.params };
             match serde_json::from_value::<LinkStart>(params) {
+                // Only the account whose messages jaw.db keeps may link, until there's a way to
+                // choose what becomes of them: the engine refuses another as the phone pairs it.
                 Ok(start) => {
                     let phone = start.phone.unwrap_or_default();
-                    engine(state, id, pb::command::Kind::LinkStart(pb::LinkStart { phone })).await
+                    let account = crate::sync::keeps(state.live());
+                    engine(state, id, pb::command::Kind::LinkStart(pb::LinkStart { phone, account })).await
                 }
                 Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
             }
@@ -1163,6 +1166,54 @@ mod tests {
             })
             .collect();
         assert_eq!(cancels, [pb::LinkCancel { only_linking: true }]);
+    }
+
+    /// `link.start` names the account whose JIDs jaw.db keeps, which alone links there, and none
+    /// for a folder that keeps no account's, which links any.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_start_names_the_account_jaw_db_keeps_and_none_for_a_folder_that_keeps_none() {
+        for (me, account) in [(None, ""), (Some("123456789@lid 351910000001@s.whatsapp.net"), "351910000001")] {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            if let Some(me) = me {
+                store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: me.into() }]).await.unwrap();
+            }
+            let world = Arc::new(crate::engine::demo::World::default());
+            let engine = crate::engine::demo::DemoEngine::sharing(vec![], world.clone());
+            let (events, _incoming) = tokio::sync::mpsc::channel(16);
+            let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+            while supervisor.status().state.name() != "running" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let socket = jaw_proto::local::socket(home.path());
+            let listener = listen(&socket).unwrap();
+            let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
+            let state = State::new(
+                home.path(),
+                Ok(supervisor),
+                Vec::new(),
+                live,
+                Some(store.clone()),
+                broadcast::channel(16).0,
+            );
+            tokio::spawn(serve(Arc::new(state.unwrap()), listener));
+            tokio::task::spawn_blocking(move || {
+                let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap();
+                // The demo's account is linked, so the engine refuses; what it was asked is what counts.
+                let _ = connection.call("link.start", json!({ "phone": "351919999999" }));
+            })
+            .await
+            .unwrap();
+            let starts: Vec<pb::LinkStart> = world
+                .asked()
+                .into_iter()
+                .filter_map(|asked| match asked {
+                    pb::command::Kind::LinkStart(start) => Some(start),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(starts, [pb::LinkStart { phone: "351919999999".into(), account: account.into() }], "{me:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

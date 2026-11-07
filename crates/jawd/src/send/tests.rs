@@ -5565,3 +5565,95 @@ async fn a_pin_answered_was_on_disk_first_and_after_a_crash_goes_once_and_asked_
         "asked again, its answer lost, nothing more goes"
     );
 }
+
+/// What jawd on `socket` answers an interface asking `method` with `params`.
+async fn answer_to(socket: &Path, method: &'static str, params: Value) -> Result<Value, String> {
+    let socket = socket.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0.0.0").map_err(|e| e.to_string())?;
+        connection.call(method, params).map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap()
+}
+
+/// The first `link` push saying `state`, which must come within 30 seconds.
+async fn until_linking(told: &mut broadcast::Receiver<Push>, state: &str) -> jaw_proto::LinkStep {
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Ok(push) = told.recv().await {
+            if push.method == "link" && push.params["state"] == state {
+                return serde_json::from_value(push.params).unwrap();
+            }
+        }
+        panic!("the pushes ended")
+    });
+    waited.await.unwrap_or_else(|_| panic!("linking never said {state}"))
+}
+
+/// The account's JIDs and the account as jaw.db keeps them.
+fn kept_account(db: &Connection) -> anyhow::Result<(String, String)> {
+    let kept = |key: &str| db.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| r.get(0));
+    Ok((kept("me")?, kept("account")?))
+}
+
+/// A jaw.db that keeps an account's messages links only that account, until there's a way to
+/// choose what becomes of them. After `link.logout`, `link.start` names the account to the engine,
+/// which refuses another number's phone as it pairs, and the `link` push says which number the
+/// folder keeps; nothing of the other account is kept, and what was written meanwhile goes once
+/// the account it was written for links again. The audit's probe of 7 November, through jawd's own
+/// requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_logout_another_number_is_refused_with_nothing_of_it_kept_and_the_account_kept_links_again() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    running.chats(&[ANA]).await;
+    let mut told = running.pushes.subscribe();
+    running.world.deliver(demo::connected()).await;
+    until_said(&mut told, "online").await;
+    let socket = jaw_proto::local::socket(home.path());
+    let engine = Ok(running.supervisor.clone().unwrap());
+    let state = crate::state::State::new(
+        home.path(),
+        engine,
+        Vec::new(),
+        running.live.clone(),
+        Some(running.store.clone()),
+        running.pushes.clone(),
+    )
+    .unwrap();
+    tokio::spawn(crate::sock::serve(Arc::new(state), crate::sock::listen(&socket).unwrap()));
+    assert_eq!(answer_to(&socket, "link.logout", Value::Null).await, Ok(json!({})));
+    until_said(&mut told, "logged_out").await;
+    let waiting = running.send(ANA, "written while logged out").await;
+
+    // Another number's phone pairs, the code jawd showed typed on it.
+    assert_eq!(answer_to(&socket, "link.start", json!({ "phone": "351919999999" })).await, Ok(json!({})));
+    let jaw_proto::LinkStep::Failed { reason, belongs_to } = until_linking(&mut told, "failed").await else {
+        unreachable!("a failed step")
+    };
+    assert_eq!(belongs_to.as_deref(), Some("+351910000001"), "{reason}");
+    assert!(reason.contains("the phone linked +351919999999") && reason.contains("JAW_HOME"), "{reason}");
+    let starts: Vec<String> = running
+        .world
+        .asked()
+        .into_iter()
+        .filter_map(|k| match k {
+            pb::command::Kind::LinkStart(start) => Some(start.account),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, ["351910000001"], "link.start names the account jaw.db keeps");
+    assert_eq!(running.query(kept_account).await, (ME.to_string(), String::new()), "nothing of the other kept");
+    assert!(!running.world.linked(), "nor linked");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(running.status(ANA, &waiting).await.as_deref(), Some("pending"), "and nothing sent from it");
+
+    // The account jaw.db keeps links again, its phone scanning the code, and what waited goes.
+    assert_eq!(answer_to(&socket, "link.start", Value::Null).await, Ok(json!({})));
+    let jaw_proto::LinkStep::Done { phone } = until_linking(&mut told, "done").await else { unreachable!("done") };
+    assert_eq!(phone, "+351910000001");
+    running.until_status(ANA, &waiting, "sent").await;
+    let (me, account) = running.query(kept_account).await;
+    assert!(me == ME && account.contains("+351910000001"), "{me}, {account}");
+}

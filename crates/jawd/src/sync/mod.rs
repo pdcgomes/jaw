@@ -818,8 +818,25 @@ fn link_step(link: pb::Link) -> Option<LinkStep> {
             let phone = done.jid.split(['@', ':', '.']).next().unwrap_or_default();
             LinkStep::Done { phone: format!("+{phone}") }
         }
-        pb::link::Step::Failed(reason) => LinkStep::Failed { reason },
+        pb::link::Step::Failed(reason) => LinkStep::Failed { reason, belongs_to: None },
+        pb::link::Step::Refused(refused) => {
+            let (kept, other) = (format!("+{}", refused.account), format!("+{}", refused.other));
+            let reason = format!(
+                "the phone linked {other}, and this folder keeps {kept}'s messages, so only {kept} links here: \
+                link it, or keep {other} in a folder of its own (JAW_HOME)"
+            );
+            LinkStep::Failed { reason, belongs_to: Some(kept) }
+        }
     })
+}
+
+/// The number of the account whose messages jaw.db keeps, which alone links while it keeps them,
+/// as `LinkStart` names it to the engine; empty when it keeps none. The account's JIDs stay through
+/// a logout, as its messages do, so the folder stays that account's.
+pub fn keeps(live: &Shared) -> String {
+    let live = live.lock().expect("live state");
+    let me = live.me.borrow();
+    me.jids.iter().find_map(|jid| jid.strip_suffix("@s.whatsapp.net")).unwrap_or_default().to_string()
 }
 
 /// How many messages `history.more` asks the phone for.

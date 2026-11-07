@@ -626,7 +626,7 @@ fn the_palette_offers_to_log_out_only_while_the_account_is_linked() {
 fn a_link_that_failed_offers_to_link_again_and_enter_starts_afresh() {
     let (mut v, rx) = view_in(State::Linking, 100, 36);
     let why = "WhatsApp didn't finish linking jaw; link again";
-    v.apply(Update::Link(LinkStep::Failed { reason: why.into() }));
+    v.apply(Update::Link(LinkStep::Failed { reason: why.into(), belongs_to: None }));
     let screen = frame(&mut v);
     assert!(screen.contains(&format!("Linking failed: {why}")) && screen.contains("⏎ link again"), "{screen}");
     press(&mut v, &rx, "\n");

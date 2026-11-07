@@ -2,16 +2,24 @@ package wa
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.mau.fi/libsignal/ecc"
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"go.mau.fi/whatsmeow/util/keys"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pdcgomes/jaw/engine/internal/link"
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
@@ -422,6 +430,89 @@ func TestALogoutJawdAsksForLeavesNoDeviceAndOneWhatsAppDoesntAnswerLeavesTheAcco
 	if reply := replyTo(t, jawd, 3, logout()); !refused(reply, "no account is linked", false) {
 		t.Fatalf("a logout with no account linked got %v", reply)
 	}
+}
+
+// pairSuccess is what WhatsApp sends client once the phone of account jid has paired its device,
+// signed for the device's keys as whatsmeow checks it before it asks PrePairCallback.
+func pairSuccess(t *testing.T, client *whatsmeow.Client, jid types.JID) *waBinary.Node {
+	t.Helper()
+	details, err := proto.Marshal(&waAdv.ADVDeviceIdentity{RawID: proto.Uint32(7), Timestamp: proto.Uint64(1_792_000_000), KeyIndex: proto.Uint32(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone := keys.NewKeyPair()
+	signed := ecc.CalculateSignature(ecc.NewDjbECPrivateKey(*phone.Priv), slices.Concat(whatsmeow.AdvAccountSignaturePrefix, details, client.Store.IdentityKey.Pub[:]))
+	identity, err := proto.Marshal(&waAdv.ADVSignedDeviceIdentity{Details: details, AccountSignatureKey: phone.Pub[:], AccountSignature: signed[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, client.Store.AdvSecretKey)
+	mac.Write(identity)
+	container, err := proto.Marshal(&waAdv.ADVSignedDeviceIdentityHMAC{Details: identity, HMAC: mac.Sum(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lid := types.JID{User: "123456789", Device: jid.Device, Server: types.HiddenUserServer}
+	return &waBinary.Node{Tag: "iq", Attrs: waBinary.Attrs{"id": "pair-1", "t": "1792000000"}, Content: []waBinary.Node{{
+		Tag: "pair-success",
+		Content: []waBinary.Node{
+			{Tag: "device-identity", Content: container},
+			{Tag: "device", Attrs: waBinary.Attrs{"jid": jid, "lid": lid}},
+			{Tag: "platform", Attrs: waBinary.Attrs{"name": "android"}},
+		},
+	}}}
+}
+
+func linkStartKeeping(account string) *enginepb.Command {
+	return &enginepb.Command{Kind: &enginepb.Command_LinkStart{LinkStart: &enginepb.LinkStart{Account: account}}}
+}
+
+func TestAFolderThatKeepsAnAccountsMessagesLinksOnlyThatAccountAndAnotherIsRefusedLeavingNothing(t *testing.T) {
+	pedro := types.JID{User: "351910000001", Device: 23, Server: types.DefaultUserServer}
+	bea := types.JID{User: "351919999999", Device: 24, Server: types.DefaultUserServer}
+	fake := &fakeReach{}
+	e, jawd, closeLink := unlinkedEngine(t, fake)
+	defer closeLink()
+	client := e.cli()
+	if reply := replyTo(t, jawd, 1, linkStartKeeping("351910000001")); reply.GetDone() == nil {
+		t.Fatalf("linking got %v", reply)
+	}
+	// Another account pairs: whatsmeow asks PrePairCallback before it gives the device an ID.
+	client.DangerousInternals().HandlePairSuccess(context.Background(), pairSuccess(t, client, bea))
+	refused := recv(t, jawd).GetEvent().GetLink().GetRefused()
+	if refused.GetAccount() != "351910000001" || refused.GetOther() != "351919999999" {
+		t.Fatalf("another account linking said %v", refused)
+	}
+	if said := saidUntilPong(t, jawd, 2); len(said) != 0 {
+		t.Fatalf("then the engine said %v", said)
+	}
+	if e.cli() != client || client.Store.ID != nil || client.Store.Deleted || devicesIn(t, e) != 0 {
+		t.Fatalf("after the refusal: client kept %v, its ID %v, %d devices in session.db", e.cli() == client, client.Store.ID, devicesIn(t, e))
+	}
+
+	// Linking starts again at once, and the account jaw.db keeps pairs on to WhatsApp's
+	// confirmation, which can't go here, so whatsmeow deletes the device and the engine renews.
+	if reply := replyTo(t, jawd, 3, linkStartKeeping("351910000001")); reply.GetDone() == nil {
+		t.Fatalf("linking again got %v", reply)
+	}
+	if connects, _ := fake.asked(); connects != 2 {
+		t.Fatalf("linking twice connected %d times", connects)
+	}
+	client.DangerousInternals().HandlePairSuccess(context.Background(), pairSuccess(t, client, pedro))
+	if failed := recv(t, jawd).GetEvent().GetLink().GetFailed(); !strings.Contains(failed, "pairing confirmation") {
+		t.Fatalf("the account jaw.db keeps didn't pair on: %q", failed)
+	}
+	fresh := renewed(t, e, client)
+
+	// A folder that keeps no account's messages links any.
+	if reply := replyTo(t, jawd, 4, linkStart()); reply.GetDone() == nil {
+		t.Fatalf("linking a folder that keeps none got %v", reply)
+	}
+	fresh.DangerousInternals().HandlePairSuccess(context.Background(), pairSuccess(t, fresh, bea))
+	if failed := recv(t, jawd).GetEvent().GetLink().GetFailed(); !strings.Contains(failed, "pairing confirmation") {
+		t.Fatalf("a folder that keeps none didn't take another account: %q", failed)
+	}
+	renewed(t, e, fresh)
 }
 
 func TestAnInterfacesLinkCancelStopsOnlyALinkThePhoneHasntPaired(t *testing.T) {

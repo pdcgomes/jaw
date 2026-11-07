@@ -212,6 +212,10 @@ pub enum LinkStep {
     },
     Failed {
         reason: String,
+        /// When the phone linked another account than the one whose messages this folder keeps,
+        /// which alone links here: that account's number, as `Done`'s `phone` is written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        belongs_to: Option<String>,
     },
 }
 

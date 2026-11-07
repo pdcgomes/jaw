@@ -147,6 +147,7 @@ func (e *Engine) newClient(device *store.Device) (*whatsmeow.Client, error) {
 			return nil, fmt.Errorf("can't use the proxy in HTTPS_PROXY: %w", err)
 		}
 	}
+	client.PrePairCallback = func(jid types.JID, _, _ string) bool { return e.mayPair(jid) }
 	client.AddEventHandler(func(evt any) { e.handleFrom(client, evt) })
 	return client, nil
 }
@@ -368,8 +369,12 @@ func (e *Engine) say(client *whatsmeow.Client, evt any) {
 	case *events.PairSuccess:
 		e.paired(client, v)
 	case *events.PairError:
-		// The QR codes' channel says why, after this; whatever device pairing left, with its ID
-		// or deleted by whatsmeow, goes first, so linking can start again.
+		// The QR codes' channel says why, after this, but for another account than jaw.db's,
+		// which the engine refused (mayPair); whatever device pairing left, with its ID or
+		// deleted by whatsmeow, goes first, so linking can start again.
+		if errors.Is(v.Error, whatsmeow.ErrPairRejectedLocally) {
+			e.refused(v.ID)
+		}
 		if client.Store.ID != nil || client.Store.Deleted {
 			e.clear(client)
 		}
@@ -515,7 +520,7 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	}
 	switch c := cmd.Kind.(type) {
 	case *enginepb.Command_LinkStart:
-		return e.linkStart(c.LinkStart.Phone)
+		return e.linkStart(c.LinkStart.Phone, c.LinkStart.Account)
 	case *enginepb.Command_LinkCancel:
 		if c.LinkCancel.GetOnlyLinking() && client.Store.ID != nil {
 			return done()
@@ -588,9 +593,10 @@ func (e *Engine) step(step *enginepb.Link) {
 const notCleared = "the device the last account or link left isn't cleared yet; try again in a moment, or once jawd has started the engine again"
 
 // linkStart links an account: by QR codes, or by a code to type on the phone when phone is set,
-// which needs the connection up first, as whatsmeow's PairPhone says. A link the phone has paired
-// that can't finish now, its client not connected, is cleared first; one that's connected may.
-func (e *Engine) linkStart(phone string) *enginepb.Reply {
+// which needs the connection up first, as whatsmeow's PairPhone says; only account when jaw.db
+// keeps its messages (mayPair). A link the phone has paired that can't finish now, its client not
+// connected, is cleared first; one that's connected may.
+func (e *Engine) linkStart(phone, account string) *enginepb.Reply {
 	client := e.cli()
 	if client == e.retired.Load() || client.Store.Deleted {
 		return failure(notCleared, true)
@@ -607,6 +613,7 @@ func (e *Engine) linkStart(phone string) *enginepb.Reply {
 	if client.Store.ID != nil {
 		return failure("an account is already linked; log out first", false)
 	}
+	e.pairing.keep(account)
 	e.reach.disconnect(client)
 	codes, err := client.GetQRChannel(e.ctx)
 	if err != nil {
@@ -635,7 +642,10 @@ func (e *Engine) linkStart(phone string) *enginepb.Reply {
 			case whatsmeow.QRChannelClientOutdated.Event:
 				e.step(&enginepb.Link{Step: &enginepb.Link_Failed{Failed: "WhatsApp wants a newer version of jaw"}})
 			case whatsmeow.QRChannelEventError:
-				e.step(&enginepb.Link{Step: &enginepb.Link_Failed{Failed: fmt.Sprintf("linking failed: %v", item.Error)}})
+				// Another account than jaw.db's was said as the engine refused it (refused).
+				if !errors.Is(item.Error, whatsmeow.ErrPairRejectedLocally) {
+					e.step(&enginepb.Link{Step: &enginepb.Link_Failed{Failed: fmt.Sprintf("linking failed: %v", item.Error)}})
+				}
 			default:
 				e.step(&enginepb.Link{Step: &enginepb.Link_Failed{Failed: fmt.Sprintf("linking stopped: %s", item.Event)}})
 			}

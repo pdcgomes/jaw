@@ -108,7 +108,18 @@ message Link {
     Linked done = 3;
     // Why linking stopped, as a sentence.
     string failed = 4;
+    // The phone paired another account than LinkStart's `account`, which the engine refused as it
+    // paired, before whatsmeow gave the device an ID or saved it: nothing of that account is kept,
+    // and the phone says the link failed. LinkStart starts afresh.
+    Refused refused = 5;
   }
+}
+
+message Refused {
+  // The account LinkStart named, whose messages jaw.db keeps, and the one the phone paired: their
+  // numbers, in international form with no plus or spaces.
+  string account = 1;
+  string other = 2;
 }
 
 message QrCode {
@@ -573,6 +584,10 @@ message Ping {}
 message LinkStart {
   // The phone number, in international form with no plus or spaces.
   string phone = 1;
+  // The number of the account whose messages jaw.db keeps, written as `phone` is, when it keeps
+  // one: the phone may link only that account, and another is refused as it pairs (Link's
+  // `refused`). Empty, any account links.
+  string account = 2;
 }
 
 // Disconnects from WhatsApp, as jawd asks before it stops.

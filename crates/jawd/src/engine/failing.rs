@@ -215,7 +215,7 @@ async fn react(shared: &Arc<Shared>, world: &Arc<World>, failure: Failure, on: b
         // account while it's on, and holds what an engine started meanwhile says, its script whole.
         (Failure::Logout, false) => {
             world.phone_linked();
-            for event in demo::linked_again() {
+            for event in demo::linked_again(demo::ME) {
                 shared.tell(event).await;
             }
         }
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!((out.state(), out.reason.as_str()), (pb::connection::State::LoggedOut, LOGGED_OUT));
         let refused = instance.commands.call(send("3EB0FAILING0003")).await;
         assert_eq!(refused, Err(EngineError::Failed { message: "not logged in".into(), retry: false }));
-        let start = pb::command::Kind::LinkStart(pb::LinkStart { phone: String::new() });
+        let start = pb::command::Kind::LinkStart(pb::LinkStart::default());
         assert!(matches!(instance.commands.call(start).await, Ok(pb::reply::Kind::Done(_))));
         let pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Qr(qr)) }) = next(&mut rx).await else {
             panic!("no QR code")
