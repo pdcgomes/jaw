@@ -48,6 +48,27 @@ func scratchPreferences(_ name: String) throws -> Preferences {
     #expect(chosen == [.panes, .messages, .appearance] && tabs.pane == .appearance)
 }
 
+@MainActor @Test func `a taller pane keeps Settings' bottom edge on the screen, raising the window as far as the screen's top allows`() throws {
+    let tabs = SettingsTabs(preferences: try scratchPreferences("settings-on-screen"), showing: .panes)
+    let window = NSWindow(contentViewController: tabs)
+    window.styleMask = [.titled, .closable]
+    window.isReleasedWhenClosed = false
+    window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+    defer { window.close() }
+    tabs.fit(.panes, animated: false)
+    let room = NSRect(x: window.frame.minX - 100, y: window.frame.minY - 10, width: 1000, height: 2000)
+    tabs.fit(.appearance, animated: false, within: room)
+    #expect(window.contentView?.frame.size == SettingsPane.appearance.size)
+    #expect(window.frame.minY == room.minY, "Panes left 10 points over the Dock, Appearance's 420 more raise the window to rest on it")
+    let top = window.frame.maxY
+    tabs.fit(.panes, animated: false, within: room)
+    #expect(window.frame.maxY == top, "a shorter pane keeps the top edge where it is")
+    let short = NSRect(x: room.minX, y: window.frame.minY - 10, width: 1000, height: window.frame.height + 110)
+    tabs.fit(.appearance, animated: false, within: short)
+    #expect(window.frame.maxY == short.maxY && window.contentView?.frame.size == SettingsPane.appearance.size,
+            "with 100 points over its top, it's raised by those, its bottom left off a screen too short for it")
+}
+
 @MainActor @Test func `⌘W closes Settings' window before the menu bar's Close Pane, the main window's, can take it`() throws {
     let window = SettingsWindow(contentViewController: SettingsTabs(preferences: try scratchPreferences("settings-close"), showing: .panes))
     window.styleMask = [.titled, .closable]

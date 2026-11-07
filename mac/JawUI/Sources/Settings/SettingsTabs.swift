@@ -54,15 +54,25 @@ public final class SettingsTabs: NSTabViewController {
     }
 
     /// Sizes the window so its content is `pane`'s size, keeping the window's top edge where it is,
-    /// whatever height its title bar and toolbar have. The panes give no preferred size of their own,
+    /// whatever height its title bar and toolbar have, but raising it where its bottom edge would go
+    /// below the room the screen leaves for windows, above the Dock, as far as that room's top allows,
+    /// since AppKit keeps only a title bar on the screen. The panes give no preferred size of their own,
     /// so this is the one place the window is sized.
     public func fit(_ pane: SettingsPane, animated: Bool) {
+        fit(pane, animated: animated, within: isViewLoaded ? view.window?.screen?.visibleFrame : nil)
+    }
+
+    /// `fit(_:animated:)` on a screen that leaves `visible` for windows.
+    func fit(_ pane: SettingsPane, animated: Bool, within visible: NSRect?) {
         guard isViewLoaded, let window = view.window, let content = window.contentView else { return }
         var frame = window.frame
         let taller = pane.size.height - content.frame.height
         frame.origin.y -= taller
         frame.size.height += taller
         frame.size.width += pane.size.width - content.frame.width
+        if let visible, frame.minY < visible.minY {
+            frame.origin.y += min(visible.minY - frame.minY, max(visible.maxY - frame.maxY, 0))
+        }
         window.setFrame(frame, display: true, animate: animated && !Motion.reduced())
     }
 

@@ -234,6 +234,10 @@ func lastWord(in row: NSRect, of host: NSView) throws -> NSPoint {
     let host = NSHostingView(rootView: AppearancePane(preferences: preferences))
     host.frame = NSRect(x: 300, y: 0, width: size.width, height: size.height)
     window.contentView?.addSubview(host)
+    func views(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { views($0) }
+    }
+    #expect(await eventually { views(host).contains { $0 is ArrowCatcher } }, "the pane's catcher is in the window")
     try await Task.sleep(for: .milliseconds(500))
     #expect(window.firstResponder === beside, "a view beside the pane, outside its hosting view, keeps the keys as the pane opens")
     try await click(NSPoint(x: 300 + Space.xs, y: size.height - Space.xs), in: window)
@@ -271,6 +275,47 @@ func lastWord(in row: NSRect, of host: NSView) throws -> NSPoint {
     try await click(light, in: window)
     #expect(preferences.appearance == .light, "a click on Light, the last radio button's word, sets the appearance, as it did")
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "and gives the gallery the keys")
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `the arrows' run ends as Settings opens and at a click on the pane's ground, so the next arrow goes on from what they showed`() async throws {
+    let preferences = try scratchPreferences("gallery-run-ends")
+    preferences.served = try allOmarchy()
+    let (window, host) = appearanceWindow(preferences)
+    defer { window.close() }
+    #expect(await eventually { window.firstResponder is ArrowCatcher })
+    let (left, right): (UInt16, UInt16) = (123, 124)
+    let start = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
+    preferences.slots = start
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "the arrows from Catppuccin rest on Tokyo Night, filling both slots")
+    preferences.choosing = nil
+    try await press(right, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:catppuccin", light: "jaw"),
+            "Settings opening ends the run, keeping what the arrows showed, so → goes on from Tokyo Night in both, and White doesn't come back")
+
+    preferences.slots = start
+    try await press(left, in: window)
+    window.makeFirstResponder(nil)
+    try await click(NSPoint(x: Space.xs, y: host.bounds.height - Space.xs), in: window)
+    #expect(await eventually { window.firstResponder is ArrowCatcher })
+    try await press(right, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:catppuccin", light: "jaw"), "and so does a click on the pane's ground")
+}
+
+@MainActor @Test func `the gallery's list is worked out once jawd's themes are in, not again at each arrow or click, and again at each change of the slots while they aren't`() throws {
+    let preferences = try scratchPreferences("gallery-listed")
+    preferences.served = try allOmarchy()
+    let themes = preferences.themes
+    let catppuccin = try #require(Gallery(themes, for: .dark, omarchyLine: nil).moving(from: "jaw", .right))
+    preferences.preview(catppuccin, for: .dark)
+    #expect(preferences.listed != nil, "an arrow leaves the list as it was, as it doesn't rest on the slots once jawd has served them")
+    preferences.choose(catppuccin, for: .dark, only: false)
+    #expect(preferences.listed != nil && preferences.themes == themes, "nor does a click, which ends the arrows' run")
+    let waiting = Preferences(defaults: preferences.defaults, accent: .blue)
+    #expect(waiting.themes.filter { $0.source == .omarchy }.map(\.id) == ["omarchy:catppuccin"])
+    waiting.slots = Slots(dark: "redlamp:nord", light: "jaw")
+    #expect(waiting.listed == nil, "while jawd's themes aren't in, the list is the slots' copies', so it's worked out again")
+    #expect(waiting.themes.allSatisfy { $0.source != .omarchy })
 }
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `a click on the theme chosen for the slot shown changes nothing, and while the arrows run a click chooses from where they started`() async throws {

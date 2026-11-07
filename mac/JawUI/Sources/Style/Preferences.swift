@@ -71,7 +71,7 @@ public final class Preferences {
     public var slots: Slots {
         didSet {
             made = [:]
-            listed = nil
+            if served == nil { listed = nil }
             arrowsFrom = nil
             remember()
             if slots != oldValue {
@@ -124,7 +124,7 @@ public final class Preferences {
     /// click in the pane, choosing for another slot and Settings opening. Not kept.
     public var arrowsFrom: Slots? = nil {
         didSet {
-            if arrowsFrom != oldValue { listed = nil }
+            if arrowsFrom != oldValue, served == nil { listed = nil }
         }
     }
 
@@ -142,7 +142,8 @@ public final class Preferences {
     @ObservationIgnored let given: Set<String>
     @ObservationIgnored public var changed: [() -> Void] = []
     /// Each slot's roles and every theme there is, worked out once until what they rest on changes,
-    /// since the app reads its style on every layout.
+    /// since the app reads its style on every layout and each of the gallery's arrows writes the slots:
+    /// the list rests on the slots, and the arrows' start, only while jawd's themes aren't in.
     @ObservationIgnored var made: [Slot: Roles] = [:]
     @ObservationIgnored var listed: [Theme]?
     /// Whether what changes is written to `defaults`: a snapshot's preferences aren't, as every
@@ -208,8 +209,9 @@ public final class Preferences {
         Style(roles: roles(dark ? .dark : .light), look: look, density: density, textSize: textSize, font: font)
     }
 
-    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. What
-    /// it rests on is read before what's made, so a view drawn from it redraws as that changes.
+    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme or it
+    /// has no half of the slot's mode, as `Catalog.roles` has it. What it rests on is read before what's
+    /// made, so a view drawn from it redraws as that changes.
     public func roles(_ slot: Slot) -> Roles {
         let slots = self.slots, accent = self.accent, served = self.served
         if let roles = made[slot] { return roles }
