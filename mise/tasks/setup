@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="One-time setup for a clone: the pre-push hook, in the hooks folder every worktree shares, which refuses a push to main whose data-layer commits name no approved audit"
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+hooks="$(git rev-parse --git-common-dir)/hooks"
+mkdir -p "$hooks"
+install -m 755 scripts/pre-push "$hooks/pre-push"
+echo "==> $hooks/pre-push installed"
