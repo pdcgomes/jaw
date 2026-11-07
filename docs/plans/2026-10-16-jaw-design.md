@@ -410,4 +410,4 @@ When many unread messages pile up, a catch-up feed says what's going on in each 
 - The engine link is a hop on every message: measured in M0, and gone if whatsapp-rust wins in M10.
 - whatsapp-rust is at 0.7, with breaking changes landing often: pinned to a commit, and the default only if M10 says so.
 - Sixel and iTerm2 resend image data when an image moves: list images stay small there.
-- macOS ties microphone permission to jawd's binary: `mise run install` signs it with a stable identity, so it isn't asked again after each build.
+- macOS ties microphone permission to jawd's binary: `mise run mac` signs the app's jawd with a stable identity, so it isn't asked again after each build.

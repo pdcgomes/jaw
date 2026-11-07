@@ -580,7 +580,7 @@ with
 - [ ] **Step 4:** In `mac/scripts/test-built-from`, replace `as scripts/release.sh has it made` with `as mise run release has it made`, and commit.
 
 ```bash
-git add -A mise/tasks/release scripts/release.sh packaging/homebrew/jaw.rb mac/scripts/test-built-from
+git add -A mise/tasks/release packaging/homebrew/jaw.rb mac/scripts/test-built-from
 git commit -q -m "mise run release, as Redlamp's release is, in place of scripts/release.sh, moved as it was: the tarball, its sha256 and the formula in target/dist/, then the commands that publish them, printed for you to run; and the formula runs mise/tasks/install with PREFIX set to its prefix, so Homebrew needs no mise, and with it no Tuist, and lays out the same files for its test"
 ```
 

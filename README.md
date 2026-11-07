@@ -74,7 +74,7 @@ jaw's tasks run with mise from anywhere in a checkout, and `mise tasks` lists th
 | `mise run fmt` | gofmt and rustfmt, writing |
 | `mise run install`, `uninstall` | release builds into `PREFIX`, `/usr/local` unless it's set, and out again |
 | `mise run perf` | the budgets below, as a table in `target/perf/` (`-- --quick` leaves out the slowest) |
-| `mise run proto`, `sync-protos`, `check-generated` | the engine's generated code and WhatsApp's protobufs, and the check that both are as committed |
+| `mise run proto`, `sync-protos`, `check-generated` | the engine's generated code and WhatsApp's protobufs, and the check that the generated code is as committed and `proto/whatsapp/` as `engine/go.mod` pins |
 | `mise run check-audit`, `check-parity` | the data layer's audits, and the Mac's parity with the terminal |
 | `mise run mac`, `mac-test` | Jaw.app, signed, in `mac/build/release/`, and the Mac's tests |
 | `mise run setup` | the pre-push hook, once for a clone |
