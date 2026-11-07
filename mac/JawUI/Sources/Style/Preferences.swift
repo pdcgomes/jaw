@@ -94,8 +94,9 @@ public final class Preferences {
         }
     }
 
-    /// Omarchy's themes as jawd served them this run, nil until it has. They stay when jawd goes away,
-    /// as its answer still holds. The app is told only when what a slot draws changes, so jawd's first
+    /// Omarchy's themes as jawd served them this run, nil until it has, with a slot's own from its copy
+    /// where this Mac couldn't read jawd's (`serve(_:unread:)`). They stay when jawd goes away, as its
+    /// answer still holds. The app is told only when what a slot draws changes, so jawd's first
     /// answer, which comes as a launch's first rows do, restyles no window while the slots hold Jaw's or
     /// Redlamp's themes or a copy whose colours jawd serves as they were; Settings, which observes
     /// this, redraws either way.
@@ -108,6 +109,14 @@ public final class Preferences {
             remember()
             if Slot.allCases.map({ roles($0) }) != drawn { tell() }
         }
+    }
+
+    /// Gives `served` jawd's answer to `themes`, and with it the slots' own from their copies where jawd
+    /// served them in a shape this Mac can't read (`unread`, by ID), so such a slot goes on drawing its
+    /// theme, and keeps its copy, rather than taking it for one jawd no longer serves.
+    public func serve(_ themes: [OmarchyTheme], unread: Set<String>) {
+        let kept = remembered(slots, or: arrowsFrom).filter { copy in unread.contains(copy.id) && !themes.contains { $0.id == copy.id } }
+        served = kept.isEmpty ? themes : (themes + kept).sorted { $0.id < $1.id }
     }
 
     /// What the gallery's Omarchy section says while jawd hasn't served its themes.

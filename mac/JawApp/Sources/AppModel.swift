@@ -340,8 +340,9 @@ final class AppModel {
             }
         case let .statusRead(status):
             read(status)
-        case let .themes(served):
-            preferences.served = served.map { OmarchyTheme(id: $0.id, name: $0.name, dark: $0.mode == .dark, colours: $0.colors) }
+        case let .themes(served, unread):
+            preferences.serve(served.map { OmarchyTheme(id: $0.id, name: $0.name, dark: $0.mode == .dark, colours: $0.colors) },
+                              unread: Set(unread))
         case let .noThemes(older, why):
             preferences.omarchyState = older ? .older : .refused(why)
         case .push, .chats, .layout, .folders, .roster:

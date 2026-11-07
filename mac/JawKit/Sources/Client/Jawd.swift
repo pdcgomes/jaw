@@ -469,8 +469,8 @@ public final class Jawd {
             out.append(.members(chat: chat, info.members))
         case let (.status, .status(status)):
             out.append(.status(status))
-        case let (.themes, .themes(themes)):
-            out.append(.themes(themes))
+        case let (.themes, .themes(themes, unread)):
+            out.append(.themes(themes, unread: unread))
         case let (.statusRead, .status(status)):
             out.append(.statusRead(status))
         case let (.layout, .layout(kept)):
@@ -883,8 +883,9 @@ public enum JawUpdate: Sendable {
     case chatStarted(ChatRow)
     case notStarted(String)
     case status(Status)
-    /// Omarchy's themes, as `themes` answered.
-    case themes([ServedTheme])
+    /// Omarchy's themes, as `themes` answered, and the IDs of those it served in a shape this Mac can't
+    /// read, whose copies the slots that hold them keep.
+    case themes([ServedTheme], unread: [String])
     /// jawd didn't serve its themes: an older one, which doesn't know `themes`, or another refusal, in
     /// jawd's words.
     case noThemes(older: Bool, why: String)

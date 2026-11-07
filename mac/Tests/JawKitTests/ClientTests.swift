@@ -194,7 +194,7 @@ func helloed(_ all: [JawUpdate]) -> Int {
         _ = await drain(jawd) { helloed($0) == 1 }
         jawd.themes()
         let all = await drain(jawd) { all in all.contains { if case .themes = $0 { true } else { false } } }
-        let themes: [ServedTheme] = all.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        let themes: [ServedTheme] = all.compactMap { if case let .themes(t, _) = $0 { t } else { nil } }.first ?? []
         #expect(themes.map(\.id) == ["catppuccin", "catppuccin-latte"] && themes.map(\.mode) == [.dark, .light])
         #expect(requests(fake, "themes") == [.null], "asked with no params")
         let older = jawd.refused(.themes, .jawd(JawError(code: ErrorCode.unknownMethod, message: "unknown method: themes")))

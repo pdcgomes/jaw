@@ -514,11 +514,12 @@ func pushed(_ line: String) -> Incoming {
     line["result"] = .object(result)
     let decoder = JSONDecoder()
     decoder.userInfo[.want] = WantLookup { _ in .reply(.themes) }
-    guard case let .reply(_, .themes(read)) = IncomingLine.decode(try JSONEncoder().encode(JSONValue.object(line)), with: decoder) else {
+    guard case let .reply(_, .themes(read, unread)) = IncomingLine.decode(try JSONEncoder().encode(JSONValue.object(line)), with: decoder) else {
         Issue.record("the answer sank with its bad theme")
         return
     }
     #expect(read.map(\.id) == ["catppuccin", "catppuccin-latte"], "a mode this Mac doesn't know leaves out only its theme")
+    #expect(unread == ["dim"], "and keeps its ID, so a slot holding it keeps its copy")
     line["result"] = .object(["themes": .string("every one")])
     guard case let .bad(_, why) = IncomingLine.decode(try JSONEncoder().encode(JSONValue.object(line)), with: decoder) else {
         Issue.record("an answer with no list of themes read as one")
@@ -528,7 +529,7 @@ func pushed(_ line: String) -> Incoming {
 }
 
 @Test func `themes' answer decodes as jaw-proto serves Omarchy's themes, each with its mode and its 25 colours`() throws {
-    guard case let .reply(_, .themes(themes)) = try incoming("themes.result.json", .reply(.themes)) else {
+    guard case let .reply(_, .themes(themes, _)) = try incoming("themes.result.json", .reply(.themes)) else {
         Issue.record("not themes")
         return
     }

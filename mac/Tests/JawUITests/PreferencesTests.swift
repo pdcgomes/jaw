@@ -175,6 +175,26 @@ func omarchy(_ id: String) throws -> OmarchyTheme {
             "and is once the slot holds its theme")
 }
 
+@MainActor @Test func `a slot's Omarchy theme that jawd serves in a shape this Mac can't read keeps its copy, and the slot draws it`() throws {
+    let suite = "jaw.tests.slots-unreadable"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let gruvbox = try omarchy("gruvbox"), others = try allOmarchy().filter { $0.id != "gruvbox" }
+    let first = Preferences(defaults: defaults, accent: .blue)
+    first.served = try allOmarchy()
+    first.slots = Slots(dark: "omarchy:gruvbox", light: "jaw")
+    let copy = try #require(defaults.dictionary(forKey: "themeDarkColours") as? [String: String])
+    let next = Preferences(defaults: defaults, accent: .blue)
+    next.serve(others, unread: ["gruvbox"])
+    #expect(defaults.dictionary(forKey: "themeDarkColours") as? [String: String] == copy,
+            "a newer jawd's Gruvbox this Mac can't read is no theme jawd stopped serving, so its copy stays")
+    #expect(next.roles(.dark) == Omarchy.roles(gruvbox.colours, dark: true)?.held(), "and the slot goes on drawing it")
+    #expect(next.themes.filter { $0.source == .omarchy }.count == 23, "its card beside the 22 this Mac reads, from its copy")
+    next.serve(others, unread: [])
+    #expect(defaults.dictionary(forKey: "themeDarkColours") == nil && next.roles(.dark) == Catalog.jaw.dark,
+            "while one jawd no longer serves drops its copy, as before")
+}
+
 @MainActor @Test func `until jawd serves its themes, the Omarchy section says why, and nothing while the app connects or asks`() throws {
     #expect(OmarchyState(.waiting).line == nil && OmarchyState(.up).line == nil)
     #expect(OmarchyState(.starting(failed: nil)).line == "Starting jawd")

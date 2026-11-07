@@ -326,7 +326,7 @@ struct LiveTests {
         #expect(await held.until { h in h.updates.contains { if case .hello = $0 { true } else { false } } })
         held.jawd.themes()
         #expect(await held.until { h in h.updates.contains { if case .themes = $0 { true } else { false } } })
-        let themes: [ServedTheme] = held.updates.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        let themes: [ServedTheme] = held.updates.compactMap { if case let .themes(t, _) = $0 { t } else { nil } }.first ?? []
         let folder = repo.appending(path: "protocol/themes")
         let files = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".toml") }
             .map { String($0.dropLast(5)) }.sorted()

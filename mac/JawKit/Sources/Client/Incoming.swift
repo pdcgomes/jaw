@@ -18,8 +18,8 @@ public enum Reply: Sendable, Hashable {
     case saved(Saved)
     /// The folder made, or nil when it went before jawd read it back.
     case folder(FolderRow?)
-    /// Omarchy's themes, in the order jawd serves them.
-    case themes([ServedTheme])
+    /// Omarchy's themes, in the order jawd serves them, and the IDs of those this Mac couldn't read.
+    case themes([ServedTheme], unread: [String])
 }
 
 /// What the reader expects of the reply with an id: looked up as the line decodes.
@@ -105,7 +105,8 @@ struct IncomingLine: Decodable {
                 case .reply(.themes):
                     // Said in the Omarchy section, where the decoder's words would mean nothing.
                     do {
-                        value = try .reply(id, .themes(c.decode(ServedThemes.self, forKey: .result).themes))
+                        let served = try c.decode(ServedThemes.self, forKey: .result)
+                        value = .reply(id, .themes(served.themes, unread: served.unread))
                     } catch {
                         value = .bad(id, "jawd's answer couldn't be read")
                     }
