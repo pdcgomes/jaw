@@ -335,7 +335,7 @@ python3 scripts/perf.py "$@"
 ```
 
 - [ ] **Step 7:** `chmod +x mise/tasks/check-audit mise/tasks/check-parity mise/tasks/prune-builds mise/tasks/clean mise/tasks/perf`.
-- [ ] **Step 8: Run them.** `mise run check-audit && echo audited`. Expected: `audited`. `mise run check-parity`: exit 0, ending "The Mac uses what the terminal doesn't: …". `mise run check-parity -- --table`: the table of requests and pushes. `mise run prune-builds -- --dry-run`: counts, nothing deleted. `mise run perf -- --small`: exit 0, and a table in `target/perf/`. `clean` waits for Task 18.
+- [ ] **Step 8: Run them.** `mise run check-audit && echo audited`. Expected: `audited`. `mise run check-parity`: exit 0, ending "The Mac uses what the terminal doesn't: …". `mise run check-parity -- --table`: the table of requests and pushes. `mise run prune-builds -- --dry-run`: counts, nothing deleted. `mise run perf -- --small`: a table in `target/perf/`, and exit 1 with only "photo out" and "steady" failing, as `make perf` fails on main (found on 6 November: main's media-out bench, `crates/jawd/src/media/outgoing/bench.rs`, says hello with protocol 1, which jawd has refused since 2 November, and steady's quiet 15 s never comes); any other failing step is this branch's to explain. `clean` waits for Task 18.
 - [ ] **Step 9: Commit.**
 
 ```bash
