@@ -56,6 +56,7 @@ jobs:
       - name: ffmpeg
         if: runner.os == 'macOS'
         run: command -v ffmpeg || brew install ffmpeg
-      - run: make lint
-      - run: make test
-      - run: make check-generated
+      - uses: jdx/mise-action@v2
+      - run: mise run lint
+      - run: mise run test
+      - run: mise run check-generated
