@@ -87,7 +87,7 @@ The formula (`packaging/homebrew/jaw.rb`) runs the task itself:
 
 ```ruby
   def install
-    ENV["PREFIX"] = prefix
+    ENV["PREFIX"] = prefix.to_s
     system "mise/tasks/install"
   end
 ```
