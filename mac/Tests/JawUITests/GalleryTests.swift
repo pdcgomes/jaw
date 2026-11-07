@@ -7,8 +7,9 @@ import Testing
 /// The Appearance pane's gallery and slots: a slot's half of every theme that has one, in Jaw's,
 /// Omarchy's and Redlamp's sections; the Omarchy section while jawd's themes aren't in; where the
 /// arrows go, and the arrows pressed in a window, choosing and scrolling with no click first, each
-/// card previewed from the slots they started from, so nothing the owner had is lost, and a click
-/// anywhere in the pane ending their run and giving the gallery the keys back; what each slot's tile says; what
+/// card previewed from the slots they started from, so nothing the owner had is lost, the keys taken as
+/// the pane opens but not from a view beside it, and a click anywhere in the pane ending their run and
+/// giving the gallery the keys back; what each slot's tile says; what
 /// VoiceOver reads a card as; and every card for each slot compared with a reference picture, so a
 /// change to any mapping shows.
 
@@ -186,6 +187,39 @@ func card(_ id: String, _ half: Slot = .dark, of preferences: Preferences, in ho
     try await press(left, in: later)
     #expect(next.slots == Slots(dark: "omarchy:catppuccin", light: "omarchy:white"),
             "and ← back gives both back as they were, though jawd isn't there to serve them")
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `the gallery takes the keys as its pane opens in Settings, but leaves them with a view outside the pane, as the harness's scene list, until a click in the pane`() async throws {
+    let preferences = try scratchPreferences("gallery-keys-beside")
+    let tabs = SettingsTabs(preferences: preferences, showing: .appearance)
+    let settings = SettingsWindow(contentViewController: tabs)
+    settings.styleMask = [.titled, .closable]
+    settings.isReleasedWhenClosed = false
+    settings.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+    settings.orderFront(nil)
+    defer { settings.close() }
+    #expect(await eventually { settings.firstResponder is ArrowCatcher }, "Settings opening on Appearance, the gallery has the keys")
+    tabs.show(.panes)
+    tabs.show(.appearance)
+    #expect(await eventually { settings.firstResponder is ArrowCatcher }, "and again as its tab is chosen after another's, the gallery having had them")
+
+    let size = SettingsPane.appearance.size
+    let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: -30000, y: -30000), size: NSSize(width: 300 + size.width, height: size.height)),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let beside = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: size.height))
+    window.contentView?.addSubview(beside)
+    window.orderFront(nil)
+    defer { window.close() }
+    window.makeFirstResponder(beside)
+    try #require(window.firstResponder === beside)
+    let host = NSHostingView(rootView: AppearancePane(preferences: preferences))
+    host.frame = NSRect(x: 300, y: 0, width: size.width, height: size.height)
+    window.contentView?.addSubview(host)
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(window.firstResponder === beside, "a view beside the pane, outside its hosting view, keeps the keys as the pane opens")
+    try await click(NSPoint(x: 300 + Space.xs, y: size.height - Space.xs), in: window)
+    #expect(await eventually { window.firstResponder is ArrowCatcher }, "until a click in the pane gives them to the gallery")
 }
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `a click anywhere in the pane gives the gallery the keys back, a card's still choosing it and ending the arrows' run, and a radio button's setting the appearance`() async throws {
