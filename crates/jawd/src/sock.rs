@@ -714,7 +714,10 @@ async fn answer(state: &State, request: Request) -> Reply {
                 ),
             },
         },
-        "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
+        // An interface leaving its linking screen stops only a link the phone hasn't paired: once
+        // the device has its ID, the link finishes or fails by itself, and a linked account stays
+        // connected.
+        "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel { only_linking: true })).await,
         "history.more" => history_more(state, id, request.params).await,
         method if crate::organise::METHODS.contains(&method) => match state.store() {
             Some(store) => match crate::organise::call(store, method, request.params).await {

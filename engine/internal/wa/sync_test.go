@@ -27,7 +27,7 @@ func handled(t *testing.T, e *Engine, jawd *link.Link, evt any) (*enginepb.Event
 	t.Helper()
 	returned := make(chan struct{})
 	go func() {
-		e.handle(evt)
+		e.handle(e.cli(), evt)
 		close(returned)
 	}()
 	frame, err := jawd.Recv()

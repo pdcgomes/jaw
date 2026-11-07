@@ -89,12 +89,17 @@ message Connection {
   string reason = 2;
   // When a temporary ban ends, in milliseconds since the epoch.
   int64 until_ms = 3;
-  // The linked account, once there is one.
+  // The linked account, once there is one: not while a link the phone has paired is finishing.
   string jid = 4;
   string lid = 5;
   string push_name = 6;
 }
 
+// Once the phone has paired, linking finishes only when the engine connects with the new device:
+// `done` comes then, just before the CONNECTED that names the account. Until then the device is
+// half made, and no connection event names it; if WhatsApp refuses it, or it isn't connected a
+// minute after pairing, the engine clears it from session.db and says `failed`, so LinkStart
+// starts afresh.
 message Link {
   oneof step {
     QrCode qr = 1;
@@ -562,14 +567,25 @@ message HistoryRequest {
 
 message Ping {}
 
-// Links an account: by QR code, or by a code typed on the phone when `phone` is given.
+// Links an account: by QR code, or by a code typed on the phone when `phone` is given. Refused
+// while an account is linked, and while a link the phone has paired is connected and finishing; a
+// half-made device whose client isn't connected is cleared first.
 message LinkStart {
   // The phone number, in international form with no plus or spaces.
   string phone = 1;
 }
 
-message LinkCancel {}
+// Disconnects from WhatsApp, as jawd asks before it stops.
+message LinkCancel {
+  // Stops only the codes of a link the phone hasn't paired yet: an interface leaving its linking
+  // screen asks this, and a device pairing has given an ID, linked or finishing its link, stays
+  // connected.
+  bool only_linking = 1;
+}
 
+// Logs the linked account out with WhatsApp, which removes the device, then deletes the device
+// from session.db; Done says nothing more is to come, as whatsmeow says nothing after it. Refused
+// when no account is linked, or a link is still finishing.
 message Logout {}
 
 // Downloads one history blob, from the HistorySyncNotification inside a message jawd stored, and

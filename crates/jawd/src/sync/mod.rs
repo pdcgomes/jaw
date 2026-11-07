@@ -648,7 +648,7 @@ pub async fn stop(store: &Store, engine: Option<&Supervisor>) {
 /// with the supervisor's runs from before asking; None when it couldn't or didn't in time.
 async fn disconnect(engine: &Supervisor) -> Option<u32> {
     let runs = engine.status().runs;
-    let asked = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel {}));
+    let asked = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel { only_linking: false }));
     match tokio::time::timeout(DISCONNECTING, asked).await {
         Ok(Ok(_) | Err(EngineError::Unavailable(_))) => Some(runs),
         Ok(Err(e)) => {

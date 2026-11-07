@@ -42,6 +42,9 @@ type Engine struct {
 	// once the account is logged out (renew); retired is the last one replaced so.
 	client  atomic.Pointer[whatsmeow.Client]
 	retired atomic.Pointer[whatsmeow.Client]
+	// The link the phone has paired, while it's finishing (pairing.go).
+	pairing pairing
+	reach   reach
 	media   media
 	// What downloads and uploads files instead of the client, in the tests.
 	mediaDownloader mediaDownloader
@@ -75,7 +78,7 @@ func Run(ctx context.Context, l *link.Link, home, program, whatsmeowVersion stri
 }
 
 func newEngine(ctx context.Context, l *link.Link, log waLog.Logger) *Engine {
-	e := &Engine{ctx: ctx, link: l, acks: link.NewAcks(), log: log}
+	e := &Engine{ctx: ctx, link: l, acks: link.NewAcks(), log: log, reach: whatsmeowReach{}}
 	e.told.apart, e.told.connected = whatsmeow.KeepAliveIntervalMin, connected
 	return e
 }
@@ -224,7 +227,7 @@ func (e *Engine) handleFrom(client *whatsmeow.Client, evt any) {
 		return
 	}
 	if client == e.cli() && client != e.retired.Load() {
-		e.handle(evt)
+		e.handle(client, evt)
 	} else if event, _ := e.kept(evt); event != nil {
 		e.keep(event)
 	}
@@ -232,23 +235,27 @@ func (e *Engine) handleFrom(client *whatsmeow.Client, evt any) {
 
 // handle hands one of the running client's events to jawd. It runs on whatsmeow's one queue, so it
 // hands each event on and returns; what jawd must store waits for jawd's ack.
-func (e *Engine) handle(evt any) {
+func (e *Engine) handle(client *whatsmeow.Client, evt any) {
 	if event, kept := e.kept(evt); event != nil {
 		e.keep(event)
 	} else if !kept {
-		e.say(evt)
+		e.say(client, evt)
 	}
 }
 
 // loggedOut tells jawd WhatsApp logged the account out, why in whatsmeow's words without the code
 // ("logged out from another device", not "401: logged out from another device"), and gives the
 // engine a fresh device to link again with. It reads nothing of the device, which whatsmeow is
-// deleting meanwhile, and says it once, for the client running now only.
+// deleting meanwhile, and says it once, for the client running now only. A device whose link was
+// still finishing was never the account's, so that link has failed instead.
 func (e *Engine) loggedOut(client *whatsmeow.Client, reason events.ConnectFailureReason) {
+	why := strings.TrimPrefix(reason.String(), reason.NumberString()+": ")
+	if e.linkFailed(client, "WhatsApp refused the new device: "+why) {
+		return
+	}
 	if !e.retire(client) {
 		return
 	}
-	why := strings.TrimPrefix(reason.String(), reason.NumberString()+": ")
 	e.tell(&enginepb.Connection{State: enginepb.Connection_LOGGED_OUT, Reason: why})
 	e.renew(client)
 }
@@ -314,9 +321,10 @@ func (e *Engine) kept(evt any) (*enginepb.Event, bool) {
 	return nil, false
 }
 
-// say tells jawd what the client running now says of its connection, its linking, catching up
-// and app state's versions, none of which needs an ack.
-func (e *Engine) say(evt any) {
+// say tells jawd what client, the one running now, says of its connection, its linking, catching
+// up and app state's versions, none of which needs an ack. WhatsApp refusing a device whose link
+// is finishing fails that link before the refusal is said, so it names no account.
+func (e *Engine) say(client *whatsmeow.Client, evt any) {
 	switch v := evt.(type) {
 	case *events.AppStateSyncComplete:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_AppStateSynced{AppStateSynced: &enginepb.AppStateSynced{
@@ -328,7 +336,9 @@ func (e *Engine) say(evt any) {
 	case *events.ChatPresence:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_Typing{Typing: typing(v)}})
 	case *events.Connected:
-		e.tellConnected(e.cli().LastSuccessfulConnect)
+		if e.finished(client) {
+			e.tellConnected(client.LastSuccessfulConnect)
+		}
 	case *events.Disconnected:
 		e.connection(enginepb.Connection_DISCONNECTED, "")
 	case *events.KeepAliveTimeout:
@@ -338,20 +348,25 @@ func (e *Engine) say(evt any) {
 	case *events.StreamReplaced:
 		e.connection(enginepb.Connection_STREAM_REPLACED, "")
 	case *events.ClientOutdated:
+		e.linkFailed(client, "WhatsApp wants a newer version of jaw")
 		e.connection(enginepb.Connection_CLIENT_OUTDATED, "")
 	case *events.ConnectFailure:
-		e.connection(enginepb.Connection_CONNECT_FAILED, fmt.Sprintf("%s %s", v.Reason, v.Message))
+		reason := fmt.Sprintf("%s %s", v.Reason, v.Message)
+		e.linkFailed(client, "WhatsApp refused the new device: "+reason)
+		e.connection(enginepb.Connection_CONNECT_FAILED, reason)
 	case *events.TemporaryBan:
+		e.linkFailed(client, "WhatsApp has banned the account for a while")
 		state := e.state(enginepb.Connection_TEMPORARY_BAN, v.Code.String())
 		state.UntilMs = time.Now().Add(v.Expire).UnixMilli()
 		e.tell(state)
 	case *events.PairSuccess:
-		e.send(&enginepb.Event{Kind: &enginepb.Event_Link{Link: &enginepb.Link{Step: &enginepb.Link_Done{Done: &enginepb.Linked{
-			Jid:          v.ID.String(),
-			Lid:          v.LID.String(),
-			Platform:     v.Platform,
-			BusinessName: v.BusinessName,
-		}}}}})
+		e.paired(client, v)
+	case *events.PairError:
+		// The QR codes' channel says why, after this; whatever device pairing left, with its ID
+		// or deleted by whatsmeow, goes first, so linking can start again.
+		if client.Store.ID != nil || client.Store.Deleted {
+			e.clear(client)
+		}
 	case *events.OfflineSyncPreview:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_OfflinePreview{OfflinePreview: &enginepb.OfflinePreview{
 			Total:          uint32(v.Total),
@@ -365,9 +380,11 @@ func (e *Engine) say(evt any) {
 	}
 }
 
+// state is the connection in state, naming the account once one is linked: not while a link is
+// finishing, whose device may yet go.
 func (e *Engine) state(state enginepb.Connection_State, reason string) *enginepb.Connection {
 	c := &enginepb.Connection{State: state, Reason: reason}
-	if client := e.cli(); client != nil {
+	if client := e.cli(); client != nil && !e.half(client) {
 		if id := client.Store.ID; id != nil {
 			c.Jid = id.String()
 			c.Lid = client.Store.LID.String()
@@ -494,10 +511,16 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	case *enginepb.Command_LinkStart:
 		return e.linkStart(c.LinkStart.Phone)
 	case *enginepb.Command_LinkCancel:
-		client.Disconnect()
+		if c.LinkCancel.GetOnlyLinking() && client.Store.ID != nil {
+			return done()
+		}
+		e.reach.disconnect(client)
 		return done()
 	case *enginepb.Command_Logout:
-		if err := client.Logout(e.ctx); err != nil {
+		if client.Store.ID == nil || e.half(client) {
+			return failure("no account is linked", false)
+		}
+		if err := e.reach.logout(e.ctx, client); err != nil {
 			return failure(fmt.Sprintf("can't log out: %v", err), true)
 		}
 		// whatsmeow says nothing after a logout jawd asked for, and deletes the device as it does
@@ -513,7 +536,7 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	case *enginepb.Command_LidLookup:
 		return e.lidLookup(c.LidLookup)
 	}
-	if client.Store.ID == nil {
+	if client.Store.ID == nil || e.half(client) {
 		return failure("no account is linked yet", false)
 	}
 	switch c := cmd.Kind.(type) {
@@ -554,19 +577,36 @@ func (e *Engine) step(step *enginepb.Link) {
 	e.send(&enginepb.Event{Kind: &enginepb.Event_Link{Link: step}})
 }
 
+// notCleared is why linking can't start while the device a logout or a failed link left hasn't
+// given way to a fresh one: whatsmeow is still deleting it, or the engine couldn't (renew).
+const notCleared = "the device the last account or link left isn't cleared yet; try again in a moment, or once jawd has started the engine again"
+
 // linkStart links an account: by QR codes, or by a code to type on the phone when phone is set,
-// which needs the connection up first, as whatsmeow's PairPhone says.
+// which needs the connection up first, as whatsmeow's PairPhone says. A link the phone has paired
+// that can't finish now, its client not connected, is cleared first; one that's connected may.
 func (e *Engine) linkStart(phone string) *enginepb.Reply {
 	client := e.cli()
+	if client == e.retired.Load() || client.Store.Deleted {
+		return failure(notCleared, true)
+	}
+	if e.half(client) {
+		if e.reach.connected(client) {
+			return failure("the phone has paired, and linking is finishing; try again if it doesn't", true)
+		}
+		e.abandon(client)
+		if client = e.cli(); client == e.retired.Load() {
+			return failure(notCleared, true)
+		}
+	}
 	if client.Store.ID != nil {
 		return failure("an account is already linked; log out first", false)
 	}
-	client.Disconnect()
+	e.reach.disconnect(client)
 	codes, err := client.GetQRChannel(e.ctx)
 	if err != nil {
 		return failure(fmt.Sprintf("can't start linking: %v", err), true)
 	}
-	if err := client.Connect(); err != nil {
+	if err := e.reach.connect(client); err != nil {
 		return failure(fmt.Sprintf("can't reach WhatsApp: %v", err), true)
 	}
 	ready := make(chan struct{})
@@ -582,7 +622,8 @@ func (e *Engine) linkStart(phone string) *enginepb.Reply {
 					e.step(&enginepb.Link{Step: &enginepb.Link_Qr{Qr: &enginepb.QrCode{Code: item.Code, ExpiresMs: expires}}})
 				}
 			case whatsmeow.QRChannelSuccess.Event:
-				// PairSuccess has already said so, with the account.
+				// The phone has paired: the link finishes once the client connects with the new
+				// device, or fails (pairing.go).
 			case whatsmeow.QRChannelTimeout.Event:
 				e.step(&enginepb.Link{Step: &enginepb.Link_Failed{Failed: "the phone didn't link in time; start again"}})
 			case whatsmeow.QRChannelClientOutdated.Event:

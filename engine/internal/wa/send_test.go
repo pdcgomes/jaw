@@ -276,7 +276,7 @@ func TestAPatchIsAnsweredOnceJawdHasKeptItsEchoAndNoOtherIndexOrTimeEndsItsWait(
 	waiting("another chat pinned at its time")
 	handled(t, e, jawd, &events.AppState{Index: ana, SyncActionValue: pinnedAt(at - 1)})
 	waiting("its chat pinned at another time")
-	go e.handle(&events.AppState{Index: ana, SyncActionValue: pinnedAt(at)})
+	go e.handle(e.cli(), &events.AppState{Index: ana, SyncActionValue: pinnedAt(at)})
 	frame, err := jawd.Recv()
 	if err != nil || frame.GetEvent().GetAppState() == nil {
 		t.Fatalf("its echo came as %v, %v", frame, err)

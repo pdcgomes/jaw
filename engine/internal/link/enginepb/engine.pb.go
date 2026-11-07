@@ -1046,7 +1046,7 @@ type Connection struct {
 	Reason string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	// When a temporary ban ends, in milliseconds since the epoch.
 	UntilMs int64 `protobuf:"varint,3,opt,name=until_ms,json=untilMs,proto3" json:"until_ms,omitempty"`
-	// The linked account, once there is one.
+	// The linked account, once there is one: not while a link the phone has paired is finishing.
 	Jid           string `protobuf:"bytes,4,opt,name=jid,proto3" json:"jid,omitempty"`
 	Lid           string `protobuf:"bytes,5,opt,name=lid,proto3" json:"lid,omitempty"`
 	PushName      string `protobuf:"bytes,6,opt,name=push_name,json=pushName,proto3" json:"push_name,omitempty"`
@@ -1126,6 +1126,11 @@ func (x *Connection) GetPushName() string {
 	return ""
 }
 
+// Once the phone has paired, linking finishes only when the engine connects with the new device:
+// `done` comes then, just before the CONNECTED that names the account. Until then the device is
+// half made, and no connection event names it; if WhatsApp refuses it, or it isn't connected a
+// minute after pairing, the engine clears it from session.db and says `failed`, so LinkStart
+// starts afresh.
 type Link struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Step:
@@ -4665,7 +4670,9 @@ func (*Ping) Descriptor() ([]byte, []int) {
 	return file_engine_proto_rawDescGZIP(), []int{46}
 }
 
-// Links an account: by QR code, or by a code typed on the phone when `phone` is given.
+// Links an account: by QR code, or by a code typed on the phone when `phone` is given. Refused
+// while an account is linked, and while a link the phone has paired is connected and finishing; a
+// half-made device whose client isn't connected is cleared first.
 type LinkStart struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The phone number, in international form with no plus or spaces.
@@ -4711,8 +4718,13 @@ func (x *LinkStart) GetPhone() string {
 	return ""
 }
 
+// Disconnects from WhatsApp, as jawd asks before it stops.
 type LinkCancel struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stops only the codes of a link the phone hasn't paired yet: an interface leaving its linking
+	// screen asks this, and a device pairing has given an ID, linked or finishing its link, stays
+	// connected.
+	OnlyLinking   bool `protobuf:"varint,1,opt,name=only_linking,json=onlyLinking,proto3" json:"only_linking,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4747,6 +4759,16 @@ func (*LinkCancel) Descriptor() ([]byte, []int) {
 	return file_engine_proto_rawDescGZIP(), []int{48}
 }
 
+func (x *LinkCancel) GetOnlyLinking() bool {
+	if x != nil {
+		return x.OnlyLinking
+	}
+	return false
+}
+
+// Logs the linked account out with WhatsApp, which removes the device, then deletes the device
+// from session.db; Done says nothing more is to come, as whatsmeow says nothing after it. Refused
+// when no account is linked, or a link is still finishing.
 type Logout struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -6633,9 +6655,10 @@ const file_engine_proto_rawDesc = "" +
 	"\x05count\x18\x05 \x01(\rR\x05count\"\x06\n" +
 	"\x04Ping\"!\n" +
 	"\tLinkStart\x12\x14\n" +
-	"\x05phone\x18\x01 \x01(\tR\x05phone\"\f\n" +
+	"\x05phone\x18\x01 \x01(\tR\x05phone\"/\n" +
 	"\n" +
-	"LinkCancel\"\b\n" +
+	"LinkCancel\x12!\n" +
+	"\fonly_linking\x18\x01 \x01(\bR\vonlyLinking\"\b\n" +
 	"\x06Logout\"I\n" +
 	"\x0fHistoryDownload\x12\"\n" +
 	"\fnotification\x18\x01 \x01(\fR\fnotification\x12\x12\n" +
