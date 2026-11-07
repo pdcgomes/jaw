@@ -1129,6 +1129,42 @@ mod tests {
         assert_eq!(welcome.account, jaw_proto::Account { state: AccountState::Unlinked, me: None }, "and a hello now");
     }
 
+    /// Jaw.app sends `link.cancel` as its linking screen goes, which it does once linking is done
+    /// too: the engine is asked to stop only a link the phone hasn't paired, so it leaves a linked
+    /// account connected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interfaces_link_cancel_asks_the_engine_to_stop_only_a_link_the_phone_hasnt_paired() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let world = Arc::new(crate::engine::demo::World::default());
+        let engine = crate::engine::demo::DemoEngine::sharing(vec![], world.clone());
+        let (events, _incoming) = tokio::sync::mpsc::channel(16);
+        let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+        while supervisor.status().state.name() != "running" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
+        let state =
+            State::new(home.path(), Ok(supervisor), Vec::new(), live, Some(store.clone()), broadcast::channel(16).0);
+        tokio::spawn(serve(Arc::new(state.unwrap()), listener));
+        let answer = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap();
+            connection.call("link.cancel", Value::Null).map_err(|e| e.to_string())
+        });
+        assert_eq!(answer.await.unwrap(), Ok(json!({})));
+        let cancels: Vec<pb::LinkCancel> = world
+            .asked()
+            .into_iter()
+            .filter_map(|asked| match asked {
+                pb::command::Kind::LinkCancel(cancel) => Some(cancel),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancels, [pb::LinkCancel { only_linking: true }]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_connection_push_after_a_logout_comes_after_its_answer_on_the_raw_socket() {
         let home = tempfile::tempdir().unwrap();

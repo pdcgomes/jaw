@@ -210,12 +210,14 @@ async fn react(shared: &Arc<Shared>, world: &Arc<World>, failure: Failure, on: b
             shared.tell(connection(State::Connecting, "")).await;
             shared.tell(demo::connected()).await;
         }
-        // The phone scans the QR code and links the same account again.
+        // The phone scans the QR code and links the same account again, a device the made-up
+        // WhatsApp gave up for a logout from jaw included. The failure itself takes what needs the
+        // account while it's on, and holds what an engine started meanwhile says, its script whole.
         (Failure::Logout, false) => {
-            let linked = pb::Linked { jid: ME.into(), push_name: "Pedro".into(), ..Default::default() };
-            let link = pb::Link { step: Some(pb::link::Step::Done(linked)) };
-            shared.tell(pb::Event { seq: 0, kind: Some(pb::event::Kind::Link(link)) }).await;
-            shared.tell(demo::connected()).await;
+            world.phone_linked();
+            for event in demo::linked_again() {
+                shared.tell(event).await;
+            }
         }
         (Failure::PhoneOffline, true) => {}
         (Failure::PhoneOffline, false) => {
@@ -592,6 +594,23 @@ mod tests {
         };
         assert_eq!(linked.jid, ME, "the same account");
         assert_eq!(state(&next(&mut rx).await), pb::connection::State::Connected);
+    }
+
+    #[tokio::test]
+    async fn the_phone_linking_jaw_again_gives_the_made_up_whatsapp_its_device_back_after_a_logout_from_jaw() {
+        let engine = failing(Failure::Logout);
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = engine.start(tx).await.unwrap();
+        next(&mut rx).await;
+        let logout = pb::command::Kind::Logout(pb::Logout {});
+        assert!(matches!(instance.commands.call(logout).await, Ok(pb::reply::Kind::Done(_))));
+        engine.turn(true).await;
+        assert_eq!(state(&next(&mut rx).await), pb::connection::State::LoggedOut);
+        engine.turn(false).await;
+        assert!(matches!(next(&mut rx).await, pb::event::Kind::Link(_)));
+        assert_eq!(state(&next(&mut rx).await), pb::connection::State::Connected);
+        let sent = instance.commands.call(send("3EB0FAILING0005")).await;
+        assert!(matches!(sent, Ok(pb::reply::Kind::Sent(_))), "the account's device is back: {sent:?}");
     }
 
     #[tokio::test]

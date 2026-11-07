@@ -343,6 +343,8 @@ pub async fn run(
     // the version carried, so an engine that stopped in between leaves changes jawd never got. Each
     // engine that connects (the first, and each one started again) fetches every collection again
     // in full, which changes nothing that's already right. The restarts count says which engine.
+    // An account linked in an engine's run, as after a logout, brings its own people and groups
+    // in at its first connection too (`linked_now`), whatever engine it's on.
     let mut refreshed: Option<u32> = None;
     let mut linked_now = false;
     let mut status = engine.as_ref().map(Supervisor::watch);
@@ -465,7 +467,7 @@ pub async fn run(
                 if let Some(me) = me {
                     remember(&store, &live, me);
                     if let Some(engine) = &engine
-                        && refreshed != Some(engine.status().restarts)
+                        && (linked_now || refreshed != Some(engine.status().restarts))
                     {
                         refreshed = Some(engine.status().restarts);
                         // An account linked in this run has its app state synced in full by whatsmeow.

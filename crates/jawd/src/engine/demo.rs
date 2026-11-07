@@ -192,7 +192,24 @@ pub struct World {
     /// How many uploads to fail next as a connection that's down does, and to refuse for good.
     failing_uploads: Mutex<u32>,
     refusing_uploads: Mutex<u32>,
+    /// The made-up account's device, as jaw-engine's session.db keeps one.
+    device: Mutex<Device>,
 }
+
+/// The made-up account's device, as session.db keeps jaw-engine's.
+#[derive(Default)]
+struct Device {
+    /// Gone, as after a logout: an engine started then says the account isn't linked in place of
+    /// its script, what needs the account is refused, and its people neither type nor come and
+    /// go, until its phone links it again.
+    gone: bool,
+    /// Counts the starts of linking, so the phone takes only the latest, and none cancelled.
+    linking: u64,
+}
+
+/// How long the made-up phone takes to link the account once linking starts, so the code it's
+/// shown can be seen.
+const SCANNED: Duration = Duration::from_secs(2);
 
 /// What a test does as the made-up phone is asked to send a file again.
 #[cfg(test)]
@@ -272,6 +289,18 @@ impl World {
 
     pub fn replying(&self, replies: Replies) {
         *self.replies.lock().expect("the demo world") = replies;
+    }
+
+    /// Whether the made-up account has a device here, as session.db would say.
+    pub fn linked(&self) -> bool {
+        !self.device.lock().expect("the demo world").gone
+    }
+
+    /// The made-up phone links the account again, as `Failing` has it: a link under way is no more.
+    pub(super) fn phone_linked(&self) {
+        let mut device = self.device.lock().expect("the demo world");
+        device.gone = false;
+        device.linking += 1;
     }
 
     /// The full fetches of app state played so far.
@@ -796,11 +825,12 @@ impl DemoEngine {
 
     /// The made-up account's engine finding no device in its session.db, as after the account was
     /// logged out while jawd was off: two seconds after it starts, so an interface can connect to a
-    /// jawd that says it's linked first, it says the account isn't linked, and nothing more.
+    /// jawd that says it's linked first, it says the account isn't linked, and nothing more until
+    /// linking starts and its phone links it again.
     pub fn unlinked() -> DemoEngine {
-        let unlinked = pb::Connection { state: pb::connection::State::Unlinked as i32, ..Default::default() };
-        let script = vec![pb::Event { seq: 0, kind: Some(pb::event::Kind::Connection(unlinked)) }];
-        DemoEngine { pause: Duration::from_secs(2), ..DemoEngine::with(script) }
+        let world = World::default();
+        world.device.lock().expect("the demo world").gone = true;
+        DemoEngine { pause: Duration::from_secs(2), world: Arc::new(world), ..DemoEngine::with(vec![connected()]) }
     }
 
     pub fn with(script: Vec<pb::Event>) -> DemoEngine {
@@ -841,6 +871,23 @@ pub fn connected() -> pb::Event {
             ..Default::default()
         })),
     }
+}
+
+/// What an engine with no device says, in place of its script.
+fn unlinked() -> pb::Event {
+    let unlinked = pb::Connection { state: pb::connection::State::Unlinked as i32, ..Default::default() };
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::Connection(unlinked)) }
+}
+
+fn link_step(step: pb::link::Step) -> pb::Event {
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::Link(pb::Link { step: Some(step) })) }
+}
+
+/// The made-up phone linking the account again, as jaw-engine says a link that has finished: done,
+/// just before the account's Connected.
+pub(super) fn linked_again() -> [pb::Event; 2] {
+    let linked = pb::Linked { jid: ME.into(), push_name: "Pedro".into(), ..Default::default() };
+    [link_step(pb::link::Step::Done(linked)), connected()]
 }
 
 impl Default for DemoEngine {
@@ -1211,12 +1258,15 @@ pub fn typing(chat: &str, sender: &str, state: Said) -> pb::Event {
 const COMINGS: Duration = Duration::from_secs(5);
 
 /// The people jawd follows come and go, one every few seconds, each sometimes typing first, for as
-/// long as jawd is there to hear it.
+/// long as jawd is there to hear it, and the account is linked.
 async fn comings_and_goings(sender: Sender) {
     let mut around: HashMap<String, bool> = HashMap::new();
     for turn in 0u64.. {
         let every = sender.world.comings.lock().expect("the demo world").unwrap_or(COMINGS);
         tokio::time::sleep(every).await;
+        if !sender.world.linked() {
+            continue;
+        }
         let subscribed = sender.world.subscribed.lock().expect("the demo world").clone();
         let Some(jid) = subscribed.get(turn as usize % subscribed.len().max(1)).cloned() else { continue };
         let now = !around.get(&jid).copied().unwrap_or(seed(&jid).is_multiple_of(3));
@@ -1238,9 +1288,10 @@ async fn comings_and_goings(sender: Sender) {
 /// phones do every few seconds while it goes on.
 const TYPING_AGAIN: Duration = Duration::from_secs(4);
 
-/// The made-up account's people type and record for as long as the engine runs: Ana in her chat,
-/// Rui recording in Lisbon Climbing, each said again every few seconds, and the group's other
-/// member typing there and stopping in turn. jawd hears it only while WhatsApp would say it.
+/// The made-up account's people type and record for as long as the engine runs, while the account
+/// is linked: Ana in her chat, Rui recording in Lisbon Climbing, each said again every few seconds,
+/// and the group's other member typing there and stopping in turn. jawd hears it only while
+/// WhatsApp would say it.
 async fn typing_while_running(sender: Sender) {
     let (ana, climbing) = ("351912345678@s.whatsapp.net", "120363012345678901@g.us");
     for turn in 0u64.. {
@@ -1252,12 +1303,29 @@ async fn typing_while_running(sender: Sender) {
         ];
         // Until this engine is stopped, or jawd has gone.
         for event in said {
-            if sender.weak.upgrade().is_none() || !sender.send(event).await {
+            if sender.weak.upgrade().is_none() || (sender.world.linked() && !sender.send(event).await) {
                 return;
             }
         }
         tokio::time::sleep(TYPING_AGAIN).await;
     }
+}
+
+/// Whether a command needs the account linked: jaw-engine refuses all but these without a device.
+fn needs_account(kind: &pb::command::Kind) -> bool {
+    use pb::command::Kind;
+    !matches!(
+        kind,
+        Kind::Ping(_)
+            | Kind::BenchRun(_)
+            | Kind::MediaCancel(_)
+            | Kind::LinkStart(_)
+            | Kind::LinkCancel(_)
+            | Kind::Logout(_)
+            | Kind::HistoryDownload(_)
+            | Kind::Contacts(_)
+            | Kind::LidLookup(_)
+    )
 }
 
 /// Every number is on the made-up WhatsApp but those starting 999, each known by a LID as well.
@@ -1312,7 +1380,7 @@ impl Engine for DemoEngine {
     }
 
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {
-        let script = self.script.clone();
+        let script = if self.world.linked() { self.script.clone() } else { vec![unlinked()] };
         let world = self.world.clone();
         let (pause, typists) = (self.pause, self.typists);
         Box::pin(async move {
@@ -1424,11 +1492,20 @@ impl Sender {
 
     async fn answer(&self, kind: pb::command::Kind) -> Result<pb::reply::Kind, EngineError> {
         let done = Ok(pb::reply::Kind::Done(pb::Done {}));
+        if needs_account(&kind) && !self.world.linked() {
+            return Err(EngineError::Failed { message: "no account is linked yet".into(), retry: false });
+        }
         match kind {
             pb::command::Kind::Ping(_) => Ok(pb::reply::Kind::Pong(pb::Pong { at_ms: now_ms() })),
             pb::command::Kind::BenchRun(run) => self.bench(run).await,
-            // The made-up account has no connection to end.
-            pb::command::Kind::LinkCancel(_) => Ok(pb::reply::Kind::Done(pb::Done {})),
+            // The made-up account has no connection to end; a link under way is cancelled.
+            pb::command::Kind::LinkCancel(cancel) => {
+                self.world.ask(pb::command::Kind::LinkCancel(cancel));
+                self.world.device.lock().expect("the demo world").linking += 1;
+                done
+            }
+            pb::command::Kind::LinkStart(start) => self.link_start(start),
+            pb::command::Kind::Logout(_) => self.log_out(),
             pb::command::Kind::Send(send) => {
                 self.world.ask(pb::command::Kind::Send(send.clone()));
                 self.sent(send).await
@@ -1593,8 +1670,61 @@ impl Sender {
                 self.send_again(retry);
                 done
             }
-            _ => Err(EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false }),
         }
+    }
+
+    /// Logs the made-up account out, as WhatsApp removes the device jaw-engine logs out: nothing
+    /// is said, as whatsmeow says nothing after a logout it was asked for, and the device is gone
+    /// until the phone links it again.
+    fn log_out(&self) -> Result<pb::reply::Kind, EngineError> {
+        let mut device = self.world.device.lock().expect("the demo world");
+        if device.gone {
+            return Err(EngineError::Failed { message: "no account is linked".into(), retry: false });
+        }
+        device.gone = true;
+        device.linking += 1;
+        Ok(pb::reply::Kind::Done(pb::Done {}))
+    }
+
+    /// Links the made-up account as a phone would: refused while it's linked, as jaw-engine
+    /// refuses; otherwise a made-up QR code, or a code to type on the phone, and SCANNED later the
+    /// phone links the same account again, unless linking started again or was cancelled.
+    fn link_start(&self, start: pb::LinkStart) -> Result<pb::reply::Kind, EngineError> {
+        let n = {
+            let mut device = self.world.device.lock().expect("the demo world");
+            if !device.gone {
+                let message = "an account is already linked; log out first".into();
+                return Err(EngineError::Failed { message, retry: false });
+            }
+            device.linking += 1;
+            device.linking
+        };
+        let step = if start.phone.is_empty() {
+            let code = format!("jaw-demo-link-{n}: a made-up QR code");
+            pb::link::Step::Qr(pb::QrCode { code, expires_ms: now_ms() + SCANNED.as_millis() as i64 + 60_000 })
+        } else {
+            pb::link::Step::Code(format!("DEMO-{n:04}"))
+        };
+        let sender = self.clone();
+        tokio::spawn(async move {
+            if !sender.send(link_step(step)).await {
+                return;
+            }
+            tokio::time::sleep(SCANNED).await;
+            {
+                let mut device = sender.world.device.lock().expect("the demo world");
+                if !device.gone || device.linking != n {
+                    return;
+                }
+                device.gone = false;
+            }
+            for event in linked_again() {
+                if !sender.send(event).await {
+                    return;
+                }
+            }
+        });
+        Ok(pb::reply::Kind::Done(pb::Done {}))
     }
 
     fn progress(&self, id: &str, bytes: u64, size: u64) {
@@ -2076,11 +2206,97 @@ mod tests {
             instance.commands.call(pb::command::Kind::BenchRun(pb::BenchRun { count: 500, size: 10 })).await.unwrap();
         let pb::reply::Kind::BenchResult(result) = result else { panic!("{result:?}") };
         assert_eq!(result.count, 500);
-        let refused = instance.commands.call(pb::command::Kind::Logout(pb::Logout {})).await;
-        assert!(matches!(refused, Err(EngineError::Failed { .. })));
         drop(instance.commands);
         assert_eq!(instance.exited.await, "the demo engine stopped");
         acking.abort();
+    }
+
+    /// The next event the engine sends, within `within`, acked if it needs one.
+    async fn next_within(rx: &mut mpsc::Receiver<Incoming>, within: Duration) -> Option<pb::event::Kind> {
+        let incoming = tokio::time::timeout(within, rx.recv()).await.ok()??;
+        if let Some(ack) = incoming.ack {
+            ack.send();
+        }
+        incoming.event.kind
+    }
+
+    fn connection_state(kind: Option<pb::event::Kind>) -> pb::connection::State {
+        match kind {
+            Some(pb::event::Kind::Connection(connection)) => connection.state(),
+            other => panic!("not a connection: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_logout_leaves_the_made_up_account_without_a_device_and_an_engine_started_again_says_so() {
+        let world = Arc::new(World::default());
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = DemoEngine::sharing(vec![connected()], world.clone()).start(tx).await.unwrap();
+        assert_eq!(
+            connection_state(next_within(&mut rx, Duration::from_secs(5)).await),
+            pb::connection::State::Connected
+        );
+        let linked =
+            EngineError::Failed { message: "an account is already linked; log out first".into(), retry: false };
+        let start = pb::command::Kind::LinkStart(pb::LinkStart::default());
+        assert_eq!(instance.commands.call(start).await, Err(linked), "linking refused, as jaw-engine refuses it");
+        let logout = || pb::command::Kind::Logout(pb::Logout {});
+        assert_eq!(instance.commands.call(logout()).await, Ok(pb::reply::Kind::Done(pb::Done {})));
+        assert!(!world.linked());
+        assert!(next_within(&mut rx, Duration::from_millis(200)).await.is_none(), "the logout says nothing");
+        let send = pb::command::Kind::Send(pb::Send { chat: ANA.into(), id: "3EB0UNLINKED".into(), raw: vec![] });
+        let unlinked = EngineError::Failed { message: "no account is linked yet".into(), retry: false };
+        assert_eq!(instance.commands.call(send).await, Err(unlinked), "what needs the account is refused");
+        let again = EngineError::Failed { message: "no account is linked".into(), retry: false };
+        assert_eq!(instance.commands.call(logout()).await, Err(again), "and so is a second logout");
+        drop(instance.commands);
+        let (tx, mut rx) = mpsc::channel(8);
+        let _restarted = DemoEngine::sharing(vec![connected()], world.clone()).start(tx).await.unwrap();
+        let said = connection_state(next_within(&mut rx, Duration::from_secs(5)).await);
+        assert_eq!(said, pb::connection::State::Unlinked, "an engine started again finds no device");
+    }
+
+    #[tokio::test]
+    async fn once_linking_starts_the_made_up_phone_links_the_account_again_unless_linking_was_cancelled() {
+        let world = Arc::new(World::default());
+        world.device.lock().unwrap().gone = true;
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = DemoEngine::sharing(vec![connected()], world.clone()).start(tx).await.unwrap();
+        assert_eq!(
+            connection_state(next_within(&mut rx, Duration::from_secs(5)).await),
+            pb::connection::State::Unlinked
+        );
+        let done = Ok(pb::reply::Kind::Done(pb::Done {}));
+        assert_eq!(instance.commands.call(pb::command::Kind::LinkStart(pb::LinkStart::default())).await, done);
+        let Some(pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Qr(qr)) })) =
+            next_within(&mut rx, Duration::from_secs(5)).await
+        else {
+            panic!("no QR code")
+        };
+        assert!(qr.code.contains("made-up") && qr.expires_ms > now_ms(), "{qr:?}");
+        let cancel = pb::command::Kind::LinkCancel(pb::LinkCancel { only_linking: true });
+        assert_eq!(instance.commands.call(cancel).await, done);
+        let late = next_within(&mut rx, SCANNED + Duration::from_millis(500)).await;
+        assert!(late.is_none() && !world.linked(), "a cancelled link was taken: {late:?}");
+        let by_phone = pb::LinkStart { phone: "351910000001".into() };
+        assert_eq!(instance.commands.call(pb::command::Kind::LinkStart(by_phone)).await, done);
+        let Some(pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Code(code)) })) =
+            next_within(&mut rx, Duration::from_secs(5)).await
+        else {
+            panic!("no code for the phone")
+        };
+        assert!(code.starts_with("DEMO-"), "{code}");
+        let Some(pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Done(linked)) })) =
+            next_within(&mut rx, SCANNED + Duration::from_secs(5)).await
+        else {
+            panic!("not linked again")
+        };
+        assert_eq!(linked.jid, ME, "the same account");
+        let Some(pb::event::Kind::Connection(connection)) = next_within(&mut rx, Duration::from_secs(5)).await else {
+            panic!("no connection after the link")
+        };
+        assert_eq!((connection.state(), connection.jid.as_str()), (pb::connection::State::Connected, ME));
+        assert!(world.linked());
     }
 
     const ANA: &str = "351912345678@s.whatsapp.net";

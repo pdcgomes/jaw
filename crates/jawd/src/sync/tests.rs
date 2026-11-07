@@ -1449,6 +1449,30 @@ async fn a_clean_stop_is_noted_and_the_next_start_notes_it_is_running_before_it_
     assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("0"), "noted before the engine can start");
 }
 
+/// jawd's disconnect at a stop ends the connection whatever it's for, a linked account's too,
+/// where an interface leaving its linking screen stops only a link the phone hasn't paired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_disconnects_the_engine_whatever_the_connection_is_for() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let world = Arc::new(crate::engine::demo::World::default());
+    let engine = crate::engine::demo::DemoEngine::sharing(vec![], world.clone());
+    let (events, _incoming) = mpsc::channel(16);
+    let supervisor = Supervisor::spawn(Arc::new(engine), events, crate::engine::supervisor::Backoff::default());
+    until("the engine to run", || supervisor.status().runs == 1).await;
+    stop(&store, Some(&supervisor)).await;
+    let cancels: Vec<pb::LinkCancel> = world
+        .asked()
+        .into_iter()
+        .filter_map(|asked| match asked {
+            pb::command::Kind::LinkCancel(cancel) => Some(cancel),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [pb::LinkCancel { only_linking: false }]);
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("1"));
+}
+
 /// An engine for the stop: it says hello once `gate` lets it (at once without one), answers the
 /// disconnect unless `deaf`, and notes what jaw.db's clean marker says at the moment it's ended.
 #[derive(Clone)]
@@ -1853,6 +1877,44 @@ async fn every_engine_that_connects_fetches_app_state_again_and_a_reconnection_o
     assert_eq!((engine.asked("contacts"), engine.asked("resync")), (1, 1), "the same engine connecting again");
     engine.stop.notify_one();
     until("the engine started again to resync", || engine.asked("resync") == 2).await;
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_linked_again_in_the_same_engines_run_brings_its_people_and_groups_in_once() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, incoming) = supervised(&engine);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(16).0,
+        Some(supervisor),
+        home.path().to_path_buf(),
+        Default::default(),
+        crate::feed::Typing::default(),
+    ));
+    until("the first engine's refresh", || engine.asked("resync") == 1 && engine.asked("groups") == 1).await;
+    // Logged out, then linked again on the same engine, which says the link is done just before
+    // the account's first Connected.
+    engine.send(connection_event(pb::connection::State::LoggedOut).event).await;
+    let linked = pb::Linked { jid: "351910000001@s.whatsapp.net".into(), ..Default::default() };
+    let done = pb::Link { step: Some(pb::link::Step::Done(linked)) };
+    engine.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::Link(done)) }).await;
+    engine.send(connected()).await;
+    until("the account linked again to bring its people and groups in", || {
+        engine.asked("contacts") == 2 && engine.asked("groups") == 2
+    })
+    .await;
+    engine.send(connected()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        (engine.asked("contacts"), engine.asked("resync")),
+        (2, 1),
+        "whatsmeow syncs a new link's app state in full itself, and the same account connecting again brings nothing"
+    );
     running.abort();
 }
 
