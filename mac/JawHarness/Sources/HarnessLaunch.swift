@@ -5,8 +5,9 @@ import JawUI
 /// What the harness was launched to do, from its command line:
 ///
 /// - `--scene <id>` opens a scene.
-/// - `--theme <id>`, `--appearance dark|light`, `--look bubbles|lines`, `--density comfortable|compact`,
-///   `--text-size <11…17>`, `--font system|mono` and `--reduce-motion` set the conditions.
+/// - `--theme jaw|omarchy:<id>|redlamp:<id>`, `--appearance dark|light`, `--look bubbles|lines`,
+///   `--density comfortable|compact`, `--text-size <11…17>`, `--font system|mono` and `--reduce-motion`
+///   set the conditions.
 /// - `--window <width>x<height>` sizes the window, in points.
 /// - `--stage-only` hides the scene list and the inspector.
 /// - `--snapshot <png>` draws the scene into a picture, and quits.
@@ -36,7 +37,7 @@ struct HarnessLaunch: Equatable {
         }
         var launch = HarnessLaunch()
         launch.scene = value("--scene")
-        if let theme = value("--theme"), Catalog.families.contains(where: { $0.id == theme }) {
+        if let theme = value("--theme"), Fixtures.themes.contains(where: { $0.id == theme }) {
             launch.conditions.theme = theme
         }
         switch value("--appearance") {

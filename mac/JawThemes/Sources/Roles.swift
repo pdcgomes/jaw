@@ -63,14 +63,9 @@ public enum Appearance: String, Sendable, Hashable, CaseIterable {
 
 public enum Catalog {
     /// jaw's own, first and the default: ooze's Tokyo Night, the terminal's palette, with Tokyo Night
-    /// Day as its light half, both held as every theme is (`Roles.held()`). Redlamp's families join it in Mac-M5.
+    /// Day as its light half, both held as every theme is (`Roles.held()`). `Catalog.themes` lists it
+    /// first, as `jawTheme`, before Omarchy's and Redlamp's.
     public static let jaw = ThemeFamily(id: "jaw", name: "jaw", dark: tokyoNight.held(), light: tokyoNightDay.held())
-
-    public static let families = [jaw]
-
-    public static func family(_ id: String) -> ThemeFamily {
-        families.first { $0.id == id } ?? jaw
-    }
 
     /// Tokyo Night, as `crates/jaw/src/theme.rs` has it.
     static let tokyoNight: Roles = {

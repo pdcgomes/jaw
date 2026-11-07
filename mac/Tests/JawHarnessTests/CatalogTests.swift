@@ -56,3 +56,15 @@ func stub(_ id: String, _ section: HarnessSection, axes: Axes = []) -> HarnessSc
     conditions.dark = false
     #expect(conditions.style == Style(roles: Catalog.jaw.light))
 }
+
+@Test func `a scene is drawn in any theme's half for its appearance, and in Tokyo Night's where the theme has none`() throws {
+    #expect(Fixtures.omarchy.count == 23 && Fixtures.themes.count == 46, "Omarchy's, read from the harness's bundle, beside Jaw's and Redlamp's")
+    var conditions = Conditions()
+    conditions.theme = "redlamp:nord"
+    #expect(conditions.roles == (try #require(Fixtures.themes.first { $0.id == "redlamp:nord" })).dark)
+    conditions.theme = "omarchy:gruvbox"
+    conditions.dark = false
+    #expect(conditions.roles == Catalog.jaw.light, "Gruvbox is dark only")
+    conditions.theme = "redlamp:neutral"
+    #expect(conditions.roles.accent.hex == 0x007AFF, "Neutral in macOS's blue, whatever the Mac's accent")
+}

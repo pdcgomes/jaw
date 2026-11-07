@@ -10,6 +10,7 @@ enum HarnessSection: String, CaseIterable, Identifiable {
     case conversation = "Conversation"
     case panes = "Panes"
     case overlays = "Palette and overlays"
+    case settings = "Settings"
     case states = "States"
     case screens = "Screens"
     case live = "Live"
@@ -27,6 +28,7 @@ enum HarnessSection: String, CaseIterable, Identifiable {
         case .conversation: "bubble.left.and.bubble.right"
         case .panes: "rectangle.split.3x1"
         case .overlays: "command"
+        case .settings: "gearshape"
         case .states: "moon.zzz"
         case .screens: "macwindow"
         case .live: "play.circle"
@@ -46,8 +48,9 @@ struct Conditions: Hashable, Sendable {
     var font: MessageFont = .system
     var reduceMotion = false
 
+    /// The theme's half for the appearance, or Tokyo Night's where it has none, as the app draws a slot.
     var roles: Roles {
-        Catalog.family(theme).roles(dark: dark)
+        Fixtures.themes.first { $0.id == theme }?.roles(dark ? .dark : .light) ?? Catalog.jaw.roles(dark: dark)
     }
 
     var style: Style {

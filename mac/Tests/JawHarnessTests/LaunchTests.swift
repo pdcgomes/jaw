@@ -37,3 +37,9 @@ import Testing
     #expect(HarnessLaunch.parse(["JawHarness", "--snapshot", "--sweep", "/x"]).snapshot == nil, "a flag isn't a value")
     #expect(HarnessLaunch.parse(["JawHarness", "--density", "roomy", "--font", "comic"]) == defaults)
 }
+
+@MainActor @Test func `--theme takes any theme's ID, Jaw's, Omarchy's or Redlamp's, and nothing else`() {
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "omarchy:gruvbox"]).conditions.theme == "omarchy:gruvbox")
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "redlamp:nord"]).conditions.theme == "redlamp:nord")
+    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "nord"]).conditions.theme == "jaw", "an ID names its source")
+}

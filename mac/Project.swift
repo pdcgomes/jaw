@@ -134,8 +134,9 @@ let project = Project(
             deploymentTargets: .macOS(macOS),
             infoPlist: appInfo(name: "Jaw Harness"),
             sources: ["JawHarness/Sources/**"],
-            // The app's icon, and the protocol's fixtures, which the scenes decode as jawd sends them.
-            resources: ["JawApp/Resources/**", "../protocol/fixtures/*.json"],
+            // The app's icon; the protocol's fixtures, which the scenes decode as jawd sends them; and
+            // Omarchy's themes, which they read as jawd serves them.
+            resources: ["JawApp/Resources/**", "../protocol/fixtures/*.json", "../protocol/themes/*.toml"],
             dependencies: [.target(name: "JawKit"), .target(name: "JawThemes"), .target(name: "JawUI")],
             settings: settings([
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",

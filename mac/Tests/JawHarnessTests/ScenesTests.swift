@@ -54,7 +54,7 @@ func emptyChatList(_ bands: [Note], width: CGFloat) -> HarnessScene {
             "roles", "mimic", "chat-list", "sidebar", "empty-folder", "roster", "conversation", "link-previews", "polls", "pictures",
             "download-states", "upload-states", "attachment-strip", "contact-cards", "library-grid", "library-rows", "library-all",
             "library-kinds", "library-search", "palette",
-            "poll-form", "contact-sheet", "contact-form", "states",
+            "poll-form", "contact-sheet", "contact-form", "settings-panes", "theme-gallery", "theme-states", "states",
             "screens-jawd", "screens-connection", "screens-linking", "screens-empty",
             "screens-chat", "screens-panes", "screens-library", "screens-focus", "screens-folded", "screens-overlays",
         ])

@@ -10,7 +10,11 @@ struct ConditionsControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Space.m) {
             Picker("Theme", selection: $conditions.theme) {
-                ForEach(Catalog.families) { Text($0.name).tag($0.id) }
+                ForEach(ThemeSource.allCases, id: \.self) { source in
+                    Section(source.title) {
+                        ForEach(Fixtures.themes.filter { $0.source == source }) { Text($0.name).tag($0.id) }
+                    }
+                }
             }
             Picker("Appearance", selection: $conditions.dark) {
                 Text("Dark").tag(true)
