@@ -281,7 +281,9 @@ done
 n=0
 for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work mise.local.toml .mise.toml .mise.local.toml \
     .mise/config.toml .config/mise.toml .config/mise/config.toml .tool-versions mise/tasks/new .config/mise.local.toml \
-    .miserc.toml .config/miserc.toml mise.macos.toml mise.x.local.toml .config/mise.x.toml mac/mise.toml; do
+    .miserc.toml .config/miserc.toml mise.macos.toml mise.x.local.toml .config/mise.x.toml mac/mise.toml \
+    .MISE/config.toml .Config/mise/config.toml .CARGO/config.toml Rust-Toolchain.toml mac/.mise/config.toml \
+    mac/mise-tasks/mac mac/.config/mise.toml; do
     n=$((n + 1))
     copy "new-$n"
     mkdir -p "$(dirname "$new")"
@@ -295,6 +297,11 @@ copy new-case
 echo '# new' > .Mise.local.toml
 says "a new .Mise.local.toml, which mise reads for .mise.local.toml where the volume ignores case" changed \
     "main at $at, $changed"
+copy config-link
+mkdir "$scratch/settings"
+echo '# new' > "$scratch/settings/mise.toml"
+ln -s "$scratch/settings" .config
+says "a new .config, a symlink to a folder outside the checkout that holds a mise.toml" changed "main at $at, $changed"
 n=0
 for input in mise.toml mise/tasks/engine scripts/version VERSION; do
     n=$((n + 1))

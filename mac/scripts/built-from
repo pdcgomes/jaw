@@ -8,10 +8,11 @@
 # has that checkout's main for it; "changed" is a tree with uncommitted changes to what jawd and
 # jaw-engine are built from, Cargo's, rustup's and go's settings beside them, mise's tasks and settings and what
 # gives the version included, which the app's own sources, the docs and the READMEs aren't; and a
-# tree outside git says branch. mise's tasks and settings are the folders mise/, .mise/ and
-# .config/mise/, and at the top, in .config/ and in mac/, where mise run mac may start, every
-# file whose name has mise in it and ends .toml, has miserc in it or is .tool-versions, whatever
-# its case, which the volume ignores. It reads origin/main by its whole ref, which a branch or tag called
+# tree outside git says branch. mise's tasks and settings are, at the top and in mac/, where mise run
+# mac may start, the folders mise/, .mise/ and .config/ and every file whose name has mise in it and
+# ends .toml, has miserc in it or is .tool-versions, and mac/'s mise-tasks/ and .mise-tasks/, whose
+# tasks stand in for the top's; and what jawd is built from counts whatever the case of its names,
+# which the volume ignores. It reads origin/main by its whole ref, which a branch or tag called
 # origin/main can't stand in for; counts as a change every untracked file but a .DS_Store, whatever
 # an ignore file or status.showUntrackedFiles says, since Cargo runs a new build.rs and go compiles a
 # new .go file however git is told to ignore it, and every file git is told to assume unchanged or
@@ -22,12 +23,14 @@
 # stand for another; and stops when git can't read the tree, so mise run mac records nothing. Given a
 # file as well, it says changed when anything jawd is built from was written since that file was,
 # so mise run mac sees a change made and undone while it built. What it can't see: a change a filter of
-# git's hides, a file made at the checkout's top, in .config/ or in mac/ and removed again since the
+# git's hides, a file or folder made at the checkout's top or in mac/ and removed again since the
 # file given, a change undone with its files' times put back, or kept with them put back within the
-# second git last read the files, since git may compare ctime only to the second, mise's settings in
-# other folders, such as mac/.mise/, or in .mise/ and .config/mise/ named in another case, and
-# settings outside the checkout, Cargo's, go's and mise's own (mise's global config, a parent
-# folder's) and the environment's. It only reads: git takes none of its optional locks.
+# second git last read the files, since git may compare ctime only to the second, a name whose case
+# differs beyond ASCII's, such as .miſe.local.toml with a long s, which the volume reads as
+# .mise.local.toml and git, folding only ASCII, doesn't match, mise's settings in other folders,
+# should mise run mac start in one, and settings outside the checkout, Cargo's, go's and mise's own
+# (mise's global config, a parent folder's) and the environment's. It only reads: git takes none of
+# its optional locks.
 #
 #   mac/scripts/built-from [<checkout> [<since>]]   # this script's own checkout by default
 set -euf
@@ -39,12 +42,15 @@ export GIT_OPTIONAL_LOCKS=0 GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/var/empty/g
 host=github.com
 name=pdcgomes/jaw
 inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work"
-inputs="$inputs mise .mise .config/mise scripts/version VERSION"
-# mise's settings at the top, in .config/ and in mac/: patterns git matches whatever the case, whose *
-# never crosses a /, and which reach git as written, since set -f turns the shell's globbing off.
-settings=":(icase,glob)*mise*.toml :(icase,glob).config/*mise*.toml :(icase,glob)mac/*mise*.toml"
-settings="$settings :(icase,glob)*miserc* :(icase,glob).config/*miserc* :(icase,glob)mac/*miserc*"
-settings="$settings :(icase,glob).tool-versions :(icase,glob).config/.tool-versions :(icase,glob)mac/.tool-versions"
+inputs="$inputs mise .mise .config mac/mise mac/.mise mac/.config mac/mise-tasks mac/.mise-tasks scripts/version VERSION"
+# The inputs as git matches them whatever their case; the since-check's find takes their own names,
+# which the volume reads whatever the case on disk.
+pathspecs=$(printf ':(icase)%s ' $inputs)
+# mise's settings at the top and in mac/: patterns git matches whatever the case, whose * never
+# crosses a /, and which reach git as written, since set -f turns the shell's globbing off.
+settings=":(icase,glob)*mise*.toml :(icase,glob)mac/*mise*.toml"
+settings="$settings :(icase,glob)*miserc* :(icase,glob)mac/*miserc*"
+settings="$settings :(icase,glob).tool-versions :(icase,glob)mac/.tool-versions"
 since=${2:-}
 cd "${1:-$(dirname "$0")/../..}"
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -60,13 +66,13 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
 changes=$(git -c core.fsmonitor=false -c core.trustctime=true -c core.checkStat=default \
-    status --porcelain --untracked-files=no --ignore-submodules=none -- $inputs $settings)
+    status --porcelain --untracked-files=no --ignore-submodules=none -- $pathspecs $settings)
 # No pattern of the settings reaches two folders down: git, told to leave out every folder there, lists
 # the same files and reads only the top and its folders, where it would walk all of target/ for them.
-others=$(git -c core.fsmonitor=false ls-files --others -- $inputs &&
+others=$(git -c core.fsmonitor=false ls-files --others -- $pathspecs &&
     git -c core.fsmonitor=false ls-files --others --exclude='/*/*/' -- $settings)
 untracked=$(printf '%s\n' "$others" | sed '/\/\.DS_Store$/d')
-tracked=$(git -c core.fsmonitor=false ls-files -v -- $inputs $settings)
+tracked=$(git -c core.fsmonitor=false ls-files -v -- $pathspecs $settings)
 unwatched=$(printf '%s\n' "$tracked" | sed -n '/^[^H]/p')
 written=
 if [ -n "$since" ]; then
@@ -76,8 +82,8 @@ if [ -n "$since" ]; then
             written="$written$found"
         fi
     done
-    # The files the settings' patterns name, which find matches in each of their three folders as git does.
-    for folder in . .config mac; do
+    # The files the settings' patterns name, which find matches at the top and in mac/ as git does.
+    for folder in . mac; do
         if [ -d "$folder" ]; then
             found=$(find "$folder" -maxdepth 1 \
                 \( -iname '*mise*.toml' -o -iname '*miserc*' -o -iname .tool-versions \) -newer "$since")
