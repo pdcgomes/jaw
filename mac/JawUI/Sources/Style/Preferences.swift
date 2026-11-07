@@ -69,6 +69,8 @@ public final class Preferences {
     public var slots: Slots {
         didSet {
             made = [:]
+            listed = nil
+            remember()
             save()
         }
     }
@@ -83,6 +85,25 @@ public final class Preferences {
             tell()
         }
     }
+
+    /// Omarchy's themes as jawd served them this run, nil until it has. They stay when jawd goes away,
+    /// as its answer still holds. The app is told only when what a slot draws changes, so jawd's first
+    /// answer, which comes as a launch's first rows do, restyles no window while the slots hold Jaw's or
+    /// Redlamp's themes or a copy whose colours jawd serves as they were; Settings, which observes
+    /// this, redraws either way.
+    public var served: [OmarchyTheme]? = nil {
+        didSet {
+            guard served != oldValue else { return }
+            let drawn = Slot.allCases.map { made[$0] ?? Catalog.roles($0, of: slots, omarchy: oldValue ?? remembered(slots), accent: accent) }
+            made = [:]
+            listed = nil
+            remember()
+            if Slot.allCases.map({ roles($0) }) != drawn { tell() }
+        }
+    }
+
+    /// What the gallery's Omarchy section says while jawd hasn't served its themes.
+    public var omarchyState: OmarchyState = .connecting
 
     /// How much panes without the keys are dimmed, 0 to 0.6.
     public var paneDim: Double { didSet { save() } }
@@ -164,23 +185,60 @@ public final class Preferences {
         Style(roles: roles(dark ? .dark : .light), look: look, density: density, textSize: textSize, font: font)
     }
 
-    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. The
-    /// slots and the accent are read before what's made, so a view drawn from them redraws as they change.
+    /// What `slot` draws: its theme's half, or Jaw's Tokyo Night's where no source has the theme. What
+    /// it rests on is read before what's made, so a view drawn from it redraws as that changes.
     public func roles(_ slot: Slot) -> Roles {
-        let slots = self.slots, accent = self.accent
+        let slots = self.slots, accent = self.accent, served = self.served
         if let roles = made[slot] { return roles }
-        let roles = Catalog.roles(slot, of: slots, omarchy: [], accent: accent)
+        let roles = Catalog.roles(slot, of: slots, omarchy: served ?? remembered(slots), accent: accent)
         made[slot] = roles
         return roles
     }
 
-    /// Every theme there is to choose, in the gallery's order.
+    /// Every theme there is to choose, in the gallery's order: Omarchy's as jawd serves them, or until
+    /// it has, the slots' own from their copies.
     public var themes: [Theme] {
-        let accent = self.accent
+        let slots = self.slots, accent = self.accent, served = self.served
         if let listed { return listed }
-        let themes = Catalog.themes(omarchy: [], accent: accent)
+        let themes = Catalog.themes(omarchy: served ?? remembered(slots), accent: accent)
         listed = themes
         return themes
+    }
+
+    /// The line the Omarchy section shows in place of jawd's themes, or nil once they're in.
+    public var omarchyLine: String? {
+        served == nil ? omarchyState.line : nil
+    }
+
+    /// The slots' Omarchy themes as jawd last served them, from the copies kept beside the slots; a copy
+    /// of a theme other than its slot's is passed over.
+    func remembered(_ slots: Slots) -> [OmarchyTheme] {
+        Slot.allCases.compactMap { slot in
+            guard var colours = defaults.dictionary(forKey: Self.copy(slot)) as? [String: String],
+                  let id = colours.removeValue(forKey: "id"), let name = colours.removeValue(forKey: "name"),
+                  slots[slot] == "omarchy:" + id
+            else { return nil }
+            return OmarchyTheme(id: id, name: name, dark: slot.isDark, colours: colours)
+        }
+    }
+
+    /// Where a slot's copy of its Omarchy theme is kept.
+    static func copy(_ slot: Slot) -> String {
+        slot.isDark ? "themeDarkColours" : "themeLightColours"
+    }
+
+    /// Keeps a copy of each slot's Omarchy theme as jawd serves it, with its ID and name, and drops one
+    /// jawd no longer serves, so the next launch draws what this one does before jawd answers; a
+    /// snapshot's preferences keep none.
+    func remember() {
+        guard keeps, let served else { return }
+        for slot in Slot.allCases {
+            if let theme = served.first(where: { "omarchy:" + $0.id == slots[slot] && $0.dark == slot.isDark }) {
+                defaults.set(theme.colours.merging(["id": theme.id, "name": theme.name]) { $1 }, forKey: Self.copy(slot))
+            } else {
+                defaults.removeObject(forKey: Self.copy(slot))
+            }
+        }
     }
 
     /// Reads the system's accent, orange, green and red again, as the app does when AppKit says the system's colours changed.

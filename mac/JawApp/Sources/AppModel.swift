@@ -20,7 +20,9 @@ final class AppModel {
 
     typealias Reach = Situation.Reach
 
-    var reach: Reach = .waiting
+    var reach: Reach = .waiting {
+        didSet { preferences.omarchyState = OmarchyState(reach) }
+    }
     var welcome: Welcome?
     var connection = Connection(state: .connecting)
     var linked = true
@@ -195,6 +197,7 @@ final class AppModel {
             window?.chatList.root = w.root
             window?.sidebar.roster.root = w.root
             pictures.files = .folder(w.root)
+            jawd.themes()
             jawd.status(shown: false)
         case let .unreachable(why, retryIn):
             reach = Reach(agent.unreachable(), why: why, retry: Int(retryIn / .seconds(1)))
@@ -337,6 +340,10 @@ final class AppModel {
             }
         case let .statusRead(status):
             read(status)
+        case let .themes(served):
+            preferences.served = served.map { OmarchyTheme(id: $0.id, name: $0.name, dark: $0.mode == .dark, colours: $0.colors) }
+        case let .noThemes(older, why):
+            preferences.omarchyState = older ? .older : .refused(why)
         case .push, .chats, .layout, .folders, .roster:
             break
         }

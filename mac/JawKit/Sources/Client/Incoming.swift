@@ -2,7 +2,7 @@ import Foundation
 
 /// What a request's result is read as, so each line is decoded once, into the value it is.
 public enum Expect: Sendable, Hashable {
-    case json, sent, sentMedia, chat, info, chatInfo, status, layout, saved, folder
+    case json, sent, sentMedia, chat, info, chatInfo, status, layout, saved, folder, themes
 }
 
 /// A request's answer, read as what it was asked for.
@@ -18,6 +18,8 @@ public enum Reply: Sendable, Hashable {
     case saved(Saved)
     /// The folder made, or nil when it went before jawd read it back.
     case folder(FolderRow?)
+    /// Omarchy's themes, in the order jawd serves them.
+    case themes([ServedTheme])
 }
 
 /// What the reader expects of the reply with an id: looked up as the line decodes.
@@ -100,6 +102,7 @@ struct IncomingLine: Decodable {
                 case .reply(.layout): value = try .reply(id, .layout(c.decode(KeptLayout.self, forKey: .result)))
                 case .reply(.saved): value = try .reply(id, .saved(c.decode(Saved.self, forKey: .result)))
                 case .reply(.folder): value = try .reply(id, .folder(c.decode(FolderMade.self, forKey: .result).folder))
+                case .reply(.themes): value = try .reply(id, .themes(c.decode(ServedThemes.self, forKey: .result).themes))
                 }
             } catch {
                 value = .bad(id, "what jawd sent isn't jaw's protocol: \(error)")

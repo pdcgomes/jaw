@@ -184,6 +184,30 @@ func helloed(_ all: [JawUpdate]) -> Int {
         #expect(text == "opening the terminal's panes comes with the next step" && tone == .warning)
     }
 
+    @Test func `Omarchy's themes come as jawd serves them, and a jawd from before them is told apart from a drop`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            method == "themes" ? [FakeJawd.answer("themes.result.json", id: id)] : ordinary(method, params, id)
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.themes()
+        let all = await drain(jawd) { all in all.contains { if case .themes = $0 { true } else { false } } }
+        let themes: [ServedTheme] = all.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        #expect(themes.map(\.id) == ["catppuccin", "catppuccin-latte"] && themes.map(\.mode) == [.dark, .light])
+        #expect(requests(fake, "themes") == [.null], "asked with no params")
+        let older = jawd.refused(.themes, .jawd(JawError(code: ErrorCode.unknownMethod, message: "unknown method: themes")))
+        let busy = jawd.refused(.themes, .jawd(JawError(code: ErrorCode.limit, message: "jawd is busy")))
+        guard case let .noThemes(isOlder, _)? = older.first, case let .noThemes(busyIsOlder, why)? = busy.first else {
+            Issue.record("nothing said: \(older), \(busy)")
+            return
+        }
+        #expect(isOlder && !busyIsOlder && why == "jawd is busy")
+        #expect(jawd.refused(.themes, .lost).isEmpty && jawd.refused(.themes, .unreachable).isEmpty,
+                "a drop says nothing, as the next hello asks again")
+    }
+
     @Test func `what jawd refuses to send says why, the outbox in a few words`() {
         let full = Failure.jawd(JawError(code: ErrorCode.limit, message: "the outbox is full",
                                          data: .object(["limit": .string("outbox"), "waiting": .number(1000), "failed": .number(2)])))

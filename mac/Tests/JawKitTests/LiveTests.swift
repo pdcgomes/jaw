@@ -318,6 +318,34 @@ struct LiveTests {
         #expect(found.last?.0 == unknown && found.last?.1 == .gone, "jawd has no chat by that JID")
     }
 
+    @Test func `a real jawd serves Omarchy's 23 themes as protocol/themes has them, in the order of their IDs, each with its mode and its 25 colours`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let held = Held(demo.socket)
+        defer { held.jawd.close() }
+        #expect(await held.until { h in h.updates.contains { if case .hello = $0 { true } else { false } } })
+        held.jawd.themes()
+        #expect(await held.until { h in h.updates.contains { if case .themes = $0 { true } else { false } } })
+        let themes: [ServedTheme] = held.updates.compactMap { if case let .themes(t) = $0 { t } else { nil } }.first ?? []
+        let folder = repo.appending(path: "protocol/themes")
+        let files = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".toml") }
+            .map { String($0.dropLast(5)) }.sorted()
+        #expect(themes.count == 23 && themes.map(\.id) == files, "every file protocol/themes holds, in the order of their IDs")
+        #expect(themes.filter { $0.mode == .light }.map(\.id) == ["catppuccin-latte", "flexoki-light", "lupine", "rose-pine", "white"])
+        #expect(themes.allSatisfy { $0.colors.count == 25 } && themes.first { $0.id == "rose-pine" }?.name == "Rosé Pine")
+        for theme in themes {
+            // Read as `key = "value"` lines, which is all a colors.toml is.
+            var written: [String: String] = [:]
+            for line in try String(contentsOf: folder.appending(path: "\(theme.id).toml"), encoding: .utf8).split(separator: "\n") {
+                let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2 { written[parts[0]] = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")).lowercased() }
+            }
+            #expect(theme.mode.rawValue == written["mode"], "\(theme.id)'s mode, as its file has it")
+            #expect(theme.colors["background"] == written["background"] && theme.colors["accent"] == written["accent"],
+                    "\(theme.id)'s ground and accent, as its file has them")
+        }
+    }
+
     @Test func `the made-up account's people type, and a real jawd says who in its answers and pushes`() async throws {
         let demo = try DemoJawd()
         defer { demo.stop() }

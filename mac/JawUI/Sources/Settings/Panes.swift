@@ -31,7 +31,10 @@ public struct AppearancePane: View {
                     }
                 }
             } footer: {
-                Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
+                VStack(alignment: .leading) {
+                    Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
+                    if let line = preferences.omarchyLine { Text(line) }
+                }
             }
         }
         .formStyle(.grouped)

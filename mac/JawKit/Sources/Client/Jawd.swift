@@ -255,6 +255,12 @@ public final class Jawd {
         ask("status", NoParams?.none, shown ? .status : .statusRead, expect: .status)
     }
 
+    /// Asks for Omarchy's themes, which come as `.themes`; a jawd that doesn't serve them is said as
+    /// `.noThemes`, and a drop says nothing, as the app asks again at the next hello.
+    public func themes() {
+        ask("themes", NoParams?.none, .themes, expect: .themes)
+    }
+
     /// Asks for the panes jawd keeps for `interface`, by the name it gives in hello. They come as
     /// `.layout`; a jawd that doesn't serve `layout.get` is said as `what` coming with the next step,
     /// and anything else that stops them, a malformed tree included, is said in its own words.
@@ -463,6 +469,8 @@ public final class Jawd {
             out.append(.members(chat: chat, info.members))
         case let (.status, .status(status)):
             out.append(.status(status))
+        case let (.themes, .themes(themes)):
+            out.append(.themes(themes))
         case let (.statusRead, .status(status)):
             out.append(.statusRead(status))
         case let (.layout, .layout(kept)):
@@ -598,6 +606,7 @@ public final class Jawd {
         case info(String)
         case members(String)
         case status
+        case themes
         /// `status` read, not shown.
         case statusRead
         /// Panes asked for, named as opening them is said: "opening the terminal's panes".
@@ -780,6 +789,9 @@ public final class Jawd {
             }
             return [.filed(.added(item: moving.item, to: moving.to)),
                     .notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
+        case .themes:
+            if failure == .lost || failure == .unreachable { return [] }
+            return [.noThemes(older: failure.code == ErrorCode.unknownMethod, why: failure.description)]
         case .status, .statusRead, .quiet:
             return []
         }
@@ -871,6 +883,11 @@ public enum JawUpdate: Sendable {
     case chatStarted(ChatRow)
     case notStarted(String)
     case status(Status)
+    /// Omarchy's themes, as `themes` answered.
+    case themes([ServedTheme])
+    /// jawd didn't serve its themes: an older one, which doesn't know `themes`, or another refusal, in
+    /// jawd's words.
+    case noThemes(older: Bool, why: String)
     /// jawd's status, read rather than shown.
     case statusRead(Status)
     /// The panes jawd keeps for an interface, as `layout.get` answered.

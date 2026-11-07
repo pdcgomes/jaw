@@ -58,6 +58,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "message.info": .reply(.info)
         case "chat.info": .reply(.chatInfo)
         case "status": .reply(.status)
+        case "themes": .reply(.themes)
         case "layout.get": .reply(.layout)
         case "media.save": .reply(.saved)
         case "folders.watch": .folders
@@ -372,6 +373,7 @@ func pushed(_ line: String) -> Incoming {
     try same("chat.info.request.json", written(id: 46, "chat.info", ChatRef(chat: "120363000000000002@g.us")))
     try same("layout.get.request.json", written(id: 30, "layout.get", LayoutGet(interface: "jaw")))
     try same("status.request.json", written(id: 2, "status", NoParams?.none))
+    try same("themes.request.json", written(id: 21, "themes", NoParams?.none))
 }
 
 @Test func `the tree, its slots and the roster read as the protocol's fixtures have them`() throws {
@@ -496,4 +498,14 @@ func pushed(_ line: String) -> Incoming {
     #expect(watched.rows.count == rows.count - 1)
     #expect(watched.unread == 1)
     #expect(watched.why != nil)
+}
+
+@Test func `themes' answer decodes as jaw-proto serves Omarchy's themes, each with its mode and its 25 colours`() throws {
+    guard case let .reply(_, .themes(themes)) = try incoming("themes.result.json", .reply(.themes)) else {
+        Issue.record("not themes")
+        return
+    }
+    #expect(themes.map(\.id) == ["catppuccin", "catppuccin-latte"] && themes.map(\.name) == ["Catppuccin", "Catppuccin Latte"])
+    #expect(themes.map(\.mode) == [.dark, .light] && themes.allSatisfy { $0.colors.count == 25 })
+    #expect(themes.first?.colors["background"] == "#1e1e2e" && themes.first?.colors["brown"] == "#7b5b55")
 }
