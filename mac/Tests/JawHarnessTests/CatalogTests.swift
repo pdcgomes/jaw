@@ -66,5 +66,5 @@ func stub(_ id: String, _ section: HarnessSection, axes: Axes = []) -> HarnessSc
     conditions.dark = false
     #expect(conditions.roles == Catalog.jaw.light, "Gruvbox is dark only")
     conditions.theme = "redlamp:neutral"
-    #expect(conditions.roles.accent.hex == 0x007AFF, "Neutral in macOS's blue, whatever the Mac's accent")
+    #expect(conditions.roles.accent.hex == 0x007AFF, "Neutral in #007AFF, the accent the harness gives it")
 }

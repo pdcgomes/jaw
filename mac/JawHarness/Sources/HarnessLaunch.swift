@@ -13,7 +13,8 @@ import JawUI
 /// - `--snapshot <png>` draws the scene into a picture, and quits.
 /// - `--sweep <folder>` draws every scene in each of its variants, with `manifest.json`, and quits.
 ///
-/// A value it doesn't know leaves what it sets as it was.
+/// A value it doesn't know leaves what it sets as it was, but for a `--theme` that names no theme,
+/// which stops the harness, saying the ones it takes, so a slip doesn't draw Tokyo Night in its place.
 struct HarnessLaunch: Equatable {
     struct Size: Hashable, Sendable {
         var width: CGFloat
@@ -26,6 +27,9 @@ struct HarnessLaunch: Equatable {
     var stageOnly = false
     var snapshot: String?
     var sweep: String?
+    /// Why the harness can't do what it was asked, which it says on standard error as it quits with
+    /// status 1.
+    var problem: String?
 
     @MainActor static let current = parse(CommandLine.arguments)
 
@@ -37,8 +41,12 @@ struct HarnessLaunch: Equatable {
         }
         var launch = HarnessLaunch()
         launch.scene = value("--scene")
-        if let theme = value("--theme"), Fixtures.themes.contains(where: { $0.id == theme }) {
-            launch.conditions.theme = theme
+        if let theme = value("--theme") {
+            if Fixtures.themes.contains(where: { $0.id == theme }) {
+                launch.conditions.theme = theme
+            } else {
+                launch.problem = "there's no theme called \(theme); --theme takes \(Fixtures.themes.map(\.id).joined(separator: ", "))"
+            }
         }
         switch value("--appearance") {
         case "dark": launch.conditions.dark = true

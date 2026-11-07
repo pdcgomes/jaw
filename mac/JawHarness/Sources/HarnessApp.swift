@@ -25,12 +25,16 @@ struct HarnessApp: App {
     }
 }
 
-/// Draws what `--snapshot` or `--sweep` asks for once the app has started, then quits; a failure says
-/// why on standard error and quits with status 1, so a script stops on it.
+/// Draws what `--snapshot` or `--sweep` asks for once the app has started, then quits; a failure, or
+/// flags it can't follow, says why on standard error and quits with status 1, so a script stops on it.
 final class HarnessDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func applicationDidFinishLaunching(_: Notification) {
         let launch = HarnessLaunch.current
+        if let problem = launch.problem {
+            FileHandle.standardError.write(Data("jaw-harness: \(problem)\n".utf8))
+            exit(1)
+        }
         guard launch.snapshot != nil || launch.sweep != nil else { return }
         Task { @MainActor in
             do {

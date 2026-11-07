@@ -12,7 +12,7 @@ struct ConditionsControls: View {
             Picker("Theme", selection: $conditions.theme) {
                 ForEach(ThemeSource.allCases, id: \.self) { source in
                     Section(source.title) {
-                        ForEach(Fixtures.themes.filter { $0.source == source }) { Text($0.name).tag($0.id) }
+                        ForEach(Fixtures.themes.filter { $0.source == source }) { Text("\($0.name), \($0.source.title)").tag($0.id) }
                     }
                 }
             }

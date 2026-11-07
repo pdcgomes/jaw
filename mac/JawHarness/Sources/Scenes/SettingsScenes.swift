@@ -37,7 +37,7 @@ extension HarnessScene {
 /// its appearance and Jaw's in the other; Omarchy's themes as jawd serves them; and Neutral in macOS
 /// 27.0.1's colours (`SystemAccent.blue`), so the pictures don't depend on the Mac's colours.
 @MainActor
-func scenePreferences(_ conditions: Conditions) -> Preferences {
+private func scenePreferences(_ conditions: Conditions) -> Preferences {
     let preferences = Preferences(defaults: SettingsDefaults.shared, accent: .blue)
     preferences.look = conditions.look
     preferences.density = conditions.density
@@ -80,7 +80,7 @@ private struct SettingsPanesScene: View {
             ) { pane(AppearancePane(preferences: preferences)) }
             SpecimenGroup(
                 title: "Messages",
-                note: "Bubbles or lines, then spacing, text size and font, each explanation its section's footer, as the sheet had them.",
+                note: "Bubbles or lines, then spacing, text size and font, then whether photos and videos go in HD, each explanation its section's footer.",
                 roles: roles,
             ) { pane(MessagesPane(preferences: preferences)) }
             SpecimenGroup(
@@ -135,13 +135,14 @@ private struct ThemeStatesScene: View {
         conditions.dark ? .dark : .light
     }
 
-    /// The scene's theme, or Jaw's where it has no half for the scene's appearance.
-    var theme: Theme {
-        Fixtures.themes.first { $0.id == conditions.theme && $0.roles(slot) != nil } ?? Catalog.jawTheme
+    /// The scene's theme and its half for the scene's appearance, or Jaw's where it has no such half.
+    var shown: (theme: Theme, roles: Roles) {
+        if let theme = Fixtures.themes.first(where: { $0.id == conditions.theme }), let roles = theme.roles(slot) { return (theme, roles) }
+        return (Catalog.jawTheme, Catalog.jaw.roles(dark: slot.isDark))
     }
 
     var body: some View {
-        let roles = theme.roles(slot) ?? conditions.roles
+        let (theme, roles) = shown
         let slots = conditions.dark ? Slots(dark: theme.id) : Slots(light: theme.id)
         let empty = Slots(dark: "", light: "")
         VStack(alignment: .leading, spacing: 0) {
@@ -159,7 +160,7 @@ private struct ThemeStatesScene: View {
             }
             SpecimenGroup(
                 title: "The slots",
-                note: "The slot chosen for outlined in the accent; the one in use says so, and the other when it would be, as Appearance holds one.",
+                note: "The slot chosen for outlined in the accent; the one in use says so, and the other when it would be, as Appearance holds one; on the window's colour, set in as the pane sets them, so each is as wide as there and a name wraps where it wraps there.",
                 roles: conditions.roles,
             ) {
                 HStack(spacing: Space.m) {
@@ -170,6 +171,9 @@ private struct ThemeStatesScene: View {
                     }
                 }
                 .fixedSize(horizontal: false, vertical: true)
+                .padding(SettingsPane.margin)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: Radius.panel))
             }
             SpecimenGroup(
                 title: "Omarchy's, while jawd's themes aren't in",

@@ -60,7 +60,7 @@ private struct RolesScene: View {
             }
             SpecimenGroup(
                 title: "The text colours",
-                note: "Secondary and tertiary text, the accent drawn as text, the links and read ticks, mentions, online and failed, each as it's drawn on the ground and on the surface. Each is text, so each wants 4.5:1 on both; one under it is a colour to look at.",
+                note: "The text, secondary and tertiary text, the accent drawn as text, the links and read ticks, mentions, online and failed, each as it's drawn on the ground and on the surface. The text holds at 4.5:1 on both, the tertiary text at 2.5 to 4.5:1 and the rest at 3:1, as every theme's are held; one under its floor is a colour to look at.",
                 roles: roles,
             ) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: Space.l)], spacing: Space.l) {
@@ -78,7 +78,7 @@ private struct RolesScene: View {
             }
             SpecimenGroup(
                 title: "The senders",
-                note: "Names in a group, by the index jawd gives each member, on the surface their bubbles are. Each should read at 4.5:1 or more there; one under it is a name that's hard to read.",
+                note: "Names in a group, by the index jawd gives each member, on the surface their bubbles are. Each should read at 3:1 or more there, as every theme's are held; one under it is a name that's hard to read.",
                 roles: roles,
             ) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: Space.l)], spacing: Space.l) {

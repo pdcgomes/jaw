@@ -20,8 +20,7 @@ import Testing
 
 @MainActor @Test func `a value it doesn't know leaves what it sets as it was`() {
     let launch = HarnessLaunch.parse([
-        "JawHarness", "--theme", "nope", "--appearance", "sepia", "--look", "tiles", "--window", "big",
-        "--text-size", "huge", "--scene",
+        "JawHarness", "--appearance", "sepia", "--look", "tiles", "--window", "big", "--text-size", "huge", "--scene", "--theme",
     ])
     #expect(launch == HarnessLaunch.parse(["JawHarness"]))
 }
@@ -38,8 +37,12 @@ import Testing
     #expect(HarnessLaunch.parse(["JawHarness", "--density", "roomy", "--font", "comic"]) == defaults)
 }
 
-@MainActor @Test func `--theme takes any theme's ID, Jaw's, Omarchy's or Redlamp's, and nothing else`() {
-    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "omarchy:gruvbox"]).conditions.theme == "omarchy:gruvbox")
+@MainActor @Test func `--theme takes any theme's ID, Jaw's, Omarchy's or Redlamp's, and stops the harness at one that names none, saying which it takes`() {
+    let gruvbox = HarnessLaunch.parse(["JawHarness", "--theme", "omarchy:gruvbox"])
+    #expect(gruvbox.conditions.theme == "omarchy:gruvbox" && gruvbox.problem == nil)
     #expect(HarnessLaunch.parse(["JawHarness", "--theme", "redlamp:nord"]).conditions.theme == "redlamp:nord")
-    #expect(HarnessLaunch.parse(["JawHarness", "--theme", "nord"]).conditions.theme == "jaw", "an ID names its source")
+    let slip = HarnessLaunch.parse(["JawHarness", "--theme", "nord"])
+    #expect(slip.conditions.theme == "jaw", "an ID names its source")
+    #expect(slip.problem?.hasPrefix("there's no theme called nord; --theme takes jaw, omarchy:catppuccin, omarchy:catppuccin-latte,") == true
+        && slip.problem?.hasSuffix(", redlamp:mc-velvet-static") == true, "and one that names none is said, with all 46 it takes")
 }
