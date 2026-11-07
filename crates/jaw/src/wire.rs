@@ -920,6 +920,10 @@ impl Jawd for Wire {
         self.ask("link.start", params, Asked::Did("linking"));
     }
 
+    fn link_logout(&mut self) {
+        self.ask("link.logout", Value::Null, Asked::Did("logging out"));
+    }
+
     fn find(&mut self, id: u64, query: &str, k: Option<FoundKind>, chat: Option<&str>, limit: usize) {
         let find = Find {
             query: query.to_string(),

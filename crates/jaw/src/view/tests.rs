@@ -589,6 +589,53 @@ fn logged_out_and_linked_again_from_the_qr_code_goes_back_to_the_chats() {
 }
 
 #[test]
+fn the_palettes_log_out_asks_first_and_once_jawd_has_logged_out_jaw_offers_to_link_again() {
+    let (mut v, rx) = view(100, 36);
+    press(&mut v, &rx, "<c-k>log out");
+    let screen = frame(&mut v);
+    assert!(screen.contains("Log out of WhatsApp") && screen.contains("⏎ asks first"), "{screen}");
+    press(&mut v, &rx, "\n");
+    let asking = frame(&mut v);
+    assert!(asking.contains("log out of WhatsApp") && asking.contains("only the phone can link it again"), "{asking}");
+    assert!(asking.contains("esc keeps jaw linked") && asking.contains("jaw  online"), "not yet:\n{asking}");
+    press(&mut v, &rx, "<esc>");
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.contains("jaw  online") && !screen.contains("log out of WhatsApp"), "esc keeps it:\n{screen}");
+    press(&mut v, &rx, "<c-k>log out\n\n");
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.lines().next().unwrap().contains("jaw  logged out from jaw"), "{screen}");
+    assert!(screen.contains("Logged out from jaw.") && screen.contains("kept your messages"), "{screen}");
+    assert!(screen.contains("⏎ link again"), "{screen}");
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("It changes in"), "Enter links again");
+}
+
+#[test]
+fn the_palette_offers_to_log_out_only_while_the_account_is_linked() {
+    let (mut v, rx) = view(100, 36);
+    press(&mut v, &rx, "<c-k>log out");
+    assert!(frame(&mut v).contains("Log out of WhatsApp"));
+    v.apply(Update::Connection(logged_out("logged out from another device")));
+    let screen = frame(&mut v);
+    assert!(!screen.contains("Log out of WhatsApp"), "the phone logged jaw out meanwhile:\n{screen}");
+}
+
+#[test]
+fn a_link_that_failed_offers_to_link_again_and_enter_starts_afresh() {
+    let (mut v, rx) = view_in(State::Linking, 100, 36);
+    let why = "WhatsApp didn't finish linking jaw; link again";
+    v.apply(Update::Link(LinkStep::Failed { reason: why.into() }));
+    let screen = frame(&mut v);
+    assert!(screen.contains(&format!("Linking failed: {why}")) && screen.contains("⏎ link again"), "{screen}");
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("It changes in") && !screen.contains("Linking failed"), "{screen}");
+    assert!(!screen.contains("⏎ link again"), "{screen}");
+}
+
+#[test]
 fn the_header_says_how_the_connection_is() {
     for (state, said) in [
         (State::CatchingUp, "online · catching up 1,204 of 5,000 ━"),

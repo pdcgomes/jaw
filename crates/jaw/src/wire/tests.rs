@@ -298,6 +298,12 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             json!({ "settings": settings })
         }
         "library.watch" => fixture("library.watch.result")["result"].clone(),
+        // Answered once the account is forgotten, its connection push just after, as jawd has it.
+        "link.logout" => {
+            let out = json!({ "state": "logged_out", "reason": "logged out from jaw" });
+            push = Some(json!({ "method": "connection", "params": out }));
+            json!({})
+        }
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" | "history.more"
         | "library.shown" => {
             json!({})
@@ -2088,6 +2094,18 @@ fn on_a_real_jawd_that_said_linked_and_whose_engine_then_finds_no_device_jaw_off
         .find(|line| line["method"] == "connection" && line["params"]["state"] == "logged_out")
         .expect("then that it's logged out");
     assert_eq!(logged_out["params"]["reason"], "this device isn't linked any more");
+}
+
+#[test]
+fn logging_out_from_the_palette_asks_jawd_once_it_is_confirmed_and_shows_linking_once_jawd_says() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 100, 30);
+    run::press_live(&mut v, &rx, "<c-k>log out\n").unwrap();
+    assert!(jawd.asked("link.logout").is_empty(), "asked before it was confirmed");
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    let screen = until(&mut v, &rx, "link again");
+    assert_eq!(jawd.asked("link.logout"), [Value::Null], "{screen}");
+    assert!(screen.contains("Logged out from jaw.") && screen.contains("kept your messages"), "{screen}");
 }
 
 /// The quick look's windows go through the client beside the open chat's: one `messages.watch` of

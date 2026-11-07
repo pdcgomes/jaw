@@ -870,6 +870,15 @@ impl Account {
         self.after(1_500, Later::Tick { chat, id: message.to_string(), tick: Tick::Delivered });
     }
 
+    /// Logged out from jaw, as jawd says it once the engine has: the messages stay, and linking
+    /// again shows its code.
+    fn on_link_logout(&mut self) {
+        self.state = State::LoggedOut;
+        self.connection =
+            Connection { reason: Some("logged out from jaw".into()), ..Connection::new(ConnectionState::LoggedOut) };
+        self.send(Update::Connection(self.connection.clone()));
+    }
+
     fn on_link_start(&mut self, phone: Option<String>) {
         match phone {
             None => self.send_qr(),
@@ -1190,6 +1199,10 @@ impl Jawd for Demo {
 
     fn link_start(&mut self, phone: Option<String>) {
         self.defer(move |a| a.on_link_start(phone));
+    }
+
+    fn link_logout(&mut self) {
+        self.defer(|a| a.on_link_logout());
     }
 }
 

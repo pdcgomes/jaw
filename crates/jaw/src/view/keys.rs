@@ -483,6 +483,11 @@ impl View {
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Enter if logged_out => self.start_linking(),
+            // jawd's engine has cleared whatever a failed link left, so linking starts afresh.
+            KeyCode::Enter if matches!(self.link, Some(jaw_proto::LinkStep::Failed { .. })) => {
+                self.link = None;
+                self.jawd.link_start(None);
+            }
             KeyCode::Char('x') if logged_out => self.say("deleting the messages jaw keeps comes later"),
             KeyCode::Char('p') if !logged_out => self.phone = Some(String::new()),
             KeyCode::Esc if matches!(self.link, Some(jaw_proto::LinkStep::Code { .. })) => {

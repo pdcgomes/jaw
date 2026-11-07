@@ -4,6 +4,7 @@
 //! the real socket. No jawd here can run the Go engine: each runs the demo engine, and `JAW_ENGINE`
 //! names nothing.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -58,6 +59,26 @@ fn snapshot_with(home: &Path, keys: &str, (width, height): (u16, u16), more: &[&
 
 fn header(frame: &str) -> &str {
     frame.lines().next().unwrap_or_default()
+}
+
+/// What `jaw` with `args` on `home` prints, given `input`, and whether it succeeded; ended if it
+/// takes longer than PATIENCE.
+fn jaw(home: &Path, args: &[&str], input: &str) -> (bool, String) {
+    let mut jaw = command(Path::new(env!("CARGO_BIN_EXE_jaw")), home);
+    jaw.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = jaw.spawn().expect("jaw runs");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("jaw {args:?} didn't end within {PATIENCE:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), said)
 }
 
 /// The frame's lines that hold `text`.
@@ -381,6 +402,43 @@ fn logged_out_from_the_phone_jaw_says_why_keeps_the_messages_and_links_again_fro
     let frame = jawd.snapshot("");
     assert!(header(&frame).contains("jaw  online"), "{frame}");
     assert!(frame.contains("Lisbon Climbing") && frame.contains("the one at the lake"), "the messages kept:\n{frame}");
+}
+
+#[test]
+fn logged_out_from_jaw_jaw_unlink_asks_first_keeps_the_messages_and_jaw_link_links_again() {
+    let jawd = Jawd::demo(&[]);
+    let stored = status_of(jawd.home()).and_then(|s| s.stored).expect("jawd says what it stores");
+    let (ok, said) = jaw(jawd.home(), &["unlink"], "n\n");
+    assert!(ok && said.contains("Log out? [y/N]") && said.ends_with("jaw is still linked.\n"), "{said}");
+    assert_eq!(status_of(jawd.home()).unwrap().account.state, AccountState::Linked, "nothing logged out");
+    let (ok, said) = jaw(jawd.home(), &["unlink"], "y\n");
+    assert!(ok && said.contains("Logged out. jawd has deleted the session and kept your messages"), "{said}");
+    jawd.until("jaw to be logged out", |s| {
+        s.connection.state == ConnectionState::LoggedOut && s.account.state == AccountState::Unlinked
+    });
+    let now = status_of(jawd.home()).unwrap();
+    assert_eq!(now.connection.reason.as_deref(), Some("logged out from jaw"));
+    let kept = now.stored.expect("jawd says what it stores");
+    assert_eq!((kept.messages, kept.chats), (stored.messages, stored.chats), "the messages kept");
+    let frame = jawd.snapshot("");
+    assert!(header(&frame).contains("jaw  logged out from jaw"), "{frame}");
+    assert!(frame.contains("Logged out from jaw.") && frame.contains("kept your messages"), "{frame}");
+    assert!(frame.contains("⏎ link again"), "{frame}");
+    let (ok, said) = jaw(jawd.home(), &["unlink", "--yes"], "");
+    assert!(ok && said == "jaw isn't linked to WhatsApp; jaw link links it\n", "{said}");
+    let (ok, said) = jaw(jawd.home(), &["link"], "");
+    assert!(
+        ok && said.contains("████") && said.contains("Linked +351910000001."),
+        "the made-up phone links it:\n{said}"
+    );
+    jawd.until("jaw to be linked again", |s| {
+        s.connection.state == ConnectionState::Online && s.account.state == AccountState::Linked
+    });
+    let frame = jawd.snapshot("");
+    assert!(header(&frame).contains("jaw  online"), "{frame}");
+    assert!(frame.contains("Lisbon Climbing") && frame.contains("the one at the lake"), "the messages kept:\n{frame}");
+    let (ok, said) = jaw(jawd.home(), &["link"], "");
+    assert!(ok && said == "jaw is already linked to +351910000001; jaw unlink logs it out\n", "{said}");
 }
 
 #[test]

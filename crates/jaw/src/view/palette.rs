@@ -115,6 +115,9 @@ pub enum Does {
     /// In the picker: a folder to look in, and a file to pick.
     Open(std::path::PathBuf),
     Pick(std::path::PathBuf),
+    /// Asks before logging out, since only the phone can link jaw again; then logs out.
+    LogOut,
+    LogOutNow,
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -179,6 +182,8 @@ pub enum Mode {
     Attach {
         picked: Vec<std::path::PathBuf>,
     },
+    /// Whether to log out: Enter on its one action does, Esc keeps jaw linked.
+    LogOut,
 }
 
 /// One of the interface's own actions, matched against what's typed.
@@ -770,6 +775,13 @@ impl View {
                 Does::Messages(Messages::Bubbles),
             ),
         });
+        if self.linked == Some(true) && self.logged_out.is_none() {
+            all.push(Action::new(
+                "Log out of WhatsApp",
+                "unlinks jaw; your messages stay · ⏎ asks first",
+                Does::LogOut,
+            ));
+        }
         all.extend([
             Action::new("New poll", "in this chat", Does::Later("polls come later")).key("/poll"),
             Action::new("New group", "with people you pick", Does::Later("groups come later")),
@@ -867,6 +879,17 @@ impl View {
                 let people = p.results.iter().enumerate().filter(|(_, r)| theirs(r)).map(|(i, _)| Item::Found(i));
                 items.extend(people);
                 return items;
+            }
+            Mode::LogOut => {
+                let out = Action::new(
+                    "Log out",
+                    "jaw stops being a linked device, and only the phone can link it again",
+                    Does::LogOutNow,
+                );
+                return vec![
+                    Item::Heading("log out of WhatsApp", "jawd keeps your messages".into()),
+                    Item::Action(out),
+                ];
             }
             Mode::Move { folder } => {
                 let mut items = vec![Item::Heading("move", format!("{} into", self.folder_name(folder)))];
@@ -1082,7 +1105,7 @@ impl View {
                 return;
             }
             (
-                Mode::File { .. } | Mode::Move { .. },
+                Mode::File { .. } | Mode::Move { .. } | Mode::LogOut,
                 KeyCode::Char(_) | KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace,
             ) => {
                 return;
@@ -1442,6 +1465,18 @@ impl View {
                 self.jawd.folder_delete(&folder);
                 self.say(format!("{name} deleted; its chats stay wherever else they are"));
             }
+            Does::LogOut => {
+                let mut p = Palette::new();
+                p.narrow = Narrow::Actions;
+                p.answered = true;
+                p.mode = Mode::LogOut;
+                self.palette = Some(p);
+            }
+            Does::LogOutNow => {
+                close(self);
+                self.jawd.link_logout();
+                self.say("logging out…");
+            }
             Does::File => {
                 close(self);
                 self.file_this();
@@ -1651,6 +1686,7 @@ impl View {
             Mode::File { .. } => (" file ", " space ticks · n new folder · ⏎ files · esc closes "),
             Mode::Name { .. } => (" folder ", " ⏎ names it · esc closes "),
             Mode::Move { .. } => (" move ", " ↑↓ moves · ⏎ puts it there · esc closes "),
+            Mode::LogOut => (" log out ", " ⏎ logs out · esc keeps jaw linked "),
             Mode::Find => (" palette ", " ↑↓ moves · tab narrows · ⏎ does it · ctrl-g its message · esc closes "),
             Mode::React { .. } => (" react ", " 1-6 the quick ones · type for any other · ⏎ reacts · esc closes "),
             Mode::Delete { .. } => (" delete ", " ↑↓ moves · ⏎ deletes · esc closes "),
@@ -1709,7 +1745,9 @@ impl View {
                 "after how long?"
             } else if let Mode::Name { .. } = p.mode {
                 "the folder's name"
-            } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } | Mode::Vote { .. } = p.mode {
+            } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } | Mode::Vote { .. } | Mode::LogOut =
+                p.mode
+            {
                 ""
             } else if let Mode::Contact { .. } = p.mode {
                 "whose card? a name or a number"

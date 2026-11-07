@@ -79,6 +79,14 @@ impl Error {
     }
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Error {}
+
 /// Error codes: JSON-RPC's own, then jaw's.
 pub mod code {
     pub const PARSE: i32 = -32700;

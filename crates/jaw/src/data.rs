@@ -1434,6 +1434,9 @@ pub trait Jawd {
     fn set_settings(&mut self, change: &SettingsSet);
     /// Starts linking by QR code, or by a code typed on the phone for `phone`.
     fn link_start(&mut self, phone: Option<String>);
+    /// Logs the account out of WhatsApp; once jawd has, it says so as `Update::Connection`, logged
+    /// out from jaw.
+    fn link_logout(&mut self);
     /// The palette's search, numbered so only the answer to the latest is kept: one kind or all
     /// of them, messages in one chat or everywhere, at most `limit` of each kind.
     fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize);

@@ -50,6 +50,7 @@ impl Connection {
     }
 
     /// Sends a request and waits for its reply. Pushes that arrive meanwhile are kept for `push`.
+    /// jawd's refusal comes as its `jaw_proto::Error`, its message what the error says.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next;
         self.next += 1;
@@ -61,7 +62,7 @@ impl Connection {
                 FromJawd::Reply(reply) if reply.id == id => {
                     return match reply.outcome {
                         Outcome::Result(result) => Ok(result),
-                        Outcome::Error(error) => Err(anyhow!(error.message)),
+                        Outcome::Error(error) => Err(anyhow::Error::new(error)),
                     };
                 }
                 FromJawd::Push(push) => self.pushes.push_back(push),

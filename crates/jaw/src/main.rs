@@ -1,6 +1,7 @@
 //! jaw: WhatsApp in a terminal. It draws what jawd, the daemon, prepares: `jaw` on its own runs
 //! the interface on jawd, starting jawd first if it isn't running, `jaw demo` runs it on a
-//! made-up account, `jaw status` asks jawd how it is, and `jaw link` links an account.
+//! made-up account, `jaw status` asks jawd how it is, `jaw link` links an account and `jaw unlink`
+//! logs it out.
 
 mod agent;
 mod art;
@@ -25,7 +26,7 @@ use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
 use jaw_proto::settings::TERMINAL;
-use jaw_proto::{AccountState, LinkStart, LinkStep};
+use jaw_proto::{AccountState, LinkStart, LinkStep, code};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 
@@ -46,6 +47,13 @@ enum Command {
         /// international form, digits only, such as 351912345678
         #[arg(long)]
         phone: Option<String>,
+    },
+    /// Logs jaw out of WhatsApp, as Linked devices on the phone does: jawd forgets the session and
+    /// keeps your messages, and only the phone can link jaw again
+    Unlink {
+        /// Logs out without asking first
+        #[arg(long)]
+        yes: bool,
     },
     /// Prints the terminal's settings, or changes them: jaw settings theme=gruvbox messages=irc
     Settings {
@@ -140,7 +148,13 @@ fn main() -> Result<()> {
     match cli.command {
         None => run::run(|tx| view::View::new(Box::new(wire::Wire::start(&jaw_proto::local::home(), tx)))),
         Some(Command::Status) => status(),
-        Some(Command::Link { phone }) => link(phone),
+        Some(Command::Link { phone }) => {
+            link(&jaw_proto::local::socket(&jaw_proto::local::home()), phone, &mut std::io::stdout())
+        }
+        Some(Command::Unlink { yes }) => {
+            let socket = jaw_proto::local::socket(&jaw_proto::local::home());
+            unlink(&socket, yes, &mut std::io::stdin().lock(), &mut std::io::stdout())
+        }
         Some(Command::Settings { changes }) => {
             if let Err(twice) = asked_settings(&changes) {
                 let mut jaw = Cli::command();
@@ -252,15 +266,21 @@ fn status() -> Result<()> {
     Ok(())
 }
 
-fn link(phone: Option<String>) -> Result<()> {
-    let (mut connection, welcome) = connect(&jaw_proto::local::socket(&jaw_proto::local::home()))?;
-    if welcome.account.state == AccountState::Linked {
-        let who = welcome.account.me.map(|me| me.phone).unwrap_or_default();
-        println!("jaw is already linked to {who}; jaw unlink comes later, or remove it on the phone");
-        return Ok(());
-    }
+/// `jaw link`. Whether an account is linked is the engine's to say, which refuses to link over one:
+/// a hello saying linked can come before the engine has found the device gone, or from a link the
+/// phone paired that didn't finish, and then linking starts afresh.
+fn link(socket: &Path, phone: Option<String>, out: &mut impl std::io::Write) -> Result<()> {
+    let (mut connection, welcome) = connect(socket)?;
     let by_code = phone.is_some();
-    connection.call("link.start", serde_json::to_value(LinkStart { phone })?)?;
+    if let Err(e) = connection.call("link.start", serde_json::to_value(LinkStart { phone })?) {
+        let refused = e.downcast_ref::<jaw_proto::Error>().is_some_and(|e| e.code == code::NOT_ALLOWED);
+        if refused && welcome.account.state == AccountState::Linked {
+            let who = welcome.account.me.map(|me| me.phone).unwrap_or_default();
+            writeln!(out, "jaw is already linked to {who}; jaw unlink logs it out")?;
+            return Ok(());
+        }
+        return Err(e);
+    }
     loop {
         let push = connection.push()?;
         if push.method != "link" {
@@ -269,25 +289,53 @@ fn link(phone: Option<String>) -> Result<()> {
         match serde_json::from_value::<LinkStep>(push.params)? {
             LinkStep::Qr { code, expires } if !by_code => {
                 let seconds = (expires - now_ms()).max(0) / 1000;
-                print!("\x1b[H\x1b[2J");
-                println!("{}", qr(&code)?);
-                println!("On the phone: WhatsApp › Settings › Linked devices › Link a device, then scan this.");
-                println!("It changes in {seconds} s; Ctrl-C stops.");
+                write!(out, "\x1b[H\x1b[2J")?;
+                writeln!(out, "{}", qr(&code)?)?;
+                writeln!(out, "On the phone: WhatsApp › Settings › Linked devices › Link a device, then scan this.")?;
+                writeln!(out, "It changes in {seconds} s; Ctrl-C stops.")?;
+                out.flush()?;
             }
             LinkStep::Qr { .. } => {}
             LinkStep::Code { code } => {
-                println!(
+                writeln!(
+                    out,
                     "On the phone: WhatsApp › Settings › Linked devices › Link a device › Link with phone number instead,"
-                );
-                println!("then type {code}");
+                )?;
+                writeln!(out, "then type {code}")?;
+                out.flush()?;
             }
             LinkStep::Done { phone } => {
-                println!("Linked {phone}. jawd is fetching your history; jaw status says how far it has got.");
+                writeln!(out, "Linked {phone}. jawd is fetching your history; jaw status says how far it has got.")?;
                 return Ok(());
             }
             LinkStep::Failed { reason } => bail!(reason),
         }
     }
+}
+
+/// `jaw unlink`: logs the account out once `answers` says yes to the question it writes to `out`,
+/// or at once when `yes`, since nothing in jaw can link it again: only the phone can.
+fn unlink(socket: &Path, yes: bool, answers: &mut impl std::io::BufRead, out: &mut impl std::io::Write) -> Result<()> {
+    let (mut connection, welcome) = connect(socket)?;
+    if welcome.account.state != AccountState::Linked {
+        writeln!(out, "jaw isn't linked to WhatsApp; jaw link links it")?;
+        return Ok(());
+    }
+    let whose = welcome.account.me.map_or("your".to_string(), |me| format!("{}'s", me.phone));
+    if !yes {
+        writeln!(out, "jaw stops being one of {whose} linked devices, and only the phone can link it again;")?;
+        write!(out, "jawd keeps your messages. Log out? [y/N] ")?;
+        out.flush()?;
+        let mut answer = String::new();
+        answers.read_line(&mut answer)?;
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            writeln!(out, "jaw is still linked.")?;
+            return Ok(());
+        }
+    }
+    connection.call("link.logout", serde_json::Value::Null)?;
+    writeln!(out, "Logged out. jawd has deleted the session and kept your messages; jaw link links jaw again.")?;
+    Ok(())
 }
 
 /// The terminal's settings as `jaw settings` prints them: those hello brings, or with `changes`,
@@ -376,9 +424,157 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use jaw_proto::settings::{Messages, Settings};
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    /// A jawd on a socket of its own for one connection: its hello says `account`, and it answers
+    /// each other request as `answer` says, its outcome then the pushes after it. It keeps the
+    /// methods it was asked.
+    struct Answering {
+        _folder: tempfile::TempDir,
+        socket: std::path::PathBuf,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Answering {
+        fn new(account: Value, answer: fn(&str) -> (Value, Vec<Value>)) -> Answering {
+            let folder = tempfile::tempdir().unwrap();
+            let socket = folder.path().join("jaw.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let keeping = asked.clone();
+            let hello = concat!(env!("CARGO_MANIFEST_DIR"), "/../../protocol/fixtures/hello.result.json");
+            let mut welcome: Value = serde_json::from_str(&std::fs::read_to_string(hello).unwrap()).unwrap();
+            welcome["result"]["account"] = account;
+            std::thread::spawn(move || {
+                let Ok((stream, _)) = listener.accept() else { return };
+                let mut out = stream.try_clone().unwrap();
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { return };
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let method = request["method"].as_str().unwrap_or_default().to_string();
+                    keeping.lock().unwrap().push(method.clone());
+                    let (mut outcome, pushes) =
+                        if method == "hello" { (welcome["result"].clone(), vec![]) } else { answer(&method) };
+                    let reply = if outcome.get("error").is_some() {
+                        outcome["id"] = request["id"].clone();
+                        outcome
+                    } else {
+                        json!({ "id": request["id"], "result": outcome })
+                    };
+                    writeln!(out, "{reply}").unwrap();
+                    for push in pushes {
+                        writeln!(out, "{push}").unwrap();
+                    }
+                }
+            });
+            Answering { _folder: folder, socket, asked }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    fn linked() -> Value {
+        json!({ "state": "linked", "me": { "id": "person:1", "name": "Pedro", "phone": "+351 912 000 000" } })
+    }
+
+    fn unlinked() -> Value {
+        json!({ "state": "unlinked" })
+    }
+
+    fn link_push(step: Value) -> Value {
+        json!({ "method": "link", "params": step })
+    }
+
+    fn refusal(code: i32, message: &str) -> Value {
+        json!({ "error": { "code": code, "message": message } })
+    }
+
+    #[test]
+    fn jaw_link_asks_jawd_even_when_its_hello_says_linked_and_says_already_linked_only_when_the_engine_refuses() {
+        let linking = |method: &str| match method {
+            "link.start" => {
+                let qr = link_push(json!({ "state": "qr", "code": "2@made-up", "expires": now_ms() + 20_000 }));
+                (json!({}), vec![qr, link_push(json!({ "state": "done", "phone": "+351 912 000 000" }))])
+            }
+            _ => (refusal(code::UNKNOWN_METHOD, "not here"), vec![]),
+        };
+        let jawd = Answering::new(linked(), linking);
+        let mut out = Vec::new();
+        link(&jawd.socket, None, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("████") && said.contains("Linked +351 912 000 000."), "{said}");
+        assert_eq!(jawd.asked(), ["hello", "link.start"], "a hello saying linked can be from before the engine knew");
+
+        let refusing = |_: &str| (refusal(code::NOT_ALLOWED, "an account is already linked; log out first"), vec![]);
+        let jawd = Answering::new(linked(), refusing);
+        let mut out = Vec::new();
+        link(&jawd.socket, None, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert_eq!(said, "jaw is already linked to +351 912 000 000; jaw unlink logs it out\n");
+
+        let jawd = Answering::new(unlinked(), refusing);
+        let failed = link(&jawd.socket, None, &mut Vec::new()).unwrap_err();
+        assert_eq!(failed.to_string(), "an account is already linked; log out first", "jawd's own words");
+
+        let failing = |_: &str| {
+            let failed = link_push(json!({ "state": "failed", "reason": "WhatsApp refused the new device: 401" }));
+            (json!({}), vec![failed])
+        };
+        let jawd = Answering::new(unlinked(), failing);
+        let failed = link(&jawd.socket, None, &mut Vec::new()).unwrap_err();
+        assert_eq!(failed.to_string(), "WhatsApp refused the new device: 401");
+    }
+
+    #[test]
+    fn jaw_unlink_logs_out_only_once_told_yes_and_says_so_when_nothing_is_linked() {
+        let logging_out = |method: &str| match method {
+            "link.logout" => {
+                let out = json!({ "method": "connection", "params": { "state": "logged_out", "reason": "logged out from jaw" } });
+                (json!({}), vec![out])
+            }
+            _ => (refusal(code::UNKNOWN_METHOD, "not here"), vec![]),
+        };
+        for answer in ["n\n", "\n", "", "maybe\n"] {
+            let jawd = Answering::new(linked(), logging_out);
+            let mut out = Vec::new();
+            unlink(&jawd.socket, false, &mut answer.as_bytes(), &mut out).unwrap();
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains("only the phone can link it again") && said.contains("Log out? [y/N] "), "{said}");
+            assert!(said.ends_with("jaw is still linked.\n"), "{answer:?}: {said}");
+            assert_eq!(jawd.asked(), ["hello"], "{answer:?}: nothing asked of jawd");
+        }
+        for (yes, answer) in [(false, "y\n"), (false, " Yes \n"), (true, "")] {
+            let jawd = Answering::new(linked(), logging_out);
+            let mut out = Vec::new();
+            unlink(&jawd.socket, yes, &mut answer.as_bytes(), &mut out).unwrap();
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.ends_with(
+                "Logged out. jawd has deleted the session and kept your messages; jaw link links jaw again.\n"
+            ));
+            assert_eq!(said.contains("Log out?"), !yes, "--yes asks nothing: {said}");
+            assert_eq!(jawd.asked(), ["hello", "link.logout"], "{yes} {answer:?}");
+        }
+        let jawd = Answering::new(unlinked(), logging_out);
+        let mut out = Vec::new();
+        unlink(&jawd.socket, false, &mut "y\n".as_bytes(), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "jaw isn't linked to WhatsApp; jaw link links it\n");
+        assert_eq!(jawd.asked(), ["hello"]);
+
+        let unreachable = |_: &str| {
+            let why = "can't log out: error sending logout request: websocket not connected";
+            (refusal(code::ENGINE_UNAVAILABLE, why), vec![])
+        };
+        let jawd = Answering::new(linked(), unreachable);
+        let failed = unlink(&jawd.socket, true, &mut "".as_bytes(), &mut Vec::new()).unwrap_err();
+        assert_eq!(failed.to_string(), "can't log out: error sending logout request: websocket not connected");
+    }
 
     /// The changes as clap reads them from `jaw settings`'s arguments.
     pub fn changes(args: &[&str]) -> Vec<(String, String)> {

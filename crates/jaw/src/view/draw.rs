@@ -1249,12 +1249,18 @@ impl View {
             _ => text.push(Line::from(Span::styled("Asking WhatsApp for a code…", Style::new().fg(t.comment)))),
         }
         text.push(Line::default());
-        text.push(Line::from(vec![
+        let mut keys = vec![];
+        if matches!(self.link, Some(LinkStep::Failed { .. })) {
+            keys.push(Span::styled("⏎", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)));
+            keys.push(Span::styled(" link again   ", Style::new().fg(t.comment)));
+        }
+        keys.extend([
             Span::styled("p", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
             Span::styled(" link with a phone number instead   ", Style::new().fg(t.comment)),
             Span::styled("q", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
             Span::styled(" quit", Style::new().fg(t.comment)),
-        ]));
+        ]);
+        text.push(Line::from(keys));
         for line in text {
             if y >= inner.y + inner.height {
                 break;
