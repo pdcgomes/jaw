@@ -4,14 +4,14 @@
 
 **Goal:** [The Mac's Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md), settled with the owner on 6 November, built: Settings leaves its sheet for a window of its own whose panes are icon tabs in its toolbar, as Redlamp's are, opened with ⌘, and with no Done; and the Appearance pane gets a slot for dark and one for light, filled from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd's `themes` and Redlamp's 22 families, each drawn as a small chat in its colours. Omarchy's are mapped onto the Mac's roles as `crates/jaw/src/theme.rs` maps them onto the terminal's and held readable on both grounds the Mac draws on; Redlamp's are copied into jaw, relicensed by their owner under jaw's MIT, kept in step by `scripts/sync-themes` and held by the same bands; and the slots' themes' colours are remembered, so the first frame never waits on jawd.
 
-**Architecture:** JawThemes gains the theme model, free of AppKit and tested on its own: `Contrast`, `theme.rs`'s rule ported as it is onto `0xRRGGBB` colours, so the Mac lands on the terminal's; `Omarchy`, which maps a theme's colours by Omarchy's keys and reads a `colors.toml` as jaw-proto does; Redlamp's catalog, copied (`RedlampCatalog.swift`) and mapped (`RedlampRoles`); and `Theme`, `Slot`, `Slots`, `OmarchyTheme` and `SystemAccent`, with the catalog's list of every theme and the roles a slot draws. JawKit asks `themes` once a connection and hands the answer up as `JawUpdate.themes`. JawUI's `Preferences` keeps the slots, jawd's themes and the remembered copies, and works out the roles the app draws in; `SettingsTabs`, an `NSTabViewController` in its toolbar style, hosts the three SwiftUI panes; and the Appearance pane draws the slots and the gallery from `ThemeCard`s. The app keeps only `SettingsWindowController` and the wiring: ⌘, and the palette's Choose a theme, asking jawd on each hello, and the bench's `--keys settings`.
+**Architecture:** JawThemes gains the theme model, free of AppKit and tested on its own: `Contrast`, `theme.rs`'s rule ported as it is onto `0xRRGGBB` colours, so the Mac lands on the terminal's; `Omarchy`, which maps a theme's colours by Omarchy's keys and reads a `colors.toml` as jaw-proto does; Redlamp's catalog, copied (`RedlampCatalog.swift`) and mapped (`RedlampRoles`); and `Theme`, `Slot`, `Slots`, `OmarchyTheme` and `SystemAccent`, with the catalog's list of every theme and the roles a slot draws. Every theme's roles then go through one hold, `Roles.held()`, which keeps each colour drawn as text or as a mark at 3:1 wherever JawUI draws it, the tints it lays over a ground included, the accent drawn as text in a role of its own. JawKit asks `themes` once a connection and hands the answer up as `JawUpdate.themes`. JawUI's `Preferences` keeps the slots, jawd's themes and the remembered copies, and works out the roles the app draws in; `SettingsTabs`, an `NSTabViewController` in its toolbar style, hosts the three SwiftUI panes; and the Appearance pane draws the slots and the gallery from `ThemeCard`s. The app keeps only `SettingsWindowController` and the wiring: ⌘, and the palette's Choose a theme, asking jawd on each hello, and the bench's `--keys settings`.
 
 **Tech Stack:** Swift 6 (AppKit, SwiftUI, Swift Testing), Tuist, xcodebuild on the build Mac through `mac/scripts/build-mac`; Python 3 and git for `scripts/sync-themes`.
 
 ## Global Constraints
 
 - The spec is the design, `docs/plans/2026-11-06-jaw-mac-settings-and-themes-design.md`, with the owner's answers of 6 November marked "Owner, 6 Nov" there and the Defaults he left as they are; the wireframes canvas (`mac-settings-themes-wireframes.canvas.tsx` in the project's canvases) draws it. Where this plan and the design differ, the design wins, except where the Decisions below say this plan departs from it on purpose: stop and say so.
-- The branch is `mac-settings-themes`, in its own worktree, `/Users/pedrogomes/src/jaw-mac-settings`, made from main at d4ca8bca; it holds the design, the owner's answers and this plan. Work only there. origin/main has moved since, to 25375008, whose one commit changes `mac/JawHarness/Sources/Fixtures/Screens.swift`, the Three panes band of `ScreenScenes.swift` and `GridView`: none of it what this plan changes but `ScreenScenes.swift`'s lines. Before Task 1, and again before the final report, run `git fetch origin && git log --oneline HEAD..origin/main`; if main has moved, rebase (`git rebase origin/main`), which carries this branch's commits over unchanged. Line numbers below are d4ca8bca's: once rebased, find each place by the symbol or the text quoted.
+- The branch is `mac-settings-themes`, in its own worktree, `/Users/pedrogomes/src/jaw-mac-settings`, made from main at d4ca8bca and rebased onto origin/main at 9f4c298b (main's panes' outline fix and parity step 2.5, attachments) after Task 4 and Task 1's fix; it holds the design, the owner's answers and this plan. Work only there. Before the final report, run `git fetch origin && git log --oneline HEAD..origin/main`; if main has moved again, rebase (`git rebase origin/main`), which may conflict where main changes the files this branch does: resolve each conflict keeping both sides, and bring any draw site main adds in the accent as text or as a mark, in the dim text, or on a ground the hold doesn't name into the hold, Task 4b's table and its tests, as Task 4b did main's attachments. Line numbers are d4ca8bca's, but Task 4b's, which are 5e55e068's: once rebased, find each place by the symbol or the text quoted.
 - Never push, never pass `--no-verify`, never rewrite commits that aren't yours. Never edit, build in, check out in, or run a git command that changes anything in another agent's worktree or in the owner's checkout, `/Users/pedrogomes/src/jaw`; only read them. Redlamp's checkout, `/Users/pedrogomes/src/darkroom`, is read only: `scripts/sync-themes` reads it with `git show` and `GIT_OPTIONAL_LOCKS=0`, never checks anything out and never fetches, and nothing else runs a command there.
 - Build and test only on the build Mac with `mac/scripts/build-mac`: `test JawKit`, `test JawThemes`, `test JawUITests`, `test JawHarnessTests`, `build` (the `jaw` app), `shot` and `sweep` (the harness's pictures), `snapshot` (the app's picture, `--demo` on a folder of its own there, which it removes) and `references` (the reference pictures the tests wrote there, copied back here). `mac/scripts/check` exits 1 when a build or the tests fail, so both a run's exit status and its printed `** BUILD SUCCEEDED **` / `** TEST SUCCEEDED **` and `Test run with …` lines count. For the whole log: `ssh -o BatchMode=yes build-mac 'tail -150 ~/src/build-mac/jaw/jaw-mac-settings/mac/build/check.log'`. Before each run, check that the build Mac answers: `ssh -o BatchMode=yes -o ConnectTimeout=5 build-mac true`. If it doesn't, or `build-mac` prints `doesn't answer; running here` and falls back to building on this Mac, stop (interrupt the run you started) and ask the controller. Never build or test on this Mac.
 - Never build Rust or Go. JawKit's live tests need `target/debug/jawd` in this worktree, which `build-mac` copies to the build Mac with the checkout: it's there, jawd at 660701c5, which serves `themes`. Leave it as it is.
@@ -31,15 +31,15 @@ The design's decisions hold: the owner's of 6 November and its Defaults he left 
 - **`ThemeFamily` and `Catalog.jaw` stay as they are** (the plan's). The design has `Theme` take `ThemeFamily`'s place; about thirty places, nearly all tests, read `Catalog.jaw.dark`, `.light` and `.roles(dark:)`, so `Theme` comes beside it instead, and `Catalog.jawTheme` is Jaw's Tokyo Night as a `Theme`. `Catalog.families` and `Catalog.family(_:)` stay for the harness until Task 7 moves it to every theme.
 - **`SettingsTabs` is JawUI's** (the plan's). An `NSTabViewController` subclass is a view controller, which `check-harness` keeps out of the app target, and it needs one: to size the window as its tab is chosen and title it. The app keeps `SettingsWindowController`, a window controller, which the check allows. Its `transitionOptions` are none, so a tab shows at once while the window's frame moves.
 - **⌘W closes Settings** (the plan's). The design closes it with ⌘W, which jaw's menu bar gives to Close Pane, the main window's, enabled while there are several panes. `SettingsWindow`, JawUI's, takes ⌘W before the menu bar does, as AppKit offers a key equivalent to the key window first, and closes; ⇧⌘W stays the menu's Close Window.
-- **Each pane has a fixed size, and the window takes it from its content view** (the plan's). Appearance is 500 by 640 points (180 with Task 1's one menu and 230 with Task 4's two, until Task 6 gives it the gallery), Messages 500 by 260 and Panes 500 by 220, as the design has them, each the frame of its SwiftUI form, with the hosting controller's own sizing off and no preferred content size, so AppKit doesn't size the window itself as a tab is chosen, keeping its bottom edge. Choosing a tab grows or shrinks the window by the difference between its content view and the pane, keeping its top edge, which holds whatever height the toolbar has. A form taller than its pane scrolls, as a grouped form does; if the snapshots show one cut, raise its height in `SettingsPane.size`.
+- **Each pane has a fixed size, and the window takes it from its content view** (the plan's). Appearance is 500 by 640 points (180 with Task 1's one menu and 230 with Task 4's two, until Task 6 gives it the gallery), Messages 500 by 360 and Panes 500 by 220, as the design has them, each the frame of its SwiftUI form, with the hosting controller's own sizing off and no preferred content size, so AppKit doesn't size the window itself as a tab is chosen, keeping its bottom edge. Choosing a tab grows or shrinks the window by the difference between its content view and the pane, keeping its top edge, which holds whatever height the toolbar has. A form taller than its pane scrolls, as a grouped form does; if the snapshots show one cut, raise its height in `SettingsPane.size`.
 - **The cards and the tiles take the pane's width** (the plan's; the tiles' width departs from the design). The design's 144 points is three across 460; the pane's padding leaves 468 in a 500-point window, so the gallery's rows hold three cards of equal width, each about 150 points, and a card is as wide as its share and 104 points tall. The reference pictures draw them 144 wide, three across, as the design does. The design's tiles are 224 by 64; two side by side with the space between them take what the row gives them, about 230 each, at least 64 tall, so they fill the row whatever a scroller or the insets take from it.
 - **Colours by Omarchy's keys, in two types** (the plan's). JawKit and JawThemes don't depend on each other, so JawKit decodes `themes` into its own `ServedTheme` (`id`, `name`, `mode`, `colors` as `[String: String]`), mirroring jaw-proto, and the app hands each to JawThemes as an `OmarchyTheme` (`id`, `name`, `dark`, `colours`). Both keep the colours as jawd sends them, `#rrggbb` by key, which is also how the app remembers them and how `Omarchy.file` reads a `colors.toml`.
 - **The slots' Omarchy themes remembered as dictionaries** (the plan's). `themeDarkColours` and `themeLightColours` each hold that theme's colours by Omarchy's keys, with its ID under `id` and its name under `name`, which no colour's key is, so `defaults read dev.badcoffee.jaw` shows them as they are. A copy is read only while its slot holds its ID, written each time jawd serves the slot's theme, and dropped when jawd serves themes without it, so the next launch draws what this one does from its first frame.
-- **What the app draws is worked out once until something it rests on changes** (the plan's). `Preferences` keeps each appearance's roles and the list of every theme until the slots, jawd's themes or the system's accent change, since `AppModel.style` is read on every layout. The system's accent is read in both appearances (`SystemAccent`), for Neutral's two halves, and again when AppKit says the system's colours changed (`NSColor.systemColorsDidChangeNotification`), which the app now listens for beside the appearance's. jawd's answer to `themes` tells the app only when a slot's roles change, so its first answer, which comes as a launch's first rows do, restyles no window while the slots hold Jaw's or Redlamp's themes or a copy jawd serves as it was; Settings redraws through Observation either way.
+- **What the app draws is worked out once until something it rests on changes** (the plan's). `Preferences` keeps each appearance's roles and the list of every theme until the slots, jawd's themes or the system's accent change, since `AppModel.style` is read on every layout. The system's accent, orange, green and red are read in both appearances (`SystemAccent`), for Neutral's two halves, and again when AppKit says the system's colours changed (`NSColor.systemColorsDidChangeNotification`), which the app now listens for beside the appearance's. jawd's answer to `themes` tells the app only when a slot's roles change, so its first answer, which comes as a launch's first rows do, restyles no window while the slots hold Jaw's or Redlamp's themes or a copy jawd serves as it was; Settings redraws through Observation either way.
 - **A snapshot's preferences write nothing back** (the plan's). Every checkout's snapshots on the build Mac share the app's preferences, and `save()` writes all of them, those given as arguments too, so a `--keys` step that chose a theme would leave it, and `-appearance dark`, for the next checkout's snapshots. `Preferences.keeps` is false in a snapshot, which reads what's kept and the arguments and writes nothing, the copies of Omarchy's themes included, as it already leaves the window's size and the layouts alone.
 - **What the Omarchy section says** (the plan's). `OmarchyState` adds `asking`, from hello to jawd's answer, which jawd gives at once, and covers the app still connecting: neither says anything, so the section never says jawd isn't answering while it is. A jawd the app couldn't start is said as one that isn't answering, and a refusal other than an unknown method in jawd's words. Its line is the section's footer, under the header "Omarchy's, from jawd", as the wireframes have it.
 - **Served themes stay when jawd goes** (the plan's; departs from the design, which keeps them "while the connection lasts"). jawd's answer still holds after a drop, and the next hello asks again and replaces it, so the gallery doesn't empty its Omarchy section, nor the slots fall back to their copies, each time jawd restarts.
-- **Neutral's colours** (the plan's). Its mention, online and failed colours are the system's orange, green and red as macOS draws them in each appearance (`#FF9F0A`, `#30D158` and `#FF453A` dark; `#FF9500`, `#34C759` and `#FF3B30` light), held as a family's are; its separator is Redlamp's divider as authored, white at 7% or black at 9%, as every family's border is as authored.
+- **Neutral's colours** (the plan's). Its mention, online and failed colours are the system's orange, green and red, read from AppKit in each appearance with the accent (`SystemAccent`), again when the system's colours change, and held as a family's are; the tests and the harness take macOS 27.0.1's, as AppKit draws them there (`#FF9230`, `#30D158` and `#FF4245` dark; `#FF8D28`, `#34C759` and `#FF383C` light), with its default accent, `#007AFF` in both appearances; its separator is Redlamp's divider as authored, white at 7% or black at 9%, as every family's border is as authored.
 - **`scripts/sync-themes` reads three regions** (the plan's): the families' lines, from `// omoi-station classic palettes` to the last of its originals; the Redlamp family's two palettes; and the brand's nine colours they're made of. jaw's copy holds each between `// sync-themes: <region>` and `// sync-themes: end`, line for line as Redlamp has it, so the comparison is of text. `--check` also says when Redlamp's checkout's own `main` has changed those files since the pinned commit, Neutral's tokens in `Tokens/Palette.swift` included, which `RedlampRoles.neutral` is written from by hand. With no checkout, as in CI, it says so and passes.
 - **Pictures** (the plan's). JawUITests compare two reference pictures, `theme-gallery-dark` and `theme-gallery-light`, every theme's card for each slot, so a change to any mapping shows. The design has the harness's scenes compared with references too; this plan has the harness draw the panes, the galleries and their states for review (`shot`, `sweep`) and test them as its other scenes are tested (as wide as they say, with notes, the same picture twice), not against references, since the panes are the system's controls in the system's accent, which a reference would pin to one build Mac's macOS and accent. The app's `--snapshot` with `--keys settings:<pane>` pictures the window with its toolbar, which only AppKit draws, to look at.
 - **The budgets are measured after this plan** (the plan's). The design's Testing asks for `--bench launch` within its 250 ms p99 with `themes` asked and `--bench idle` with Settings open. `build-mac` has no bench step, and these constraints keep jawd on the build Mac to the live tests and `snapshot`'s `--demo`, so the final report leaves both to the controller, measured as `mac/README.md`'s are, with a Release build on the build Mac. What holds them meanwhile: `themes` is asked in `.hello`, after the first frame, and answered at once; the roles are worked out once until something they rest on changes; and an open Settings draws only when what it observes changes.
@@ -53,6 +53,12 @@ The design's decisions hold: the owner's of 6 November and its Defaults he left 
 - **The slot the gallery chooses for is `Preferences.choosing`** (the plan's): not kept, nil for the slot in use, and set back to nil each time Settings opens, so the pane opens on the slot in use and the harness can draw either gallery.
 - **VoiceOver chooses as a click does** (the plan's). A card's press chooses it, and its named action, Use for Dark Only (or Light Only), fills only the slot chosen for, as ⌥-click does; a tile's press makes it the slot chosen for. The owner's pass by hand then has something to press.
 - **The parity canvas's words, not the board** (the plan's). The design's list of docs names the parity canvas's Themes and Settings rows and the board's steps 3.5 and 4.3. The board (`ws-mac-parity.canvas.tsx`) and the canvas's states are kept by the parity workstream, which rewrites them as main moves, so Task 8 changes only the words of the canvas's two Mac cells, saying what's on this branch, and leaves their states and the board for that workstream to move when this lands.
+- **One hold for every theme, where `Theme` is made and where `Catalog.jaw` is** (the plan's). Every theme the catalog makes, of every source, comes through `Theme`'s initialiser, which holds its halves; `Catalog.jaw`, which the slots fall back on and the harness and about thirty tests take whole, is held where it's made, so the reference pictures draw what the app does. The hold keeps a colour that reads as it is, so `Catalog.jawTheme`, made from `Catalog.jaw`, comes through unmoved, and the mappings' own bands stay as Tasks 2 and 3 pinned them.
+- **The hold covers the tints JawUI lays over a ground** (the plan's, on the owner's "all of them at 3:1"): a card's and a quote's well, the accent's tint behind its symbols, the box's chip and a mention of you on its own tint, which moves with it, so its passes are bounded; the tints are made once, in `Roles`, and every draw site takes them from there.
+- **Three small marks are drawn on one ground** (the plan's). A link card's thumbnail placeholder is drawn on the card's own well, and a selected library row's file symbol and link icon on the selection, without the tints they sat on, so a tint on a tint on a few marks doesn't move a whole theme's secondary text, accent drawn as text and links; each still reads, as the hold covers the ground it's drawn on.
+- **The accent drawn as text is a role of its own** (the plan's). `accentText`, the accent until the hold moves it, is what twenty-eight draw sites take, a file of yours on its way's among them; `accent` stays as the theme wrote it, for its fills and outlines, as the design has it.
+- **The dim text is held on the window's ground and the surface; everywhere else it's drawn, it takes the secondary text's colour** (the plan's, by the owner's rule for the dim text on a tint): on your bubbles, a selected row and a selected message's band (`Roles.faint(on:)`, the conversation telling a message's layout when it's selected in lines), and on a card's or a tile's well, a link card's host and a tile's placeholder, as held there the dim text would come level with the secondary text, or near it. Held on the ground and the surface alone it moves in 59 halves and comes within 15% of the secondary text in one, Redlamp's Everforest light (3.26:1 against 3.58:1); Tokyo Night's becomes `66709A`.
+- **`SystemAccent` carries the system's orange, green and red** (the plan's), beside the accent it's named for, defaulting to macOS 27.0.1's, so everything that passes it stays as it is and Neutral takes the whole value.
 
 ## File structure
 
@@ -70,23 +76,25 @@ New:
 - `mac/JawThemes/Sources/Omarchy.swift`: Omarchy's themes mapped onto the Mac's roles; a `colors.toml` read.
 - `mac/JawThemes/Sources/RedlampCatalog.swift`: Redlamp's catalog, copied, under jaw's MIT by its owner.
 - `mac/JawThemes/Sources/RedlampRoles.swift`: jaw's roles from Redlamp's ten colours, and Neutral's.
-- `mac/JawThemes/Sources/Theme.swift`: a theme to choose, its source and its slot, Omarchy's as jawd serves them, the system's accent, the catalog's list and a slot's roles.
+- `mac/JawThemes/Sources/Theme.swift`: a theme to choose, its source and its slot, Omarchy's as jawd serves them, the system's colours, the catalog's list and a slot's roles.
 - `mac/JawThemes/Sources/Slots.swift`: the theme in each slot, and how a choice fills them.
+- `mac/JawThemes/Sources/Held.swift`: the hold every theme's roles go through: the colours JawUI draws as text or as marks, the grounds and tints it draws each on, and the tints themselves (Task 4b).
 - `mac/JawKit/Sources/Protocol/Themes.swift`: `themes`' answer.
 - `mac/JawHarness/Sources/Fixtures/Themes.swift`: every theme, Omarchy's read from the harness's bundle (Task 7).
 - `mac/JawHarness/Sources/Scenes/SettingsScenes.swift`: the panes, the galleries and their states (Task 7).
 - `scripts/sync-themes`: jaw's copy of Redlamp's catalog kept in step.
-- Tests: `mac/Tests/JawUITests/SettingsTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`, `mac/Tests/JawUITests/GalleryTests.swift`, `mac/Tests/JawThemesTests/OmarchyTests.swift`, `mac/Tests/JawThemesTests/RedlampTests.swift`, `mac/Tests/JawThemesTests/ThemeTests.swift`, and the reference pictures `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png`.
+- Tests: `mac/Tests/JawUITests/SettingsTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`, `mac/Tests/JawUITests/GalleryTests.swift`, `mac/Tests/JawThemesTests/OmarchyTests.swift`, `mac/Tests/JawThemesTests/RedlampTests.swift`, `mac/Tests/JawThemesTests/ThemeTests.swift`, `mac/Tests/JawThemesTests/HoldTests.swift`, `mac/Tests/JawUITests/HeldInkTests.swift`, and the reference pictures `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png`.
 
 Changed:
 
-- `mac/JawThemes/Sources/Roles.swift`: `link` (Task 2); `Catalog.families` and `Catalog.family(_:)` go (Task 7).
-- `mac/JawUI/Sources/Style/Preferences.swift`: the slots, jawd's themes, the remembered copies, the system's accent, and the roles worked out once (Tasks 4 and 5).
+- `mac/JawThemes/Sources/Roles.swift`: `link` (Task 2); `accentText`, and `Catalog.jaw` held (Task 4b); `Catalog.families` and `Catalog.family(_:)` go (Task 7).
+- `mac/JawUI/Sources/Style/Preferences.swift`: the slots, jawd's themes, the remembered copies, the system's colours, and the roles worked out once (Tasks 4, 4b and 5).
 - `mac/JawUI/Sources/Layout/MessageLayout.swift`, `mac/JawUI/Sources/Components/Glyphs.swift`, `mac/JawUI/Sources/Library/LibraryDrawing.swift`, `mac/JawUI/Sources/Layout/Cards.swift`: links, read ticks and a link card's bar in `link` (Task 2).
+- JawUI's draw sites of the accent as text, the dim text and the tints: `accentText`, `Roles.faint(on:)` and the tints of `Roles`, a message selected in lines told to its layout, and three small marks drawn on one ground (Task 4b): `ChatListController.swift`, `Glyphs.swift`, `Tone.swift`, `MessageLayout.swift`, `Cards.swift`, `ContactCards.swift`, `MessageView.swift`, `ConversationController.swift`, `Palette.swift`, `LibraryDrawing.swift`, `LibraryController.swift`, `Views.swift`, `GlanceView.swift`, `ContactCardsView.swift`, `ContactForm.swift`, and `Panes.swift`'s `RGBA.init(_:)` doc comment.
 - `mac/JawKit/Sources/Client/Incoming.swift`, `mac/JawKit/Sources/Client/Jawd.swift`: `themes` (Task 5).
 - `mac/JawApp/Sources/AppModel.swift`, `Commands.swift`, `MainWindowController.swift`, `Bench.swift`, `AppDelegate.swift`: the window, Choose a theme, `--keys settings:<pane>` and keys reaching Settings, asking for `themes`, the system's colours, and a snapshot's preferences writing nothing back.
-- `mac/JawHarness/Sources/Specimen.swift`, `Scenes/ScreenScenes.swift` (Task 1); `HarnessScene.swift`, `HarnessLaunch.swift`, `ConditionsControls.swift`, `BuiltInScenes.swift`, `Scenes/FoundationScenes.swift` (Tasks 2 and 7); `mac/Project.swift`, the harness's resources (Task 7).
-- Tests: `mac/Tests/JawThemesTests/RolesTests.swift`, `mac/Tests/JawKitTests/FixtureTests.swift`, `ClientTests.swift`, `LiveTests.swift`, `mac/Tests/JawUITests/LinkPreviewTests.swift`, `mac/Tests/JawUITests/SettingsTests.swift` (Task 4), `mac/Tests/JawHarnessTests/ScenesTests.swift`, `LaunchTests.swift`, `CatalogTests.swift`.
+- `mac/JawHarness/Sources/Specimen.swift`, `Scenes/ScreenScenes.swift` (Task 1); `HarnessScene.swift`, `HarnessLaunch.swift`, `ConditionsControls.swift`, `BuiltInScenes.swift`, `Scenes/FoundationScenes.swift` (Tasks 2, 4b and 7); `mac/Project.swift`, the harness's resources (Task 7).
+- Tests: `mac/Tests/JawThemesTests/RolesTests.swift`, `mac/Tests/JawKitTests/FixtureTests.swift`, `ClientTests.swift`, `LiveTests.swift`, `mac/Tests/JawUITests/LinkPreviewTests.swift`, `mac/Tests/JawUITests/ComponentTests.swift` (Task 4b), `mac/Tests/JawUITests/SettingsTests.swift` (Task 4), `mac/Tests/JawHarnessTests/ScenesTests.swift`, `LaunchTests.swift`, `CatalogTests.swift`.
 - Docs (Task 8): `docs/plans/2026-10-26-jaw-mac-design.md`, `docs/plans/2026-10-26-jaw-mac-plan.md`, `docs/plans/2026-10-27-jaw-mac-parity-plan.md`, `mac/README.md`.
 
 Deleted: `mac/JawUI/Sources/Settings/SettingsView.swift` (Task 1).
@@ -228,7 +236,7 @@ public enum SettingsPane: String, CaseIterable, Sendable {
     public var size: NSSize {
         switch self {
         case .appearance: NSSize(width: 500, height: 180)
-        case .messages: NSSize(width: 500, height: 260)
+        case .messages: NSSize(width: 500, height: 360)
         case .panes: NSSize(width: 500, height: 220)
         }
     }
@@ -2375,6 +2383,1543 @@ EOF
 
 ---
 
+### Task 4b: Every theme held wherever JawUI draws it, Redlamp's red kept to its accent, and Neutral in the system's colours, its senders in colour under a grey accent
+
+The owner's three colour choices of 6 November, 16:57: every colour drawn as text or as a mark at 3:1 wherever it's drawn, in every theme, Tokyo Night Day included, which this section reads as wherever JawUI draws it, on the tints it lays over a ground too; the Redlamp family's red kept to its accent, its light mentions in another colour and its senders' colours away from the red; and Neutral's senders still eight colours when the Mac's accent is a grey. With them come two fixes from Task 4's review: `SystemAccent.blue` becomes what AppKit draws macOS's default accent as on macOS 27.0.1, `007AFF` in both appearances (Minor 1), and Neutral's orange, green and red are read from AppKit with the accent, as the plan's Decision says they're drawn, where Task 3 wrote in the colours macOS drew before macOS 26 (its Notes). And three small marks that sat on a tint on a tint are drawn on one ground (the plan's): a link card's thumbnail placeholder on the card's own well, and a selected library row's file symbol and link icon on the selection, without their tints, as a tint on a tint on a few marks moved a whole theme's secondary text, accent drawn as text and links. Line numbers are 5e55e068's, the branch rebased onto origin/main at 9f4c298b, before this task's edits; find each place by the text quoted once anything has moved.
+
+One hold, `Roles.held()`, comes after each theme's own mapping, which stays as Tasks 2 and 3 made it and pinned it: `Theme`'s initialiser holds its halves, so every theme the catalog makes, of every source, goes through it, and `Catalog.jaw`, which the fallbacks, the harness and about thirty tests take whole, is held where it's made. It moves each colour JawUI draws as text or as a mark toward the text with `Contrast.fit`, one ground after another, until it reads on the worst of the grounds JawUI's draw sites put it on, and keeps a colour that reads already exactly as it is, so holding held roles changes nothing:
+
+| Colour | Where JawUI draws it | Held at 3:1 on |
+| --- | --- | --- |
+| `secondary` | previews, times, details, a card's words (a link's description, a contact's detail, on the card's well), a quote's text, a picture's, an album's or a link card's thumbnail placeholder symbol on the card's well; the dim text's words and marks everywhere but the window's ground and the surface: on a selected row, your bubbles and a selected message's band, and a link card's host and the library's tile placeholder on their wells | the five bases; a well on the ground, the surface, your bubbles and the band; a quote on the surface and on your bubbles |
+| `tertiary`, the dim text | ticks not yet read and the pending clock on the chat list's surface and the window's ground (lines, emoji alone), pin and mute marks, placeholders, hints, the library's headings and its empty words | the ground and the surface |
+| `accentText`, new: the accent drawn as text | an unread chat's time, Draft:, a mention of someone else, Show more, You in a reply (its name and bar, on the quote), the palette's tabs, marks and keys, the library's marks, a contact card's action on its well, a card's symbols and action on the accent's tint (a file's action, downloading or on its way, its progress ring among them), the library's file symbol on its tint (on the selection itself on a selected row) and its header's mark on the accent's tint, the box's chip, the status line, KeyCap | the five bases; a well on the ground, the surface, your bubbles and the band; a quote on the surface and on your bubbles; the accent's tint on the ground, the surface, your bubbles and the band; the chip on the surface |
+| `link` | links, read ticks, a link card's bar on its well, the library's link icon on its well (on the selection itself on a selected row) | the five bases, and a well on the ground, the surface, your bubbles and the band |
+| `mention` | a mention of you on its own tint, the "new" marker, the status line's warning, the glance's @ | the five bases, and its own tint on the ground, the surface, your bubbles and the band |
+| `online` | typing in the chat list, the header and the status line | the ground and the surface |
+| `selectedOnline` | typing on a selected row | a selected row, at 4.5:1 |
+| `failed` | the ! on a failed message, Not sent · Retry, the box's refusal | the five bases |
+| `senders` | names in a group, a quote's name and bar on the quote, the glance | the five bases, and a quote on the surface and on your bubbles |
+
+The five bases are the grounds JawUI fills with a theme's colours (`Roles.Base`): the window's ground (a conversation in lines, the composer, the panes, the library, the glance), the surface (the chat list, the palette, the status line, the box's field, their bubbles; others' bubbles are the surface), a selected row (the chat list's, the palette's, the library's, the glance's, the contact cards'), your bubbles, and a selected message's band in lines, the selection at 55% over the window's ground, which `MessageView` draws behind a selected message, its foot, its card and its reactions (`Roles.bandTint`). The tints are the ones JawUI lays over a base, now made once, in `Roles`, and taken by every draw site, so the hold and the screen can't differ: a card's well, the text at 7% (6% in light), under a picture, an album, a link, a contact card, and the library's tiles and, on a row not selected, its link icons (`well`); a quote's well, the text at 6% (5%) (`quoteWell`); the accent's tint, 15%, behind a file's, a place's and a download's symbols, the library's file symbol on a row not selected and its header's mark (`accentTint`); the chip, the accent at 16% (12%), on the box's field (`chipTint`); and a colour's own tint, 16% of it, which a mention of you is drawn on (`mentionTint`). The palette's hint bar, the window's ground at 40% over the surface, isn't listed: it's a mix of two listed grounds, and a colour that reads on both ends of a straight line between two grounds on the same side of it reads all along it.
+
+Three small marks are drawn on one ground where they were drawn on a tint on a tint (the plan's; Step 11): a link card's thumbnail placeholder, its link symbol, on the card's own well rather than on a well of its own on it; a selected library row's file symbol on the selection rather than on the accent's tint over it; and a selected library row's link icon on the selection rather than on a well over it. Each still reads, as the hold covers the ground it's then drawn on, and they no longer decide a whole theme's secondary text, accent drawn as text and links: holding those three pairs moved the secondary text in 41 halves rather than 27, the accent drawn as text in 36 rather than 25 and links in 24 rather than 19, and left the text only 1.24 times as strong as the secondary text in Redlamp's One Dark dark, where it's now 1.38.
+
+Main's attachments (9f4c298b) draw on grounds and in roles the table holds already, so they change no pinned value. A file of yours on its way, in `Cards.file(_:)`, draws its action on the accent's tint and its progress ring and × in the accent, in your bubble (or on the window's ground or the band in lines), as a file downloading does: Steps 8 and 9 take them as they take the download's, the tint to `accentTint` and the ring and × to `accentText`, the track staying the accent at 25%; the ring and × are then the accent drawn as text on the accent's tint, a pair the table has. How far it's got, its own and an audio file's, is in the secondary text on your bubble. A picture of yours on its way has a disc of the window's ground at 60% over it, its ring and × in the text, a scrim; an audio file's × sits on the voice note's disc in the ground's colour, as its ▶ does, an accent fill with a mark in the ground's colour, as an unread count is. The box's strip of attached files draws each tile on the surface with a hairline border, a file's name and its × in the text, a picture's × on a scrim of the window's ground over it, and SD or HD in the secondary text and its note in failed's red, on the composer's ground, the window's. No draw site of main's is in the dim text.
+
+- **The accent's fills keep the colour the theme wrote:** the unread badge, the tints above and the ones the selection and your bubbles are made from, a filled button, the voice note's disc, the poll's discs and bars, the rings' tracks, the focus, selection and reaction outlines, the pane outline and the composer's caret. `accent` stays exactly as the theme wrote it; the accent drawn as text is a role of its own, `accentText`, which every mapping gives the accent and the hold moves. That's the least change: twenty-eight draw sites take `accentText`, against about as many fills that would take a new fill role, and `accent` keeps its meaning, as the design and every test have it ("the accent, as Omarchy wrote it"). An unread count, drawn in the ground's colour (white in light) on the accent, reads at 3.42:1 at the least (Rosé Pine), unchanged, as do the ▶, ♪ or × on the voice note's disc, drawn in the same colour on the same fill.
+- **The dim text stays the quietest, on every ground** (the plan's decision). The dim text is held at 3:1 on the window's ground and the surface; everywhere else it's drawn, it takes the secondary text's colour, held at 3:1 there, as holding the dim text there would bring it level with the secondary text, or near it, and as WhatsApp draws your bubble's grey ticks in its time's colour. On a selected row, your bubbles and a selected message's band it's drawn only as marks and a few short words (sent and delivered ticks and the pending clock, and a poll's open circles and its "voted" line, in your bubbles and on the band; pin, mute, ticks and clock on a selected chat row, the palette's chevron, a selected library row's date, the contact cards' "No number"), which take `Roles.faint(on:)`; on a well it's drawn twice, a link card's host and the library's tile placeholder, which take `roles.secondary`. Held on the ground and the surface alone, the dim text moves in 59 halves, its contrast on the ground growing by a median of ×1.12 (×1.81 at the most), and comes within 15% of the secondary text in one, Redlamp's Everforest light (`7C8A88` beside `74847C`, 3.26:1 against 3.58:1 on its ground); Tokyo Night's goes from `565F89` to `66709A`. Held on the two wells too, it came within 15% of the secondary text in 16 halves and all but met it in Everforest light (3.53:1 against 3.58:1); held on the band too, it would in 5; drawn there as it is, it would read under 3:1 on a well in 244 of the 276 pairs, the four wells a link card's host is drawn on (1.76:1 at the least, Redlamp's Catppuccin dark in your bubble), and on the band in 58 of the 69 (2.19:1, Omarchy's Last Horizon). The layout is told a message is selected (`MessageContext.selected`), in lines only: in bubbles the band is drawn behind the bubble, whose ground its words keep. White's faint ticks and pin marks, 1.67:1 on its surface, read at 3:1 there.
+- **Left out:** separators, borders and rules (the "new" marker's line, a heading's rule), as authored, which carry no words; the accent's fills above, and the senders' as an avatar's fill, whose initials only gain as the senders move toward the text; the sidebar, drawn on the system's material in the system's selection; words over a picture's scrim (its pills, the band of why and what to do over a picture, an album's +N, the play and coming circles) or over the header's ground at 72% over the conversation as it scrolls under it, which no colour of the theme's alone decides; the dimming of panes not in focus, which the owner sets; the layout editor's selection, laid over its picture of the panes; the voice note's waveform and a poll's bars, the secondary text at 35 to 70%, pictures rather than words; and the text itself, the end every colour moves toward: in a mono span on its 8% tint, and at 80% in a group's preview, `Rui: `, it reads at 3.15:1 at the least (Redlamp's Everforest light on its selection).
+
+What it moves, at Omarchy's 4c1b4cb and Redlamp's 9fa9d91, Neutral in macOS 27.0.1's colours (`SystemAccent.blue`): something in 67 of the 69 halves, Omarchy's Hackerman and Redlamp's Catppuccin dark coming through as mapped; the dim text in 59, mentions in 31, the secondary text in 27, failed in 26, the accent drawn as text in 25, links in 19, and 74 senders' colours in 21 halves; online and a selected row's online nowhere, as both mappings hold them already. What decides it: a card's well in your bubble (a link's description, a contact's detail, a placeholder) for the secondary text in 18 of its 27 halves and a selected row in 9; the surface for the dim text in 57 of 59, and the window's ground in 2; the accent's tint behind a card's symbols in your bubble or on a selected message's band for the accent drawn as text in 17 of 25, and a selected row, its words, in 7; a selected row for links in 13 of 19 and a link card's well in your bubble, its bar, in 6; the mention's own tint in your bubble or on the band in 28 of 31; a selected row for failed in 22 of 26. Every moved colour lands at 3 to 3.046:1 on the worst of its grounds. For every colour the hold moves, each of its grounds and tints lies on the far side of it from the text, so moving one way serves them all (37 senders' colours in 15 halves, online in 3, a selected row's online in 4 and one mention have a ground on the text's side of them, and read on it as they are, unmoved); and the text reads at 4.5:1 on each base, so every colour gets there. The furthest move takes a colour 56% of the way to the text, Redlamp's One Dark dark's secondary text, `6B758A` to `8E97A7`, for a card's well in your bubble, which leaves the text reading 1.38 times as strongly as it on the ground, the least of any half (1.49 with the four grounds alone); the furthest coloured one 41% of the way, Redlamp's Everforest light's mention, `C3733C` to `987151`, for its own tint in your bubble.
+
+Tokyo Night's dark half moves its secondary text from `737AA2` to `7E87AF` (for a card's well in your bubble) and its dim text from `565F89` to `66709A` (for its surface); Tokyo Night Day's accent drawn as text and its links go from `2E7DE9` to `2D68C4` (for its selection, as with the four grounds), its red from `F52A65` to `C0316D` (for its selection), its mention from `B15C00` to `9A5814` (for its own tint on a selected message's band), its dim text from `848CB5` to `757FAC` (for its ground) and six of its senders.
+
+The Redlamp family, which keeps the brand's red to its accent (`primaryRoles` = `.accent`): its light half's `accent` field is the safelight `E0402E` itself, a hair from the accent `D8352A`, so its mentions take the brand's filament, as its dark half's do (`FFB08A`), darkened by Redlamp's bands to read on paper (`AC7760`) and by the hold on its own tint in your bubbles (`936654`), a brown, not a red. Redlamp's light palette has no other colour for it: its paper and ink, three greys (`muted`, `border`, `neutral`), three reds (`primary`, the safelight drawn on paper; `accent`, the safelight itself; and `destructive`, which failed takes), and `success`, which online takes. Its senders' eight hues spread 37.5° apart over the 300° outside 30° either side of `primary`'s, from 48.75° past it to 48.75° short of it, rather than 45° apart from `primary`'s own: none comes within 48° of the red once held. Only the family that keeps `primary` out of its selection does this, which is Redlamp's alone; every other family's senders come through bit for bit as before. Held, its red drawn as text goes from `E0402E` to `E46353` in dark, for its selection, and from `D8352A` to `CF3429` in light, for the accent's tint behind a card's symbols in your bubble, and its links to `E46353` and `D7352A`, for the selection; its fills, the unread badges among them, keep the safelight.
+
+Neutral takes the system's colours, `SystemAccent`: the accent chosen in System Settings, as before, and now also the system's orange, green and red for its mentions, online and failed, read from AppKit in each appearance (`NSColor.systemOrange`, `systemGreen` and `systemRed`) where and when the accent is, in `SystemAccent.current()`, again when AppKit says the system's colours changed (`NSColor.systemColorsDidChangeNotification`, which the app listens for already), where Task 3 wrote in `FF9F0A`, `30D158` and `FF453A` dark and `FF9500`, `34C759` and `FF3B30` light. The tests and the harness draw Neutral in fixed values, `SystemAccent.blue`, macOS 27.0.1's as the build Mac draws them: the accent `007AFF` in both appearances (it was `0A84FF` in dark, which AppKit no longer resolves the default accent to), orange `FF9230` dark and `FF8D28` light, green `30D158` and `34C759`, red `FF4245` and `FF383C`. The hold applies on top, as for every theme: Redlamp's bands take Neutral's light orange to `C97225` and its green to `2E9B49`, as they took the older colours, and the hold moves its secondary text, accent drawn as text and links in both halves (`1A87FC` for both in dark; `036EE4` as text and `0271EA` for links in light), its dim text in dark, and its mention and failed in light.
+
+`SystemAccent` keeps its name, its `dark` and `light`, which are the accent, and its initialiser, which gains `orange`, `green` and `red`, each a `SystemColour` (a dark and a light `RGBA`), defaulting to macOS 27.0.1's; `RedlampRoles.neutral(dark:accent:)` takes the whole `SystemAccent` and picks the half of each it draws. That's the least change: everything that makes or passes a `SystemAccent` (`.blue`, the tests' purple, `Catalog.themes`, `theme(id:)` and `roles(_:of:)`, `Preferences.accent` and its `didSet`, which redraws when any of them changes, `systemColoursChanged()`, the tests' `Preferences(defaults:accent:)` and Tasks 5 to 7's calls) stays as it is, and the notification that reads the accent again reads the rest with it. A sibling type would add a parameter to each of those places; a new name would touch every one. Only `Catalog.neutral`, `current()`, Neutral's mapping and the tests that call it with an `RGBA` change. `current()`'s fallback, where AppKit gives no appearance of the name, takes the fixed colour of the appearance asked for, where it took the dark half for both.
+
+Under a saturation of 0.2, as Graphite's grey is, Neutral's senders take the system's blue's hue and saturation (`SystemAccent.blue`'s half for the appearance) at the accent's lightness, so they come out as eight colours, not eight greys (Task 3's review, Minor 2: all `717171` in light). Nothing in the code knows Graphite's colours, which AppKit gives only with Graphite chosen, so the test takes the two greys Task 3's review found the senders collapse in, `98989D` in dark, macOS's system grey, and `8C8C8C` in light.
+
+The tests rewritten here also pin where each moved colour lands, within 0.05 of its target on the ground it was moved for (Task 2's review, Minor 1; Task 3's, Minor 3): `theme.rs`'s greys and colours, the Mac's surface hold, Redlamp's bands and the hold itself. The furthest of the mappings' lands 0.034 from its target (Catppuccin Latte's links on the surface), the hold's 0.046.
+
+A mention of you is drawn on its own tint, which moves with it, so the hold reads its grounds again after each pass and passes until one moves nothing (`Roles.lifted(_:on:at:)`). Each pass moves each channel toward the text's or leaves it, never past it, so no more than 765 passes can move a colour, three channels of 255 steps, and the loop stops at 766 whatever the grounds. In the 69 halves a mention takes three passes at the most, and any of a half's grounds' own colours, as far from reading on its own tint as a colour gets, five.
+
+**Files:**
+- Create: `mac/JawThemes/Sources/Held.swift`, `mac/Tests/JawThemesTests/HoldTests.swift`, `mac/Tests/JawUITests/HeldInkTests.swift`
+- Modify: `mac/JawThemes/Sources/Roles.swift` (`accent`'s doc comment at 21-22, `tokyoNight` at 85, `tokyoNightDay` at 111, `Catalog.jaw` at 61-63), `mac/JawThemes/Sources/Omarchy.swift` (`roles(_:dark:)`, line 68), `mac/JawThemes/Sources/Theme.swift` (`Theme`'s doc comment at 30-32 and `init` at 42-49, `SystemAccent` at 84-97, `Catalog.neutral` at 152-156), `mac/JawThemes/Sources/RedlampRoles.swift` (all of it), `mac/JawUI/Sources/Style/Preferences.swift` (`accent`'s doc comment at 76-77, `systemColoursChanged()`'s at 186, `SystemAccent`'s extension at 211-221), `mac/JawUI/Sources/Settings/Panes.swift` (`RGBA.init(_:)`'s doc comment at 147), `mac/JawUI/Sources/Components/Glyphs.swift` (`Ticks.of` at 38-47, `ChatChip` at 105, 148 and 162), `mac/JawUI/Sources/Components/Tone.swift` (line 14), `mac/JawUI/Sources/ChatList/ChatListController.swift` (`ChatCell`: 381-383, 435, 442, 445, 494, 517, 531), `mac/JawUI/Sources/Layout/MessageLayout.swift` (`MessageContext`'s doc comment at 47-49 and `sending` at 62, the builder's `init` at 376-377, 494, 495, `stateMark` at 586-594, `footParts` at 600-608, `footer` at 610-629, 666, 688, 742, 750, 751, 789, 806, 830), `mac/JawUI/Sources/Layout/Cards.swift` (271-273, 465, 538, 544, 563, 566, 567, 570, 575, 576, 579, 581, 589, 590, 625, 640, 675-679, 694), `mac/JawUI/Sources/Layout/ContactCards.swift` (129), `mac/JawUI/Sources/Conversation/MessageView.swift` (104), `mac/JawUI/Sources/Conversation/ConversationController.swift` (`rebuild()` at 348-370, `select(_:)` at 771-785), `mac/JawUI/Sources/Palette/Palette.swift` (514, 517, 572, 574, 580, 593), `mac/JawUI/Sources/Library/LibraryDrawing.swift` (150-152, 164, 225-226, 242-243, 249-255, 271, 277, 280, 281, 284, 311, 314, 330), `mac/JawUI/Sources/Library/LibraryController.swift` (919, 921), `mac/JawUI/Sources/Views/Views.swift` (209), `mac/JawUI/Sources/Window/GlanceView.swift` (94), `mac/JawUI/Sources/Conversation/ContactCardsView.swift` (186), `mac/JawUI/Sources/Conversation/ContactForm.swift` (339), `mac/JawHarness/Sources/Scenes/FoundationScenes.swift` (`RolesScene`, 33, 40 and the second band's note)
+- Test: `mac/Tests/JawThemesTests/OmarchyTests.swift`, `mac/Tests/JawThemesTests/RedlampTests.swift`, `mac/Tests/JawThemesTests/RolesTests.swift`, `mac/Tests/JawThemesTests/ThemeTests.swift`, `mac/Tests/JawUITests/ComponentTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`, `mac/Tests/JawUITests/LinkPreviewTests.swift` (86-87), and the reference pictures in `mac/Tests/JawUITests/References/` that change (Step 14)
+
+**Interfaces:**
+- Consumes: `Contrast.ratio(_:_:)` and `Contrast.fit(_:on:toward:low:high:target:)`, `RGBA.opacity(_:)` and `RGBA.over(_:)`, `Omarchy.roles(_:dark:)` and `Omarchy.terminal(_:)` (Task 2); `RedlampCatalog.families`, `RedlampCatalog.Brand` (`safelight`, `filament`, `ring`, `steel`, internal), `RGBA(hue:saturation:lightness:)` (internal), `RedlampRoles.roles(_:dark:)`, `RedlampRoles.neutral(dark:accent:)`, `RedlampRoles.hsl(_:)` (Task 3); `Theme`, `Slot`, `SystemAccent` with `.blue`, `Catalog.jawTheme`, `Catalog.themes(omarchy:accent:)`, `Catalog.theme(id:omarchy:accent:)` and `Catalog.roles(_:of:omarchy:accent:)`, `Preferences.accent`, `Preferences.systemColoursChanged()` and `SystemAccent.current()` (Task 4); `Catalog.tokyoNight` and `Catalog.tokyoNightDay` (internal); `RGBA(_ colour: NSColor)` (JawUI, internal); main's `MessageContext.sending`, `Sending(step:percent:)` and `Cards`' file on its way (9f4c298b); in the tests `omarchyFiles()`, `reads(_:_:)`, `terminalMoves`, `surfaceMoves`, `redlampMoves` and `servedThemes()`; JawUITests' `spec(_:dark:)`, `laid(_:look:width:group:)`, `laid(_:_:width:)`, `sampleLink(_:)`, `shown(_:_:)`, `PaneHost`, `messageView(_:_:)`, `outgoing(_:id:status:)` (UploadTests), `libraryStyle(_:dark:density:)`, `libraryLaid(_:width:style:items:capped:)`, `rows(_:)`, `drawn(_:_:style:selected:)` and `drawingContext(_:scoped:)`; and JawUI's, internal or public, that HeldInkTests reads: `ConversationController`'s `rows`, `contexts`, `spec` and `select(_:)`, `MessageView`'s `init(frame:)`, `roles`, `laid`, `selected` and `paint(_:)`, `MessageLayout.lay(_:width:context:style:fonts:me:)`, `LayoutSpec`'s `style`, `fonts` and `me`, `Laid`'s `parts`, `pictures`, `text`, `body` and `height`, `LibraryDrawn.under`, `LibraryDrawing.tile(_:size:selected:_:)`, `Symbols.image(_:_:_:on:)`, `NSAttributedString.Key.ctColour` and `.jawBackground`, `Quote(id:from:summary:)`, `Tone.color(_:)`, `Samples` and `ChatCell`'s `show`, `line`, `ticks`, `badges` and `isSelected`.
+- Produces, in JawThemes:
+  - `public var accentText: RGBA` in `Roles`, after `accent`: the accent where JawUI draws it as text or as a mark; every mapping gives it the accent, and the hold moves it.
+  - `public extension Roles` with `enum Base: String, CaseIterable, Sendable` (`.ground`, `.surface`, `.selection`, `.yours`, `.band`), `enum Ground: Hashable, Sendable` (`.plain(Base)`, `.well(Base)`, `.quote(Base)`, `.accentTint(Base)`, `.chip`, `.ownTint(Base)`), `enum Ink: String, CaseIterable, Sendable` (`.secondary`, `.tertiary`, `.accentText`, `.link`, `.mention`, `.online`, `.selectedOnline`, `.failed`, `.senders`), `struct Hold: Sendable, Hashable` (`ink: Ink`, `on: [Ground]`, `at: Double`; `init(_ ink: Ink, on: [Ground], at: Double = 3)`), `static let holds: [Hold]`, the tints `var well`, `quoteWell`, `accentTint`, `chipTint`, `mentionTint` and `bandTint: RGBA` and `func ownTint(of colour: RGBA) -> RGBA`, `subscript(_ base: Base) -> RGBA`, `func colour(of place: Ground, under colour: RGBA) -> RGBA`, `func colours(_ ink: Ink) -> [RGBA]`, `func faint(on base: Base) -> RGBA`, `func lifted(_ colour: RGBA, on grounds: [Ground], at: Double) -> (colour: RGBA, passes: Int)` and `func held() -> Roles`.
+  - `public struct SystemColour: Sendable, Hashable` (`dark`, `light`, both `RGBA`; `init(dark:light:)`; `static let orange`, `green` and `red`, macOS 27.0.1's); `SystemAccent` gains `orange`, `green` and `red: SystemColour`, its `init(dark:light:orange:green:red:)` defaulting the three to `SystemColour`'s, and `.blue` becomes `007AFF` in both appearances.
+  - `RedlampRoles.neutral(dark: Bool, accent: SystemAccent) -> Roles`, where it took an `RGBA`.
+  - `Theme.init(id:name:lightName:source:dark:light:)` holds the halves it's given; `Catalog.jaw` is Tokyo Night's halves held.
+  - `RedlampRoles.hues(from primary: Double, rare: Bool) -> [Double]`, `RedlampRoles.tinted(_ accent: RGBA, dark: Bool) -> RGBA`, and `rare: Bool = false` on `RedlampRoles.held(…)` and `RedlampRoles.senders(from:on:dark:rare:)`, all internal.
+- Produces, in JawUI: `SystemAccent.current()` reading the accent, orange, green and red; `MessageContext.selected: Bool`, false unless the controller says so, as main's `sending` is empty; `Ticks.of(_ status: MessageStatus?, _ roles: Roles, on base: Roles.Base = .surface) -> (Int, RGBA)?`; `ChatCell.place: Roles.Base`; `MessageLayout.Builder.cardGround: Roles.Base`, and the builder's `stateMark(on:)`, `footParts(_:at:on:)` and `footer(time:on:)`; `LibraryDrawing.file`, `link` and `twoLines` gain `selected: Bool`, and a selected row's file symbol and link icon are drawn without their tints; a link card's thumbnail placeholder is drawn on the card's own well; a link card's host and a library tile's placeholder, the dim text's two draws on a well, take the secondary text's colour; and the draw sites above in `accentText`, `faint(on:)` and the tints of `Roles`.
+- Produces, in JawThemesTests: `mappedHalves() throws -> [(name: String, roles: Roles)]` and `readsWhereDrawn(_ r: Roles, _ name: String)`, which RedlampTests' Graphite test takes too; in JawUITests: `runColours(_ line: CTLine) -> [CGColor]` and `tickColour(_ l: Laid) -> CGColor?`.
+
+- [ ] **Step 1: Write JawThemes' failing tests**
+
+Create `mac/Tests/JawThemesTests/HoldTests.swift`:
+
+```swift
+import Foundation
+@testable import JawThemes
+import Testing
+
+/// The hold every theme's roles go through after their own mapping (Owner, 6 Nov): each colour JawUI
+/// draws as text or as a mark at 3:1 on every ground its draw sites put it on, the tints it lays over
+/// a ground among them, a selected row's online at 4.5:1 on its selection, and the accent's fills, the
+/// grounds, the text and the borders as the theme wrote them; what it moves in each half and where
+/// each moved colour lands, as a port of it found on 6 November; a mention of you on its own tint, in
+/// passes that end; and every theme the catalog lists, held.
+
+/// Every half the catalog makes, as its own mapping makes it, before the hold, by the name the lists
+/// below give it: Jaw's Tokyo Night, Omarchy's by ID, Neutral in macOS 27.0.1's colours, and Redlamp's
+/// families.
+func mappedHalves() throws -> [(name: String, roles: Roles)] {
+    var out: [(name: String, roles: Roles)] = [("jaw dark", Catalog.tokyoNight), ("jaw light", Catalog.tokyoNightDay)]
+    for theme in try omarchyFiles() {
+        out.append(("omarchy:\(theme.id)", try #require(Omarchy.roles(theme.colours, dark: theme.dark))))
+    }
+    out.append(("redlamp:neutral dark", RedlampRoles.neutral(dark: true, accent: .blue)))
+    out.append(("redlamp:neutral light", RedlampRoles.neutral(dark: false, accent: .blue)))
+    for family in RedlampCatalog.families {
+        out.append(("redlamp:\(family.id) dark", RedlampRoles.roles(family.dark, dark: true)))
+        out.append(("redlamp:\(family.id) light", RedlampRoles.roles(family.light, dark: false)))
+    }
+    return out
+}
+
+/// Whether held roles read where JawUI draws them: each colour in `Roles.holds` at its contrast on
+/// every one of its grounds, a colour's own tint made from it, as `Contrast` measures it on the
+/// colours the screen is given.
+func readsWhereDrawn(_ r: Roles, _ name: String) {
+    for hold in Roles.holds {
+        for colour in r.colours(hold.ink) {
+            for place in hold.on {
+                let ratio = Contrast.ratio(colour.hex, r.colour(of: place, under: colour).hex)
+                #expect(ratio >= hold.at, "\(name): \(hold.ink) on \(place) at \(ratio)")
+            }
+        }
+    }
+}
+
+@Test func `the hold is JawUI's draw sites: each colour drawn as text or as a mark, on each ground and tint it's drawn on`() {
+    let bases = Roles.Base.allCases.map(Roles.Ground.plain)
+    let wells: [Roles.Ground] = [.well(.ground), .well(.surface), .well(.yours), .well(.band)]
+    let quotes: [Roles.Ground] = [.quote(.surface), .quote(.yours)]
+    let tints: [Roles.Ground] = [.accentTint(.ground), .accentTint(.surface), .accentTint(.yours), .accentTint(.band)]
+    #expect(Roles.Base.allCases == [.ground, .surface, .selection, .yours, .band])
+    #expect(Roles.holds == [
+        Roles.Hold(.secondary, on: bases + wells + quotes),
+        Roles.Hold(.tertiary, on: [.plain(.ground), .plain(.surface)]),
+        Roles.Hold(.accentText, on: bases + wells + quotes + tints + [.chip]),
+        Roles.Hold(.link, on: bases + wells),
+        Roles.Hold(.mention, on: bases + [.ownTint(.ground), .ownTint(.surface), .ownTint(.yours), .ownTint(.band)]),
+        Roles.Hold(.online, on: [.plain(.ground), .plain(.surface)]),
+        Roles.Hold(.selectedOnline, on: [.plain(.selection)], at: 4.5),
+        Roles.Hold(.failed, on: bases),
+        Roles.Hold(.senders, on: bases + quotes),
+    ])
+    #expect(Roles.holds.map(\.ink) == Roles.Ink.allCases, "every colour held, once")
+    let r = Catalog.jaw.dark
+    #expect([r[.ground], r[.surface], r[.selection], r[.yours]] == [r.ground, r.surface, r.selection, r.yours])
+    #expect(r.bandTint == r.selection.opacity(0.55) && r[.band] == r.bandTint.over(r.ground), "a selected message's band in lines")
+    #expect(r.well == r.text.opacity(0.07) && r.quoteWell == r.text.opacity(0.06) && r.accentTint == r.accent.opacity(0.15)
+        && r.chipTint == r.accent.opacity(0.16) && r.mentionTint == r.mention.opacity(0.16), "the tints as JawUI lays them, in dark")
+    let l = Catalog.jaw.light
+    #expect(l.well == l.text.opacity(0.06) && l.quoteWell == l.text.opacity(0.05) && l.chipTint == l.accent.opacity(0.12), "and in light")
+    let grey = RGBA(0x808080)
+    #expect(r.colour(of: .plain(.band), under: grey) == r[.band] && r.colour(of: .well(.yours), under: grey) == r.well.over(r.yours))
+    #expect(r.colour(of: .quote(.yours), under: grey) == r.quoteWell.over(r.yours))
+    #expect(r.colour(of: .accentTint(.yours), under: grey) == r.accentTint.over(r.yours))
+    #expect(r.colour(of: .chip, under: grey) == r.chipTint.over(r.surface), "the chip, on the box's field, the surface")
+    #expect(r.colour(of: .ownTint(.band), under: grey) == grey.opacity(0.16).over(r[.band]), "a colour's own tint, made from it")
+    #expect(r.colours(.senders) == r.senders && r.colours(.accentText) == [r.accentText])
+    #expect(r.faint(on: .ground) == r.tertiary && r.faint(on: .surface) == r.tertiary)
+    #expect(r.faint(on: .selection) == r.secondary && r.faint(on: .yours) == r.secondary && r.faint(on: .band) == r.secondary,
+            "the dim text's words and marks on a selected row, your bubbles and a selected message's band take the secondary text's colour, which is held there")
+}
+
+/// What the hold moves, colour by colour, in each half as its mapping leaves it, as a port of it found
+/// on 6 November at Omarchy's 4c1b4cb and Redlamp's 9fa9d91, Neutral in macOS 27.0.1's colours. Online
+/// and a selected row's online read wherever they're drawn already, so they move nowhere.
+let heldMoves: [Roles.Ink: [String]] = [
+    .secondary: [
+        "jaw dark", "omarchy:last-horizon", "redlamp:neutral dark", "redlamp:neutral light", "redlamp:redlamp light",
+        "redlamp:kanagawa light", "redlamp:tokyo-night dark", "redlamp:tokyo-night light", "redlamp:moonlight dark",
+        "redlamp:rose-pine dark", "redlamp:rose-pine light", "redlamp:nord dark", "redlamp:everforest dark",
+        "redlamp:everforest light", "redlamp:dracula dark", "redlamp:solarized dark", "redlamp:one-dark dark",
+        "redlamp:one-dark light", "redlamp:monokai dark", "redlamp:sakura dark", "redlamp:copper dark",
+        "redlamp:mc-vinyl-noir dark", "redlamp:mc-neon-dusk dark", "redlamp:mc-burnt-tape dark", "redlamp:mc-burnt-tape light",
+        "redlamp:mc-phantom-frequency dark", "redlamp:mc-velvet-static dark",
+    ],
+    .tertiary: [
+        "jaw dark", "jaw light", "omarchy:catppuccin-latte", "omarchy:catppuccin", "omarchy:ethereal", "omarchy:everforest",
+        "omarchy:flexoki-light", "omarchy:gruvbox", "omarchy:kanagawa", "omarchy:last-horizon", "omarchy:matte-black",
+        "omarchy:miasma", "omarchy:nord", "omarchy:osaka-jade", "omarchy:retro-82", "omarchy:ristretto", "omarchy:rose-pine",
+        "omarchy:solitude", "omarchy:starship", "omarchy:tokyo-night", "omarchy:vantablack", "omarchy:white",
+        "redlamp:neutral dark", "redlamp:redlamp dark", "redlamp:redlamp light", "redlamp:kanagawa dark", "redlamp:kanagawa light",
+        "redlamp:tokyo-night light", "redlamp:moonlight light", "redlamp:catppuccin light", "redlamp:rose-pine dark",
+        "redlamp:nord dark", "redlamp:nord light", "redlamp:everforest dark", "redlamp:everforest light", "redlamp:gruvbox dark",
+        "redlamp:gruvbox light", "redlamp:dracula dark", "redlamp:dracula light", "redlamp:solarized dark",
+        "redlamp:solarized light", "redlamp:one-dark light", "redlamp:monokai light", "redlamp:ocean dark", "redlamp:ocean light",
+        "redlamp:sakura dark", "redlamp:sakura light", "redlamp:copper dark", "redlamp:copper light", "redlamp:mc-vinyl-noir dark",
+        "redlamp:mc-vinyl-noir light", "redlamp:mc-neon-dusk dark", "redlamp:mc-neon-dusk light", "redlamp:mc-burnt-tape dark",
+        "redlamp:mc-burnt-tape light", "redlamp:mc-phantom-frequency dark", "redlamp:mc-phantom-frequency light",
+        "redlamp:mc-velvet-static dark", "redlamp:mc-velvet-static light",
+    ],
+    .accentText: [
+        "jaw light", "omarchy:last-horizon", "omarchy:miasma", "omarchy:nord", "omarchy:osaka-jade", "omarchy:rose-pine",
+        "omarchy:solitude", "omarchy:white", "redlamp:neutral dark", "redlamp:neutral light", "redlamp:redlamp dark",
+        "redlamp:redlamp light", "redlamp:tokyo-night light", "redlamp:rose-pine light", "redlamp:nord dark",
+        "redlamp:nord light", "redlamp:everforest light", "redlamp:gruvbox light", "redlamp:solarized dark",
+        "redlamp:solarized light", "redlamp:monokai dark", "redlamp:monokai light", "redlamp:sakura light",
+        "redlamp:copper light", "redlamp:mc-vinyl-noir light",
+    ],
+    .link: [
+        "jaw light", "omarchy:catppuccin-latte", "omarchy:flexoki-light", "omarchy:kanagawa", "omarchy:rose-pine",
+        "omarchy:solitude", "redlamp:neutral dark", "redlamp:neutral light", "redlamp:redlamp dark", "redlamp:redlamp light",
+        "redlamp:tokyo-night light", "redlamp:nord dark", "redlamp:nord light", "redlamp:everforest light",
+        "redlamp:gruvbox light", "redlamp:solarized dark", "redlamp:solarized light", "redlamp:monokai dark",
+        "redlamp:copper light",
+    ],
+    .mention: [
+        "jaw light", "omarchy:catppuccin-latte", "omarchy:flexoki-light", "omarchy:kanagawa", "omarchy:last-horizon",
+        "omarchy:matte-black", "omarchy:miasma", "omarchy:osaka-jade", "omarchy:rose-pine", "redlamp:neutral light",
+        "redlamp:redlamp light", "redlamp:kanagawa light", "redlamp:tokyo-night light", "redlamp:moonlight light",
+        "redlamp:catppuccin light", "redlamp:rose-pine light", "redlamp:nord light", "redlamp:everforest light",
+        "redlamp:gruvbox light", "redlamp:dracula light", "redlamp:solarized light", "redlamp:one-dark dark",
+        "redlamp:monokai light", "redlamp:ocean light", "redlamp:sakura light", "redlamp:copper light",
+        "redlamp:mc-vinyl-noir light", "redlamp:mc-neon-dusk light", "redlamp:mc-burnt-tape light",
+        "redlamp:mc-phantom-frequency light", "redlamp:mc-velvet-static light",
+    ],
+    .failed: [
+        "jaw light", "omarchy:flexoki-light", "omarchy:gruvbox", "omarchy:kanagawa", "omarchy:last-horizon", "omarchy:lumon",
+        "omarchy:miasma", "omarchy:nord", "omarchy:retro-82", "omarchy:solitude", "redlamp:neutral light", "redlamp:redlamp dark",
+        "redlamp:tokyo-night light", "redlamp:moonlight light", "redlamp:nord dark", "redlamp:nord light",
+        "redlamp:everforest dark", "redlamp:everforest light", "redlamp:gruvbox dark", "redlamp:dracula dark",
+        "redlamp:dracula light", "redlamp:solarized dark", "redlamp:one-dark light", "redlamp:ocean light", "redlamp:copper dark",
+        "redlamp:mc-burnt-tape dark",
+    ],
+]
+
+/// How many of each half's eight senders the hold moves.
+let heldSenders: [String: Int] = [
+    "jaw light": 6, "omarchy:catppuccin-latte": 6, "omarchy:everforest": 1, "omarchy:flexoki-light": 7, "omarchy:gruvbox": 1,
+    "omarchy:kanagawa": 5, "omarchy:last-horizon": 4, "omarchy:lumon": 2, "omarchy:lupine": 1, "omarchy:matte-black": 2,
+    "omarchy:miasma": 5, "omarchy:nord": 3, "omarchy:osaka-jade": 4, "omarchy:retro-82": 4, "omarchy:rose-pine": 6,
+    "omarchy:solitude": 4, "redlamp:redlamp dark": 3, "redlamp:tokyo-night dark": 1, "redlamp:one-dark dark": 2,
+    "redlamp:monokai dark": 3, "redlamp:ocean dark": 4,
+]
+
+@Test func `every half reads where JawUI draws it once held, the hold moving what a port of it found, each colour to within 0.05 of its floor`() throws {
+    var moved: [Roles.Ink: [String]] = [:]
+    var senders: [String: Int] = [:]
+    for (name, mapped) in try mappedHalves() {
+        let held = mapped.held()
+        readsWhereDrawn(held, name)
+        #expect(held.held() == held, "\(name): roles that are held come through the hold as they are")
+        #expect([held.ground, held.surface, held.selection, held.yours, held.text, held.separator, held.accent]
+            == [mapped.ground, mapped.surface, mapped.selection, mapped.yours, mapped.text, mapped.separator, mapped.accent],
+            "\(name): the grounds, the text, the borders and the accent's fills as the theme wrote them")
+        for hold in Roles.holds {
+            let (was, now) = (mapped.colours(hold.ink), held.colours(hold.ink))
+            for (before, after) in zip(was, now) where after != before {
+                let worst = hold.on.map { Contrast.ratio(after.hex, held.colour(of: $0, under: after).hex) }.min() ?? 0
+                #expect(worst <= hold.at + 0.05, "\(name): \(hold.ink) lands at \(worst) on the worst of its grounds")
+            }
+            if hold.ink == .senders {
+                let n = zip(was, now).count { $0 != $1 }
+                if n > 0 { senders[name] = n }
+            } else if was != now {
+                moved[hold.ink, default: []].append(name)
+            }
+        }
+    }
+    for ink in Roles.Ink.allCases where ink != .senders {
+        #expect(moved[ink, default: []].sorted() == heldMoves[ink, default: []].sorted(), "\(ink)")
+    }
+    #expect(senders == heldSenders)
+}
+
+@Test func `a mention of you is held on its own tint, which moves with it, in passes that always end`() throws {
+    let grounds = try #require(Roles.holds.first { $0.ink == .mention }).on
+    var most = 0
+    for (name, mapped) in try mappedHalves() {
+        let (colour, passes) = mapped.lifted(mapped.mention, on: grounds, at: 3)
+        #expect(colour == mapped.held().mention, "\(name)")
+        most = max(most, passes)
+    }
+    #expect(most == 3, "three passes at the most in any half, as a port of the hold found")
+    let r = Catalog.jaw.dark
+    let (far, passes) = r.lifted(r.surface, on: [.ownTint(.surface)], at: 3)
+    #expect(far.hex == 0x767F9D && passes == 3, "the surface's own colour on its own tint, as far from reading as a colour gets, in three")
+    #expect(Contrast.ratio(far.hex, r.colour(of: .ownTint(.surface), under: far).hex) >= 3)
+    let none = r.lifted(r.mention, on: [], at: 3)
+    #expect(none.colour == r.mention && none.passes == 0, "with no grounds, nothing to move")
+}
+
+@Test func `every theme the catalog lists comes held, Jaw's Tokyo Night too, and an unread count reads on the accent's badge`() throws {
+    let themes = Catalog.themes(omarchy: try servedThemes(), accent: .blue)
+    let drawn = themes.flatMap { theme in Slot.allCases.compactMap { theme.roles($0) } }
+    let held = try mappedHalves().map { $0.roles.held() }
+    #expect(drawn.count == 69 && held.count == 69 && Set(drawn) == Set(held), "the catalog's halves are the mappings' held")
+    #expect(Catalog.jaw.dark == Catalog.tokyoNight.held() && Catalog.jaw.light == Catalog.tokyoNightDay.held(),
+            "and so is the family the slots fall back on and the harness and the pictures draw in")
+    let counts = drawn.map { r in Contrast.ratio((r.isDark ? r.ground : RGBA(0xFFFFFF)).hex, r.accent.hex) }
+    #expect(counts.allSatisfy { $0 >= 3 } && abs((counts.min() ?? 0) - 3.4245) < 0.0001,
+            "the count on its badge, in the accent as written, at 3.42:1 at the least, in Rosé Pine")
+}
+```
+
+In `mac/Tests/JawThemesTests/OmarchyTests.swift`, the two tests of what moves also check where it lands, as `theme.rs`'s own test does (Task 2's review, Minor 1). `` `each theme moves the greys theme.rs moves, and no others` `` (lines 73-88) becomes:
+
+```swift
+@Test func `each theme moves the greys theme.rs moves, and no others, each grey and colour it moves landing within 0.05 of its target`() throws {
+    for theme in try omarchyFiles() {
+        let c = theme.colours.compactMapValues(Omarchy.hex)
+        let t = try #require(Omarchy.terminal(c))
+        let greys: [(String, UInt32, UInt32, UInt32)] = [
+            ("surface", c["lighter_background"]!, t.surface, t.bg), ("selection", c["selection"]!, t.selection, t.surface),
+            ("dim text", c["dark_foreground"]!, t.comment, t.bg), ("borders", c["muted"]!, t.gutter, t.bg),
+        ]
+        var moved: [String] = []
+        for (what, was, now, ground) in greys where now != was {
+            moved.append("\(what) \(Contrast.ratio(now, ground) > Contrast.ratio(was, ground) ? "raised" : "lowered")")
+        }
+        let listed = terminalMoves.filter { $0.themes.contains(theme.id) }.flatMap { $0.moved }
+        #expect(moved.sorted() == listed.sorted(), "\(theme.id)")
+        let picked = Contrast.fit(c["selection"]!, on: t.bg, toward: t.fg, low: 1.15, target: 1.25)
+        var lands: [(String, UInt32, UInt32, UInt32, Double)] = [
+            ("surface", c["lighter_background"]!, t.surface, t.bg, 1.1), ("dim text", c["dark_foreground"]!, t.comment, t.bg, 3),
+            ("borders", c["muted"]!, t.gutter, t.bg, 1.8), ("selection", c["selection"]!, picked, t.bg, 1.25),
+            ("selection on the surface", picked, t.selection, t.surface, 1.15), ("link", c["cyan"]!, t.link, t.bg, 3),
+            ("mention", c["orange"]!, t.mention, t.bg, 3), ("online", c["green"]!, t.online, t.bg, 3),
+            ("notice", c["yellow"]!, t.notice, t.bg, 3),
+        ]
+        for (was, now) in zip(["red", "yellow", "blue", "magenta", "cyan", "green", "orange", "bright_cyan"].map { c[$0]! }, t.senders) {
+            lands.append(("a sender", was, now, t.bg, 3))
+        }
+        for (what, was, now, ground, target) in lands where now != was {
+            #expect(abs(Contrast.ratio(now, ground) - target) <= 0.05, "\(theme.id): \(what) lands at \(Contrast.ratio(now, ground))")
+        }
+    }
+}
+```
+
+and `` `the Mac holds the terminal's colours at 3:1 on its surface too, which moves nine themes' and no others'` `` (lines 104-121) becomes:
+
+```swift
+@Test func `the Mac holds the terminal's colours at 3:1 on its surface too, which moves nine themes' and no others', each to within 0.05 of 3:1 there`() throws {
+    for theme in try omarchyFiles() {
+        let c = theme.colours.compactMapValues(Omarchy.hex)
+        let t = try #require(Omarchy.terminal(c))
+        let r = try #require(Omarchy.roles(theme.colours, dark: theme.dark))
+        let red = Contrast.fit(c["red"]!, on: t.bg, toward: t.fg, low: 3, target: 3)
+        var moved: [String] = []
+        for (what, was, now) in [("link", t.link, r.link), ("mention", t.mention, r.mention), ("online", t.online, r.online),
+                                 ("failed", red, r.failed)] where now.hex != was
+        {
+            moved.append(what)
+            #expect(abs(Contrast.ratio(now.hex, t.surface) - 3) <= 0.05, "\(theme.id): \(what) lands at \(Contrast.ratio(now.hex, t.surface))")
+        }
+        let senders = zip(t.senders, r.senders).count { $0.0 != $0.1.hex }
+        if senders > 0 { moved.append("senders \(senders)") }
+        for (was, now) in zip(t.senders, r.senders) where now.hex != was {
+            #expect(abs(Contrast.ratio(now.hex, t.surface) - 3) <= 0.05, "\(theme.id): a sender lands at \(Contrast.ratio(now.hex, t.surface))")
+        }
+        #expect(moved.sorted() == (surfaceMoves[theme.id] ?? []).sorted(), "\(theme.id)")
+        #expect(r.accent.hex == t.accent && r.ground.hex == t.bg && r.tertiary.hex == t.comment, "\(theme.id): the rest as the terminal has it")
+        #expect(r.accentText == r.accent, "\(theme.id): the accent drawn as text, as written until the hold")
+    }
+}
+```
+
+In `mac/Tests/JawThemesTests/RedlampTests.swift`:
+
+- In `redlampMoves`, the `"mention"` list begins with the Redlamp family's light half, whose mention is now the filament held by the bands: `"mention": [` is followed by `"redlamp light", "kanagawa light", "tokyo-night light", …`, the rest as it is.
+- `` `Redlamp's halves map by the Mac design's table, held by the bands, which leave five dark halves as they are` `` (lines 54-83) becomes:
+
+```swift
+@Test func `Redlamp's halves map by the Mac design's table, held by the bands, which leave five dark halves as they are and land what they move within 0.05 of its target`() {
+    var moved: [String: [String]] = [:]
+    var untouched: [String] = []
+    for family in RedlampCatalog.families {
+        for (half, p, dark) in [("dark", family.dark, true), ("light", family.light, false)] {
+            let r = RedlampRoles.roles(p, dark: dark)
+            let tint = p.primaryRoles.contains(.selection) ? p.primary : p.neutral
+            let accent = p.primaryRoles.contains(.accent) ? p.primary : p.neutral
+            let mention = p.accent == RedlampCatalog.Brand.safelight ? RedlampCatalog.Brand.filament : p.accent
+            let table: [(String, RGBA, RGBA)] = [
+                ("dim text", p.muted.opacity(0.28 / 0.45).over(p.background), r.tertiary), ("mention", mention, r.mention),
+                ("online", p.success, r.online), ("secondary", p.muted, r.secondary), ("accent", accent, r.accent),
+                ("failed", p.destructive, r.failed), ("selection", tint.opacity(dark ? 0.2 : 0.16).over(p.card), r.selection),
+                ("yours", tint.opacity(dark ? 0.18 : 0.12).over(p.background), r.yours),
+            ]
+            let name = "\(family.id) \(half)"
+            let differ = table.filter { $0.1.hex != $0.2.hex }.map { $0.0 }
+            for role in differ {
+                moved[role, default: []].append(name)
+            }
+            if differ.isEmpty { untouched.append(name) }
+            let (g, s, t) = (r.ground.hex, r.surface.hex, r.text.hex)
+            for (role, was, now) in table where now.hex != was.hex {
+                let target = role == "selection" || role == "yours" ? 4.5 : 3
+                let reached = switch role {
+                case "dim text": Contrast.ratio(now.hex, g)
+                case "selection", "yours": Contrast.ratio(t, now.hex)
+                default: min(Contrast.ratio(now.hex, g), Contrast.ratio(now.hex, s))
+                }
+                #expect(abs(reached - target) <= 0.05, "\(name): \(role) lands at \(reached), its target \(target)")
+            }
+            #expect(r.ground.hex == p.background.hex && r.surface.hex == p.card.hex && r.text.hex == p.foreground.hex, "\(name)")
+            #expect(r.link == r.accent && r.accentText == r.accent && r.separator.hex == p.border.hex,
+                    "\(name): links and the accent drawn as text as the accent, borders as authored")
+        }
+    }
+    #expect(untouched == ["redlamp dark", "kanagawa dark", "catppuccin dark", "gruvbox dark", "ocean dark"])
+    for (role, halves) in redlampMoves {
+        #expect(moved[role, default: []].sorted() == halves.sorted(), "\(role)")
+    }
+    #expect(Set(moved.keys) == Set(redlampMoves.keys))
+}
+```
+
+- `` `the Redlamp family keeps its red to the accent and links, its selection and your bubbles from its grey` `` (lines 85-91) becomes, for both halves (Task 3's review, Minor 1):
+
+```swift
+@Test func `the Redlamp family keeps its red to the accent and links in both halves, its mentions the filament and its senders' hues away from the red`() {
+    let redlamp = RedlampCatalog.families[0]
+    let dark = RedlampRoles.roles(redlamp.dark, dark: true)
+    #expect(dark.accent.hex == 0xE0402E && dark.link.hex == 0xE0402E, "the safelight")
+    #expect(dark.selection.hex == RedlampCatalog.Brand.ring.opacity(0.2).over(redlamp.dark.card).hex, "ring, not red")
+    #expect(dark.yours.hex == RedlampCatalog.Brand.ring.opacity(0.18).over(redlamp.dark.background).hex)
+    #expect(dark.mention.hex == 0xFFB08A, "the filament, as it is")
+    let light = RedlampRoles.roles(redlamp.light, dark: false)
+    #expect(light.accent.hex == 0xD8352A && light.link.hex == 0xD8352A, "the safelight drawn on paper")
+    #expect(light.selection.hex == RedlampCatalog.Brand.steel.opacity(0.16).over(redlamp.light.card).hex, "steel, not red")
+    #expect(light.yours.hex == RedlampCatalog.Brand.steel.opacity(0.12).over(redlamp.light.background).hex)
+    #expect(redlamp.light.accent == RedlampCatalog.Brand.safelight && light.mention.hex == 0xAC7760,
+            "its accent field is the safelight, so its mentions take the filament, darkened to read on paper, not a red beside the unread counts")
+    let (heldDark, heldLight) = (dark.held(), light.held())
+    #expect(heldDark.accentText.hex == 0xE46353 && heldDark.link.hex == 0xE46353 && heldDark.accent == dark.accent,
+            "held where they're drawn: the red as text and links a step lighter, to read on the dark selection, its fills the safelight")
+    #expect(heldLight.accentText.hex == 0xCF3429 && heldLight.link.hex == 0xD7352A && heldLight.mention.hex == 0x936654,
+            "and darker in light: as text for the accent's tint behind a card's symbols in your bubbles, links for the selection, the mention for its own tint in your bubbles")
+    #expect(dark.senders.map(\.hex) == [0xE0D12E, 0x80E02E, 0x2EE04B, 0x2EE0BA, 0x2E96E0, 0x7C77EB, 0xB75AE7, 0xE340B4])
+    #expect(light.senders.map(\.hex) == [0x736715, 0x447315, 0x167722, 0x15735B, 0x1C6C9C, 0x2A2AD8, 0x972AD8, 0xB82292])
+    for (half, r, primary) in [("dark", heldDark, redlamp.dark.primary), ("light", heldLight, redlamp.light.primary)] {
+        let red = RedlampRoles.hsl(primary).hue
+        for (i, sender) in r.senders.enumerated() {
+            let apart = abs(RedlampRoles.hsl(sender).hue - red)
+            #expect(min(apart, 360 - apart) >= 30, "\(half): sender \(i) is \(min(apart, 360 - apart))° from the safelight's hue")
+        }
+    }
+}
+```
+
+- In `` `every half of Redlamp's reads, its senders at 4.5:1 on their bubble, and Neutral's in the system's blue` ``, the loop over Neutral (lines 102-107) becomes:
+
+```swift
+    for dark in [true, false] {
+        let r = RedlampRoles.neutral(dark: dark, accent: .blue)
+        reads(r, "neutral \(dark ? "dark" : "light")")
+        #expect(r.ground.hex == (dark ? 0x1D1D1D : 0xECECEC), "Redlamp's panel grey")
+        #expect(r.accent.hex == 0x007AFF, "the system's accent, which reads as it is")
+        #expect([r.mention.hex, r.online.hex, r.failed.hex] == (dark ? [0xFF9230, 0x30D158, 0xFF4245] : [0xC97225, 0x2E9B49, 0xFF383C]),
+                "the system's orange, green and red as macOS 27.0.1 draws them, light's orange and green darkened to read on its ground")
+    }
+    let other = SystemAccent(dark: RGBA(0x0A84FF), light: RGBA(0x007AFF), red: SystemColour(dark: RGBA(0xFF6961), light: RGBA(0xD70015)))
+    #expect(RedlampRoles.neutral(dark: true, accent: other).failed.hex == 0xFF6961
+        && RedlampRoles.neutral(dark: false, accent: other).failed.hex == 0xD70015, "Neutral's failed is the system's red, whatever AppKit gives")
+```
+
+- At the end of the file, add:
+
+```swift
+@Test func `a half's senders are eight hues 45° apart from primary's, or, where it keeps primary rare, 37.5° apart away from it`() {
+    #expect(RedlampRoles.hues(from: 10, rare: false) == [10, 55, 100, 145, 190, 235, 280, 325])
+    #expect(RedlampRoles.hues(from: 10, rare: true) == [58.75, 96.25, 133.75, 171.25, 208.75, 246.25, 283.75, 321.25],
+            "48.75° past it to 48.75° short of it, none within 30° of it")
+    #expect(RedlampCatalog.families.filter { !$0.dark.primaryRoles.contains(.selection) }.map(\.id) == ["redlamp"],
+            "only the Redlamp family keeps its primary rare, so every other family's senders are as they were")
+}
+
+/// Graphite's accent is a grey, which only AppKit gives with Graphite chosen; these are the two Task 3's
+/// review found Neutral's senders all but one colour in: macOS's system grey in dark, and a grey with no
+/// hue at all in light.
+@Test func `with a grey accent, as Graphite's is, Neutral's senders take the system's blue's hue and come out as eight colours`() {
+    let graphite = SystemAccent(dark: RGBA(0x98989D), light: RGBA(0x8C8C8C))
+    for dark in [true, false] {
+        let name = "Neutral in graphite, \(dark ? "dark" : "light")"
+        let grey = dark ? graphite.dark : graphite.light
+        let r = RedlampRoles.neutral(dark: dark, accent: graphite)
+        reads(r, name)
+        readsWhereDrawn(r.held(), name)
+        let blue = RedlampRoles.hsl(dark ? SystemAccent.blue.dark : SystemAccent.blue.light)
+        let tinted = RGBA(hue: blue.hue, saturation: blue.saturation, lightness: RedlampRoles.hsl(grey).lightness)
+        #expect(r.senders == RedlampRoles.senders(from: tinted, on: r.surface.hex, dark: dark), "\(name): the blue's hue at the grey's lightness")
+        #expect(Set(r.held().senders.map(\.hex)).count == 8, "\(name): eight colours, not eight greys")
+    }
+    #expect(RedlampRoles.neutral(dark: true, accent: graphite).senders.map(\.hex)
+        == [0x3696FF, 0x9D78FF, 0xFF36FB, 0xFF4D76, 0xFF9F36, 0xC8FF36, 0x36FF3A, 0x36FFD1])
+    #expect(RedlampRoles.neutral(dark: false, accent: graphite).senders.map(\.hex)
+        == [0x006CE2, 0x5719FF, 0xC900C5, 0xE20034, 0xAD5A00, 0x597A00, 0x008403, 0x007F62])
+    #expect(RedlampRoles.neutral(dark: false, accent: .blue).senders.map(\.hex)
+        == [0x006DE3, 0x4500FF, 0xC900C5, 0xE30034, 0xAD5A00, 0x597A00, 0x008203, 0x007F62], "an accent with a hue keeps its own")
+    let neutral = Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: graphite)
+    #expect(Set(neutral?.dark?.senders.map(\.hex) ?? []).count == 8 && Set(neutral?.light?.senders.map(\.hex) ?? []).count == 8)
+}
+```
+
+In `mac/Tests/JawThemesTests/RolesTests.swift`:
+
+- The last line of `` `jaw's theme is the terminal's Tokyo Night by role` `` (line 9) becomes:
+
+```swift
+    #expect(dark.link == dark.accent && dark.accentText == dark.accent, "Tokyo Night's links and its accent drawn as text are its blue")
+    #expect(dark.secondary.hex == 0x7E87AF && dark.tertiary.hex == 0x66709A,
+            "its secondary text a step lighter for a card's well in your bubble, its dim text a shade lighter for its surface")
+    let light = Catalog.jaw.light
+    #expect(light.accent == RGBA(0x2E7DE9) && light.accentText.hex == 0x2D68C4 && light.link.hex == 0x2D68C4,
+            "Tokyo Night Day's blue fills as it's written, and is a step deeper where it's drawn as text and as links, to read on its selection")
+```
+
+- The doc comment of `` `Jaw's Tokyo Night reads as every theme must, in both halves` `` (lines 39-40) becomes:
+
+```swift
+/// Tokyo Night Day reads as held: its dim text, raised from 2.54:1 on its ground to read at 3:1 there,
+/// at 3.01:1, and its red, moved from F52A65 to C0316D to read at 3:1 on its selection, at 4.16:1 on
+/// its ground.
+```
+
+In `mac/Tests/JawThemesTests/ThemeTests.swift`:
+
+- A slot draws its theme's half as the hold leaves it: line 47, `#expect(Catalog.roles(.dark, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.dark, dark: true))`, ends `== RedlampRoles.roles(nord.dark, dark: true).held())`; line 48 likewise ends `== RedlampRoles.roles(nord.light, dark: false).held())`; and line 51 ends `== Omarchy.roles(gruvbox.colours, dark: true)?.held())`.
+- In `` `Neutral draws in the accent it's given, in each appearance, and Redlamp's families don't change with it` ``, line 82, `#expect(neutral.dark?.link == neutral.dark?.accent)`, becomes the lines below: Neutral's halves are now its mapping held, and `SystemAccent` carries the system's orange, green and red.
+
+```swift
+    #expect(neutral.dark == RedlampRoles.neutral(dark: true, accent: purple).held(), "its halves are Neutral's mapping in the purple, held")
+    #expect(purple.orange == .orange && purple.green == .green && purple.red == .red,
+            "an accent given without the system's other colours takes macOS 27.0.1's")
+    #expect(SystemAccent.blue == SystemAccent(dark: RGBA(0x007AFF), light: RGBA(0x007AFF),
+                                              orange: SystemColour(dark: RGBA(0xFF9230), light: RGBA(0xFF8D28)),
+                                              green: SystemColour(dark: RGBA(0x30D158), light: RGBA(0x34C759)),
+                                              red: SystemColour(dark: RGBA(0xFF4245), light: RGBA(0xFF383C))),
+            "macOS 27.0.1's default accent, the same blue in both appearances, and its orange, green and red, as the build Mac draws them")
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 1, a build failure from the tests naming what isn't there yet, among them `'Hold' is not a member type of struct 'JawThemes.Roles'` from `HoldTests.swift`, `value of type 'Roles' has no member 'accentText'` and `cannot find 'SystemColour' in scope`.
+
+- [ ] **Step 3: The hold, the accent drawn as text, and the system's colours**
+
+Create `mac/JawThemes/Sources/Held.swift`:
+
+```swift
+import Foundation
+
+/// The colours JawUI draws as text or as marks, held readable wherever it draws them, after a theme's
+/// own mapping and whichever source it comes from (Owner, 6 Nov): each moved toward the text, by the
+/// straight line `theme.rs` moves a colour along, until it reads at 3:1 on the worst of the grounds
+/// JawUI draws it on, the tints it lays over a ground among them, a selected row's online at 4.5:1 on
+/// its selection. The accent's fills (the unread badge, the tints themselves, the focus outline), the
+/// grounds, the text and the borders keep the colours the theme wrote.
+public extension Roles {
+    /// A ground JawUI fills with a theme's colours: the window's (a conversation in lines, the composer,
+    /// the panes, the library, the glance), the surface (the chat list, the palette, the status line,
+    /// the box's field, their bubbles), a selected row, your bubbles, and the band a selected message
+    /// is drawn on in lines.
+    enum Base: String, CaseIterable, Sendable {
+        case ground, surface, selection, yours, band
+    }
+
+    /// A ground JawUI draws text or marks on: a base, or a tint it lays over one.
+    enum Ground: Hashable, Sendable {
+        /// The base itself.
+        case plain(Base)
+        /// A card's well on it (`well`): a picture's, an album's, a link's (its thumbnail's placeholder
+        /// too) or a contact card's, and the library's tiles and, on a row not selected, link icons.
+        case well(Base)
+        /// A quote's well on it (`quoteWell`).
+        case quote(Base)
+        /// The accent's tint on it (`accentTint`), behind a card's symbols, the library's file symbol
+        /// on a row not selected, and its header's mark.
+        case accentTint(Base)
+        /// The box's chip (`chipTint`), on its field, the surface.
+        case chip
+        /// The colour drawn on it, at 16% (`ownTint(of:)`): a mention of you.
+        case ownTint(Base)
+    }
+
+    /// A colour JawUI draws as text or as a mark.
+    enum Ink: String, CaseIterable, Sendable {
+        case secondary, tertiary, accentText, link, mention, online, selectedOnline, failed, senders
+    }
+
+    /// A colour, the grounds JawUI draws it on, and the contrast it's held at on each.
+    struct Hold: Sendable, Hashable {
+        public var ink: Ink
+        public var on: [Ground]
+        public var at: Double
+
+        public init(_ ink: Ink, on: [Ground], at: Double = 3) {
+            self.ink = ink
+            self.on = on
+            self.at = at
+        }
+    }
+
+    /// Each colour and the grounds JawUI's draw sites put it on. Cards, with their wells and the
+    /// accent's tints, sit on the window's ground, the surface, your bubbles and a selected message's
+    /// band, quotes on the surface and your bubbles; a selected library row draws its file and link
+    /// marks on the selection itself, without their tints. The dim text is held on the window's ground
+    /// and the surface alone: everywhere else JawUI draws it, on a selected row, your bubbles, the band
+    /// (`faint(on:)`) and a card's or a tile's well, its words and marks take the secondary text's
+    /// colour, as the dim text held at 3:1 there would come level with the secondary text, or near it.
+    /// A selected row draws online as `selectedOnline`.
+    static let holds: [Hold] = {
+        let bases = Base.allCases.map(Ground.plain)
+        let wells: [Ground] = [.well(.ground), .well(.surface), .well(.yours), .well(.band)]
+        let quotes: [Ground] = [.quote(.surface), .quote(.yours)]
+        let tints: [Ground] = [.accentTint(.ground), .accentTint(.surface), .accentTint(.yours), .accentTint(.band)]
+        return [
+            Hold(.secondary, on: bases + wells + quotes),
+            Hold(.tertiary, on: [.plain(.ground), .plain(.surface)]),
+            Hold(.accentText, on: bases + wells + quotes + tints + [.chip]),
+            Hold(.link, on: bases + wells),
+            Hold(.mention, on: bases + [.ownTint(.ground), .ownTint(.surface), .ownTint(.yours), .ownTint(.band)]),
+            Hold(.online, on: [.plain(.ground), .plain(.surface)]),
+            Hold(.selectedOnline, on: [.plain(.selection)], at: 4.5),
+            Hold(.failed, on: bases),
+            Hold(.senders, on: bases + quotes),
+        ]
+    }()
+
+    /// A card's well: the text at 7%, 6% in light.
+    var well: RGBA {
+        text.opacity(isDark ? 0.07 : 0.06)
+    }
+
+    /// A quote's well: the text at 6%, 5% in light.
+    var quoteWell: RGBA {
+        text.opacity(isDark ? 0.06 : 0.05)
+    }
+
+    /// The accent's tint behind its symbols: the accent at 15%.
+    var accentTint: RGBA {
+        accent.opacity(0.15)
+    }
+
+    /// The box's chip: the accent at 16%, 12% in light.
+    var chipTint: RGBA {
+        accent.opacity(isDark ? 0.16 : 0.12)
+    }
+
+    /// What a mention of you is drawn on: its own colour's tint.
+    var mentionTint: RGBA {
+        ownTint(of: mention)
+    }
+
+    /// The band a selected message is drawn on in lines: the selection at 55%.
+    var bandTint: RGBA {
+        selection.opacity(0.55)
+    }
+
+    /// The tint of a colour drawn on its own colour: it at 16%.
+    func ownTint(of colour: RGBA) -> RGBA {
+        colour.opacity(0.16)
+    }
+
+    /// A base's colour, the band as it's drawn on the window's ground.
+    subscript(_ base: Base) -> RGBA {
+        switch base {
+        case .ground: ground
+        case .surface: surface
+        case .selection: selection
+        case .yours: yours
+        case .band: bandTint.over(ground)
+        }
+    }
+
+    /// The colour of `place` with `colour` drawn on it, which a colour's own tint is made from.
+    func colour(of place: Ground, under colour: RGBA) -> RGBA {
+        switch place {
+        case let .plain(base): self[base]
+        case let .well(base): well.over(self[base])
+        case let .quote(base): quoteWell.over(self[base])
+        case let .accentTint(base): accentTint.over(self[base])
+        case .chip: chipTint.over(surface)
+        case let .ownTint(base): ownTint(of: colour).over(self[base])
+        }
+    }
+
+    /// A colour's values: the eight senders', or the one.
+    func colours(_ ink: Ink) -> [RGBA] {
+        switch ink {
+        case .secondary: [secondary]
+        case .tertiary: [tertiary]
+        case .accentText: [accentText]
+        case .link: [link]
+        case .mention: [mention]
+        case .online: [online]
+        case .selectedOnline: [selectedOnline]
+        case .failed: [failed]
+        case .senders: senders
+        }
+    }
+
+    /// What JawUI draws the dim text's words and marks in on `base`: the dim text on the window's
+    /// ground and the surface, where it's held, and the secondary text's colour on a selected row, your
+    /// bubbles and a selected message's band, where only that is.
+    func faint(on base: Base) -> RGBA {
+        base == .ground || base == .surface ? tertiary : secondary
+    }
+
+    /// `colour` moved toward the text until it reads at `at` on each of `grounds`, one after another
+    /// with `Contrast.fit`, in passes, each working the grounds out from the colour the pass starts
+    /// from, as a colour's own tint moves with it, until a pass moves nothing; and how many passes
+    /// moved it. A pass moves each channel toward the text's or leaves it, never past it, so no more
+    /// than 765 can move a colour, three channels of 255 steps, and the loop ends at 766 whatever the
+    /// grounds.
+    func lifted(_ colour: RGBA, on grounds: [Ground], at: Double) -> (colour: RGBA, passes: Int) {
+        let end = text.hex
+        var now = colour
+        for passes in 0 ..< 766 {
+            let start = now
+            let moved = grounds.reduce(start.hex) { hex, place in
+                Contrast.fit(hex, on: self.colour(of: place, under: start).hex, toward: end, low: at, target: at)
+            }
+            if moved == start.hex { return (start, passes) }
+            now = RGBA(moved)
+        }
+        return (now, 766)
+    }
+
+    /// These roles with each colour in `holds` lifted to read at its contrast on every one of its
+    /// grounds. A colour that reads already is kept exactly as it is, so roles that are held come
+    /// through unmoved.
+    func held() -> Roles {
+        var out = self
+        for hold in Self.holds {
+            func lift(_ colour: RGBA) -> RGBA {
+                lifted(colour, on: hold.on, at: hold.at).colour
+            }
+            switch hold.ink {
+            case .secondary: out.secondary = lift(secondary)
+            case .tertiary: out.tertiary = lift(tertiary)
+            case .accentText: out.accentText = lift(accentText)
+            case .link: out.link = lift(link)
+            case .mention: out.mention = lift(mention)
+            case .online: out.online = lift(online)
+            case .selectedOnline: out.selectedOnline = lift(selectedOnline)
+            case .failed: out.failed = lift(failed)
+            case .senders: out.senders = senders.map(lift)
+            }
+        }
+        return out
+    }
+}
+```
+
+In `mac/JawThemes/Sources/Roles.swift`:
+
+- `accent` and its doc comment (lines 21-22) become, with `accentText` after them:
+
+```swift
+    /// Focus, selection, unread counts: the accent's fills and outlines, as the theme wrote it.
+    public var accent: RGBA
+    /// The accent where JawUI draws it as text or as a mark: an unread chat's time, Draft:, a mention of
+    /// someone else, Show more, You in a reply, the palette's and the library's marks, a card's action;
+    /// the accent, until `held()` moves it to read where it's drawn.
+    public var accentText: RGBA
+```
+
+- In both halves of Tokyo Night, `tokyoNight` (line 85) and `tokyoNightDay` (line 111), `accent: blue, link: blue,` becomes `accent: blue, accentText: blue, link: blue,`.
+- `Catalog.jaw` and its doc comment (lines 61-63) become:
+
+```swift
+    /// jaw's own, first and the default: ooze's Tokyo Night, the terminal's palette, with Tokyo Night
+    /// Day as its light half, both held as every theme is (`Roles.held()`). Redlamp's families join it in Mac-M5.
+    public static let jaw = ThemeFamily(id: "jaw", name: "jaw", dark: tokyoNight.held(), light: tokyoNightDay.held())
+```
+
+In `mac/JawThemes/Sources/Omarchy.swift`'s `roles(_:dark:)`, line 68, `link: RGBA(surfaced(t.link)), yours: RGBA(t.accent).opacity(dark ? 0.18 : 0.12).over(RGBA(t.bg)),` becomes `accentText: RGBA(t.accent), link: RGBA(surfaced(t.link)), yours: RGBA(t.accent).opacity(dark ? 0.18 : 0.12).over(RGBA(t.bg)),`.
+
+In `mac/JawThemes/Sources/Theme.swift`:
+
+- `Theme`'s doc comment (lines 30-32) ends `…, and its halves as the roles Jaw draws in, a dark one, a light one or both, each held where JawUI draws it (`Roles.held()`), whichever source it comes from.`, and its initialiser (lines 42-49) becomes:
+
+```swift
+    public init(id: String, name: String, lightName: String? = nil, source: ThemeSource, dark: Roles?, light: Roles?) {
+        self.id = id
+        self.name = name
+        self.lightName = lightName
+        self.source = source
+        self.dark = dark?.held()
+        self.light = light?.held()
+    }
+```
+
+  Every theme the catalog makes comes through here: Jaw's (`Catalog.jawTheme`, from `Catalog.jaw`, held already, which the hold leaves as it is), Omarchy's, each of Redlamp's families and Neutral.
+- `SystemAccent` and its doc comment (lines 84-97) become:
+
+```swift
+/// One of the system's colours as AppKit draws it in a dark appearance and in a light one.
+public struct SystemColour: Sendable, Hashable {
+    public var dark: RGBA
+    public var light: RGBA
+
+    public init(dark: RGBA, light: RGBA) {
+        self.dark = dark
+        self.light = light
+    }
+
+    /// macOS's orange, green and red as AppKit draws them on macOS 27.0.1, as the build Mac does, which
+    /// the tests and the harness draw Neutral in, so their pictures don't depend on the Mac's.
+    public static let orange = SystemColour(dark: RGBA(0xFF9230), light: RGBA(0xFF8D28))
+    public static let green = SystemColour(dark: RGBA(0x30D158), light: RGBA(0x34C759))
+    public static let red = SystemColour(dark: RGBA(0xFF4245), light: RGBA(0xFF383C))
+}
+
+/// The system's colours Neutral takes, as AppKit draws them in a dark appearance and in a light one: the
+/// accent chosen in System Settings, `dark` and `light`, and the orange, green and red its mentions,
+/// online and failed take.
+public struct SystemAccent: Sendable, Hashable {
+    public var dark: RGBA
+    public var light: RGBA
+    public var orange: SystemColour
+    public var green: SystemColour
+    public var red: SystemColour
+
+    public init(dark: RGBA, light: RGBA, orange: SystemColour = .orange, green: SystemColour = .green, red: SystemColour = .red) {
+        self.dark = dark
+        self.light = light
+        self.orange = orange
+        self.green = green
+        self.red = red
+    }
+
+    /// macOS's blue, the accent until another is chosen in System Settings, which AppKit resolves to
+    /// `007AFF` in both appearances on macOS 27.0.1, as the build Mac draws it, with macOS's orange,
+    /// green and red: what the tests and the harness draw Neutral in, so their pictures don't depend on
+    /// the Mac's.
+    public static let blue = SystemAccent(dark: RGBA(0x007AFF), light: RGBA(0x007AFF))
+}
+```
+
+- `Catalog.neutral` and its doc comment (lines 152-156) become:
+
+```swift
+    /// Neutral, `redlamp:neutral`, in the system's colours.
+    static func neutral(_ accent: SystemAccent) -> Theme {
+        Theme(id: "redlamp:neutral", name: "Neutral", source: .redlamp, dark: RedlampRoles.neutral(dark: true, accent: accent),
+              light: RedlampRoles.neutral(dark: false, accent: accent))
+    }
+```
+
+- [ ] **Step 4: Redlamp's red, and Neutral in the system's colours, its senders in colour under a grey accent**
+
+`mac/JawThemes/Sources/RedlampRoles.swift` becomes:
+
+```swift
+import Foundation
+
+/// jaw's roles from Redlamp's families, by the Mac design's table, then held as Omarchy's are: every
+/// colour at 3:1 against the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1,
+/// and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, so
+/// a family made for a photo editor's panels reads in a chat, readable over exact (Owner, 6 Nov).
+public enum RedlampRoles {
+    /// A family's half: `primary`, or `neutral` where `primaryRoles` keeps it out, takes the accent and
+    /// links, the selection at 20% over `card` (16% in light) and your bubbles at 18% over `background`
+    /// (12%); `accent` takes mentions, `success` online and `destructive` failed; the senders are eight
+    /// hues from `primary`'s (`hues(from:rare:)`). The Redlamp family keeps the brand's red to its
+    /// accent (Owner, 6 Nov): its light half's `accent` is the safelight itself, so its mentions take the
+    /// brand's filament, as its dark half's do, and its senders' hues keep away from the red.
+    public static func roles(_ p: ThemePalette, dark: Bool) -> Roles {
+        let tint = p.primaryRoles.contains(.selection) ? p.primary : p.neutral
+        return held(
+            dark: dark, ground: p.background, surface: p.card, text: p.foreground,
+            selection: tint.opacity(dark ? 0.2 : 0.16).over(p.card), yours: tint.opacity(dark ? 0.18 : 0.12).over(p.background),
+            secondary: p.muted, tertiary: p.muted.opacity(0.28 / 0.45).over(p.background), separator: p.border,
+            accent: p.primaryRoles.contains(.accent) ? p.primary : p.neutral,
+            mention: p.accent == RedlampCatalog.Brand.safelight ? RedlampCatalog.Brand.filament : p.accent, online: p.success,
+            failed: p.destructive, hue: p.primary, rare: !p.primaryRoles.contains(.selection),
+        )
+    }
+
+    /// Neutral, Redlamp's own grey: its standard tokens' greys at their alphas over its panel, white
+    /// over 11.5% grey in dark and black over 92.5% in light; the system's colours, as AppKit draws them
+    /// in the appearance (`SystemAccent`), its accent the system's, which Redlamp's Neutral leaves its
+    /// accent to, and its orange, green and red for mentions, online and failed, held as a family's are;
+    /// its senders' hues from the accent's, or from the system's blue where the accent is a grey
+    /// (`tinted(_:dark:)`).
+    public static func neutral(dark: Bool, accent system: SystemAccent) -> Roles {
+        let accent = dark ? system.dark : system.light
+        let ink = dark ? RGBA(0xFFFFFF) : RGBA(0x000000)
+        let ground = dark ? RGBA(r: 0.115, g: 0.115, b: 0.115) : RGBA(r: 0.925, g: 0.925, b: 0.925)
+        let surface = RGBA(0xFFFFFF).opacity(dark ? 0.05 : 0.55).over(ground)
+        return held(
+            dark: dark, ground: ground, surface: surface, text: ink.opacity(dark ? 0.9 : 0.88).over(ground),
+            selection: ink.opacity(dark ? 0.1 : 0.08).over(surface), yours: accent.opacity(dark ? 0.18 : 0.12).over(ground),
+            secondary: ink.opacity(dark ? 0.45 : 0.5).over(ground), tertiary: ink.opacity(dark ? 0.28 : 0.3).over(ground),
+            separator: ink.opacity(dark ? 0.07 : 0.09).over(ground), accent: accent,
+            mention: dark ? system.orange.dark : system.orange.light, online: dark ? system.green.dark : system.green.light,
+            failed: dark ? system.red.dark : system.red.light, hue: tinted(accent, dark: dark),
+        )
+    }
+
+    /// The roles from what a half gives each, held: colours at 3:1 on the ground and then the surface,
+    /// the dim text in its band, the selection and your bubbles under text, a selected row's online at
+    /// 4.5:1 on its selection, links and the accent drawn as text as the accent, the borders as
+    /// authored, and the senders from `hue`, kept away from it where `rare`.
+    static func held(dark: Bool, ground: RGBA, surface: RGBA, text: RGBA, selection: RGBA, yours: RGBA, secondary: RGBA,
+                     tertiary: RGBA, separator: RGBA, accent: RGBA, mention: RGBA, online: RGBA, failed: RGBA, hue: RGBA,
+                     rare: Bool = false) -> Roles
+    {
+        let (g, s, t) = (ground.hex, surface.hex, text.hex)
+        func both(_ c: RGBA) -> UInt32 {
+            Contrast.fit(Contrast.fit(c.hex, on: g, toward: t, low: 3, target: 3), on: s, toward: t, low: 3, target: 3)
+        }
+        let picked = under(t, selection.hex, toward: s)
+        let on = both(online)
+        let a = RGBA(both(accent))
+        return Roles(
+            isDark: dark, ground: RGBA(g), surface: RGBA(s), selection: RGBA(picked), text: RGBA(t), secondary: RGBA(both(secondary)),
+            tertiary: RGBA(Contrast.fit(tertiary.hex, on: g, toward: t, low: 2.5, high: 4.5, target: 3)), separator: RGBA(separator.hex),
+            accent: a, accentText: a, link: a, yours: RGBA(under(t, yours.hex, toward: g)), mention: RGBA(both(mention)), online: RGBA(on),
+            selectedOnline: RGBA(Contrast.fit(on, on: picked, toward: t, low: 4.5, target: 4.5)), failed: RGBA(both(failed)),
+            senders: senders(from: hue, on: s, dark: dark, rare: rare),
+        )
+    }
+
+    /// `fill` moved toward `ground` until `text` reads at 4.5:1 on it.
+    static func under(_ text: UInt32, _ fill: UInt32, toward ground: UInt32) -> UInt32 {
+        guard Contrast.ratio(text, fill) < 4.5 else { return fill }
+        var (near, far) = (0.0, 1.0)
+        for _ in 0 ..< 30 {
+            let t = (near + far) / 2
+            if Contrast.ratio(text, Contrast.mix(fill, ground, t)) < 4.5 {
+                near = t
+            } else {
+                far = t
+            }
+        }
+        return Contrast.mix(fill, ground, far)
+    }
+
+    /// Eight hues from `primary`'s (`hues(from:rare:)`), its saturation and lightness kept, each
+    /// lightened in dark or darkened in light half a percent at a time until it reads at 4.5:1 on
+    /// `surface`.
+    static func senders(from primary: RGBA, on surface: UInt32, dark: Bool, rare: Bool = false) -> [RGBA] {
+        let (hue, saturation, lightness) = hsl(primary)
+        return hues(from: hue, rare: rare).map { h in
+            var l = lightness
+            var colour = RGBA(hue: h, saturation: saturation, lightness: l).hex
+            var steps = 0
+            while Contrast.ratio(colour, surface) < 4.5, steps < 200 {
+                l = min(max(l + (dark ? 0.005 : -0.005), 0), 1)
+                colour = RGBA(hue: h, saturation: saturation, lightness: l).hex
+                steps += 1
+            }
+            return RGBA(colour)
+        }
+    }
+
+    /// The senders' eight hues from `primary`'s: 45° apart, the first `primary`'s own; or, for a half
+    /// that keeps `primary` rare, as the Redlamp family keeps the brand's red to its accent, 37.5° apart
+    /// over the 300° outside 30° either side of it, from 48.75° past it to 48.75° short of it, so no
+    /// sender's name takes the red (Owner, 6 Nov).
+    static func hues(from primary: Double, rare: Bool) -> [Double] {
+        (0 ..< 8).map { k in rare ? primary + 48.75 + 37.5 * Double(k) : primary + 45 * Double(k) }
+    }
+
+    /// What Neutral's senders take their hues from: the system's accent, or, where that's a grey, under
+    /// 0.2 saturation as Graphite's is, the system's blue at the accent's lightness, so a group's eight
+    /// senders still come out as eight colours (Owner, 6 Nov).
+    static func tinted(_ accent: RGBA, dark: Bool) -> RGBA {
+        let (_, saturation, lightness) = hsl(accent)
+        guard saturation < 0.2 else { return accent }
+        let blue = hsl(dark ? SystemAccent.blue.dark : SystemAccent.blue.light)
+        return RGBA(hue: blue.hue, saturation: blue.saturation, lightness: lightness)
+    }
+
+    /// A colour's hue in degrees, its saturation and its lightness, as HSL has them.
+    static func hsl(_ c: RGBA) -> (hue: Double, saturation: Double, lightness: Double) {
+        let (high, low) = (max(c.r, c.g, c.b), min(c.r, c.g, c.b))
+        let lightness = (high + low) / 2
+        guard high > low else { return (0, 0, lightness) }
+        let d = high - low
+        let saturation = lightness > 0.5 ? d / (2 - high - low) : d / (high + low)
+        let hue: Double = switch high {
+        case c.r: (c.g - c.b) / d + (c.g < c.b ? 6 : 0)
+        case c.g: (c.b - c.r) / d + 2
+        default: (c.r - c.g) / d + 4
+        }
+        return (hue * 60, saturation, lightness)
+    }
+}
+```
+
+What changes from Task 3's: the mention of a half whose `accent` field is the brand's safelight, which only the Redlamp family's light half has; the senders' hues where a half keeps `primary` out of its selection, which only the Redlamp family does, `45 * Double(k)` being `Double(k) * 45` exactly, so every other family's senders are the same to the bit; Neutral taking the system's colours whole, and its senders' hue under a grey accent; and `accentText` beside `link`.
+
+- [ ] **Step 5: Run JawThemes' tests**
+
+Run: `mac/scripts/build-mac test JawThemes`
+Expected: exit 0, `** TEST SUCCEEDED **`, `✔ Test run with 24 tests in 0 suites passed`: Task 4 left 18, and `HoldTests.swift` adds four and `RedlampTests.swift` two. If `heldMoves`, `heldSenders` or a pinned colour differs from what the code finds, check `Roles.held()`, `Roles.colour(of:under:)` and `RedlampRoles` against Steps 3 and 4 and the table above before changing a list, and say so in the report: the lists are what a port of the arithmetic found on 6 November, the port first checked against what Tasks 2 and 3 pin.
+
+- [ ] **Step 6: Write JawUI's failing tests**
+
+Create `mac/Tests/JawUITests/HeldInkTests.swift`:
+
+```swift
+import AppKit
+import CoreText
+@testable import JawKit
+import JawThemes
+@testable import JawUI
+import Testing
+
+/// Where JawUI draws a theme's accent as text it takes the accent's held colour, and the accent's fills
+/// the colour the theme wrote; the dim text's words and marks take the secondary text's colour
+/// everywhere but the window's ground and the surface, where only the secondary text is held: on your
+/// bubbles, a selected row, a selected message's band and a well; the tints JawUI lays over a ground
+/// are the ones the hold reads the colours on them on (Owner, 6 Nov); and three small marks are drawn
+/// on one ground, not on a tint on a tint.
+
+/// The colours of a line's runs.
+func runColours(_ line: CTLine) -> [CGColor] {
+    (CTLineGetGlyphRuns(line) as! [CTRun]).compactMap { run in
+        (CTRunGetAttributes(run) as NSDictionary)[NSAttributedString.Key.ctColour].map { $0 as! CGColor }
+    }
+}
+
+/// The colour of the first ticks a layout draws.
+func tickColour(_ l: Laid) -> CGColor? {
+    l.parts.lazy.compactMap { part -> CGColor? in if case let .ticks(_, _, colour, _) = part { colour } else { nil } }.first
+}
+
+@MainActor @Test func `the accent drawn as text takes its held colour, and the unread count's badge the accent the theme wrote`() throws {
+    var roles = Catalog.jaw.dark
+    roles.accentText = RGBA(0xFF00FF)
+    #expect(Tone.accent.color(roles) == roles.accentText, "a key, as KeyCap draws one")
+    let cell = ChatCell(frame: NSRect(x: 0, y: 0, width: 300, height: 56))
+    cell.show(Samples.direct, typists: [], roles: roles, open: false, inCommunity: false, avatar: nil)
+    let draft = cell.line(Samples.direct, roles)
+    #expect(draft.string.hasPrefix("Draft: ") && draft.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == roles.accentText.nsColor)
+    #expect(cell.badges(Samples.group, roles).first?.fill == roles.accent, "the unread count's badge is the accent's fill")
+    let s = LayoutSpec(style: Style(roles: roles), me: ["person:1"])
+    let mentions = try #require(Samples.messages.first { $0.spans.contains { $0.t == .mention } })
+    let frame = try #require(laid(mentions, s).text?.frame)
+    let runs = (CTFrameGetLines(frame) as! [CTLine]).flatMap(runColours)
+    #expect(runs.contains(roles.accentText.cgColor) && runs.contains(roles.mention.cgColor) && !runs.contains(roles.accent.cgColor),
+            "@Rui in the accent's held colour, @Pedro, a mention of you, in the mention colour")
+    var reply = try #require(Samples.messages.first { $0.reply != nil })
+    reply.reply = Quote(id: "3EB0000000000002", from: "You", summary: "did you get the photos from Sunday?")
+    let quoted = laid(reply, s)
+    #expect(quoted.parts.contains { if case let .fill(rect, colour, _) = $0 { rect.width == 3 && colour == roles.accentText.cgColor } else { false } },
+            "You in a reply: its bar")
+    #expect(quoted.parts.contains { if case let .line(l, _) = $0 { runColours(l) == [roles.accentText.cgColor] } else { false } }, "and its name")
+    var context = MessageContext(group: false, firstOfRun: true, showTime: true, day: nil)
+    context.sending = ["OUT": Sending(step: .uploading, percent: 40)]
+    let going = MessageLayout.lay(outgoing(.document), width: 640, context: context, style: s.style, fonts: s.fonts, me: s.me)
+    let rings = going.parts.compactMap { part -> CGColor? in if case let .ring(_, _, _, colour, _) = part { colour } else { nil } }
+    #expect(rings.contains(roles.accentText.cgColor) && rings.contains(roles.accent.opacity(0.25).cgColor) && !rings.contains(roles.accent.cgColor),
+            "a file of yours on its way, as a download: its progress in the accent drawn as text, its track the accent at 25%")
+    let marks = going.parts.compactMap { part -> Data? in if case let .image(image, _) = part { image.dataProvider?.data as Data? } else { nil } }
+    let x = try #require(Symbols.image("xmark", 9, roles.accentText)).0.dataProvider?.data as Data?
+    #expect(x != nil && marks.contains { $0 == x }, "and its × in the accent drawn as text")
+}
+
+@MainActor @Test func `the dim text's marks take the secondary text's colour on your bubbles and a selected row, and the dim text's own on the ground and the surface`() throws {
+    let roles = Catalog.jaw.dark
+    #expect(Ticks.of(.delivered, roles)?.1 == roles.tertiary && Ticks.of(.sent, roles, on: .yours)?.1 == roles.secondary)
+    #expect(Ticks.of(.read, roles, on: .selection)?.1 == roles.link, "read ticks in the link colour wherever they're drawn")
+    var direct = Samples.direct
+    direct.draft = nil
+    direct.last?.status = .delivered
+    let cell = ChatCell(frame: NSRect(x: 0, y: 0, width: 300, height: 56))
+    cell.show(direct, typists: [], roles: roles, open: false, inCommunity: false, avatar: nil)
+    #expect(cell.ticks(direct, roles)?.1 == roles.tertiary, "on the chat list's surface")
+    cell.isSelected = true
+    #expect(cell.ticks(direct, roles)?.1 == roles.secondary, "on a selected row")
+    direct.last?.status = .pending
+    let pending = cell.line(direct, roles)
+    #expect(pending.string.hasPrefix("◷ ") && pending.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == roles.secondary.nsColor)
+    let sent = try #require(Samples.messages.first { $0.mine && $0.status == .sent })
+    #expect(tickColour(laid(sent, look: .bubbles)) == roles.secondary.cgColor, "in your bubble")
+    #expect(tickColour(laid(sent, look: .lines)) == roles.tertiary.cgColor, "on the window's ground, in lines")
+    let emoji = try #require(Samples.messages.first { $0.mine && $0.status == .delivered && $0.kind == .text })
+    #expect(tickColour(laid(emoji, look: .bubbles)) == roles.tertiary.cgColor, "emoji alone, under no bubble")
+}
+
+@MainActor @Test func `a message selected in lines has its dim marks drawn in the secondary text's colour on its band, as the conversation tells its layout`() async throws {
+    let roles = Catalog.jaw.dark
+    let sent = try #require(Samples.messages.first { $0.mine && $0.status == .sent })
+    let lines = spec(.lines, dark: true)
+    func ticks(selected: Bool) -> CGColor? {
+        var context = MessageContext(group: false, firstOfRun: true, showTime: true, day: nil)
+        context.selected = selected
+        return tickColour(MessageLayout.lay(sent, width: 640, context: context, style: lines.style, fonts: lines.fonts, me: lines.me))
+    }
+    #expect(ticks(selected: false) == roles.tertiary.cgColor && ticks(selected: true) == roles.secondary.cgColor)
+    let host = PaneHost()
+    let (c, window) = await shown(Samples.messages, host)
+    defer { window.close() }
+    c.spec = lines
+    let i = try #require(c.rows.firstIndex { $0.id == sent.id })
+    c.select(sent.id)
+    #expect(c.contexts[i].selected, "selected in lines: its layout is told")
+    #expect(try messageView(c, i).laid.flatMap(tickColour) == roles.secondary.cgColor, "and its ticks are drawn on its band")
+    c.select(nil)
+    #expect(!c.contexts[i].selected)
+    c.spec = spec(.bubbles, dark: true)
+    c.select(sent.id)
+    #expect(!c.contexts[i].selected, "in bubbles the band is behind the bubble, whose ground its words keep")
+}
+
+@MainActor @Test func `the tints JawUI lays over a ground are the ones the hold reads the colours drawn on them on, in both halves`() throws {
+    func fills(_ l: Laid) -> [CGColor] {
+        l.parts.compactMap { part -> CGColor? in if case let .fill(_, colour, _) = part { colour } else { nil } }
+    }
+    for dark in [true, false] {
+        let s = spec(.bubbles, dark: dark)
+        let roles = s.style.roles
+        let half = dark ? "dark" : "light"
+        #expect(fills(laid(sampleLink("L2"), s)).contains(roles.well.cgColor), "\(half): a link card's well")
+        let reply = try #require(Samples.messages.first { $0.reply != nil })
+        #expect(fills(laid(reply, s)).contains(roles.quoteWell.cgColor), "\(half): a quote's")
+        let file = try #require(Samples.messages.first { $0.kind == .document })
+        #expect(fills(laid(file, s)).contains(roles.accentTint.cgColor), "\(half): the accent's, behind a file's symbol")
+        let mentions = try #require(Samples.messages.first { $0.spans.contains { $0.t == .mention } })
+        let frame = try #require(laid(mentions, s).text?.frame)
+        let tints = (CTFrameGetLines(frame) as! [CTLine]).flatMap { line in
+            (CTLineGetGlyphRuns(line) as! [CTRun]).compactMap { run in
+                (CTRunGetAttributes(run) as NSDictionary)[NSAttributedString.Key.jawBackground].map { $0 as! CGColor }
+            }
+        }
+        #expect(!tints.isEmpty && tints.allSatisfy { $0 == roles.mentionTint.cgColor }, "\(half): a mention of you, on its own colour's tint")
+        let view = MessageView(frame: NSRect(x: 0, y: 0, width: 640, height: 200))
+        view.roles = roles
+        view.laid = laid(sampleLink("L2"), s)
+        view.selected = true
+        let l = try #require(view.laid)
+        let (w, h) = (640, Int(ceil(l.height)))
+        let ctx = try #require(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                         space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.setFillColor(roles.ground.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        view.paint(view.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        let pixel = try #require(ctx.data).assumingMemoryBound(to: UInt8.self) + (Int(l.body.midY) * w + w - 3) * 4
+        let band = roles[.band].hex
+        let off = [(pixel[0], band >> 16), (pixel[1], band >> 8), (pixel[2], band)].map { abs(Int($0.0) - Int($0.1 & 0xFF)) }
+        #expect(off.allSatisfy { $0 <= 2 }, "\(half): a selected message's band beside their bubble, the selection at 55% over the window's ground, off by \(off)")
+    }
+}
+
+@MainActor @Test func `a link card's thumbnail waits on the card's own well, its link symbol drawn there, with no well of its own`() throws {
+    for look in [Look.bubbles, .lines] {
+        let s = spec(look, dark: true)
+        let roles = s.style.roles
+        for id in ["L1", "L3"] {
+            let l = laid(sampleLink(id), s)
+            let wells = l.parts.filter { if case let .fill(_, colour, _) = $0 { colour == roles.well.cgColor } else { false } }
+            #expect(wells.count == 1, "\(id) in \(look): the card's well alone, the placeholder's symbol on it")
+            #expect(l.pictures.count == 1, "\(id) in \(look): the thumbnail's slot, which its picture fills when it comes")
+        }
+    }
+}
+
+@MainActor @Test func `a selected row of the library draws a file's symbol and a link's icon on the selection, without their tints`() throws {
+    for look in [Look.bubbles, .lines] {
+        let style = libraryStyle(look)
+        let roles = style.roles
+        func fills(_ d: LibraryDrawn) -> [CGColor] {
+            d.under.compactMap { part -> CGColor? in if case let .fill(_, colour, _) = part { colour } else { nil } }
+        }
+        for (kind, tint) in [(LibraryKind.file, roles.accentTint), (.link, roles.well)] {
+            let row = try #require(rows(libraryLaid(kind, style: style)).first)
+            #expect(fills(drawn(row, style: style)).contains(tint.cgColor), "\(kind) in \(look): on its tint, not selected")
+            let selected = fills(drawn(row, style: style, selected: true))
+            #expect(!selected.contains(tint.cgColor) && selected.contains(roles.selection.cgColor),
+                    "\(kind) in \(look): selected, on the selection itself")
+        }
+    }
+}
+
+@MainActor @Test func `the dim text drawn on a well takes the secondary text's colour: a link card's host, and a tile's placeholder`() throws {
+    let s = spec(.bubbles, dark: true)
+    let roles = s.style.roles
+    let card = laid(sampleLink("L2"), s)
+    let runs = card.parts.flatMap { part -> [CGColor] in if case let .line(l, _) = part { runColours(l) } else { [] } }
+    #expect(!runs.contains(roles.tertiary.cgColor),
+            "the host, the card's one word in the dim text's colour before, now in the secondary text's: nothing in the card in the dim text's")
+    var photo = try #require(Samples.library.first { $0.kind == .photo })
+    photo.media = nil
+    let c = drawingContext()
+    let tile = LibraryDrawing.tile(photo, size: CGSize(width: 120, height: 120), selected: false, c)
+    let symbols = tile.under.compactMap { part -> Data? in if case let .image(image, _) = part { image.dataProvider?.data as Data? } else { nil } }
+    let secondary = try #require(Symbols.image("photo", 20, c.roles.secondary)).0.dataProvider?.data as Data?
+    #expect(secondary != nil && symbols.contains { $0 == secondary }, "a tile with no picture yet: its placeholder in the secondary text's colour, on its well")
+}
+```
+
+In `mac/Tests/JawUITests/ComponentTests.swift`, line 20, `#expect(Tone.accent.color(roles) == roles.accent)` becomes `#expect(Tone.accent.color(roles) == roles.accentText, "text in the accent takes its held colour")`.
+
+In `mac/Tests/JawUITests/PreferencesTests.swift`, line 33, `#expect(preferences.style(dark: true).roles == RedlampRoles.roles(nord.dark, dark: true))` ends `== RedlampRoles.roles(nord.dark, dark: true).held())`.
+
+- [ ] **Step 7: Run them to see them fail**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, a build failure from `HeldInkTests.swift`, among them `extra argument 'on' in call` and `value of type 'MessageContext' has no member 'selected'`.
+
+- [ ] **Step 8: Draw the tints from the roles**
+
+The tints JawUI lays over a ground are taken from `Roles`, where the hold reads them, in place of the opacities each draw site writes itself:
+
+- `mac/JawUI/Sources/Layout/Cards.swift`: the well, lines 271-273, `var well: RGBA {` over `roles.text.opacity(roles.isDark ? 0.07 : 0.06)`, becomes `var well: RGBA {` over `roles.well`; and the accent's tints behind a file's symbol (line 538, `parts.append(.fill(icon, roles.accent.opacity(0.15).cgColor, 6))`), the action of a file of yours on its way (line 563, main's, `parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))`), a file's action to download (line 570, the same) and a place's symbol (line 589) take `roles.accentTint.cgColor` where they take `roles.accent.opacity(0.15).cgColor`. The rings' tracks at lines 565 and 574, the accent at 25%, stay.
+- `mac/JawUI/Sources/Library/LibraryDrawing.swift`: `well(_:)`, lines 150-152, returns `c.roles.well` where it returns `c.roles.text.opacity(c.roles.isDark ? 0.07 : 0.06)`; a file's tint, line 280, takes `r.accentTint.cgColor` where it takes `r.accent.opacity(0.15).cgColor`.
+- `mac/JawUI/Sources/Library/LibraryController.swift`: the header's mark, line 919, `mark.layer?.backgroundColor = roles.accent.opacity(0.15).cgColor`, becomes `mark.layer?.backgroundColor = roles.accentTint.cgColor`.
+- `mac/JawUI/Sources/Layout/MessageLayout.swift`: a mention of you, line 495, `if mine { a[.jawBackground] = roles.mention.opacity(0.16).cgColor }`, becomes `if mine { a[.jawBackground] = roles.mentionTint.cgColor }`; a quote's well, line 750, `parts.append(.fill(rect, roles.text.opacity(roles.isDark ? 0.06 : 0.05).cgColor, 8))`, becomes `parts.append(.fill(rect, roles.quoteWell.cgColor, 8))`.
+- `mac/JawUI/Sources/Conversation/MessageView.swift`: a selected message's band, line 104, `ctx.setFillColor(roles.selection.opacity(0.55).cgColor)`, becomes `ctx.setFillColor(roles.bandTint.cgColor)`.
+- `mac/JawUI/Sources/Components/Glyphs.swift`: the chip, line 162, `layer.backgroundColor = roles.accent.opacity(roles.isDark ? 0.16 : 0.12).cgColor`, becomes `layer.backgroundColor = roles.chipTint.cgColor`.
+
+The drop hint's tint in `GridView.swift`, which carries no words, and the scrims over pictures stay as they are.
+
+- [ ] **Step 9: Draw the accent as text in its held colour**
+
+The accent's fills stay `roles.accent`: the badges, the tints, a filled button, the voice note's disc, whose ▶, ♪ or × is in the ground's colour, the poll's discs and its bar, the rings' tracks, the focus, selection and reaction outlines, the drop hint, the pane outline and the composer's caret. Where it's drawn as text or as a mark, `roles.accent` becomes `roles.accentText` (`c.roles.accent` becomes `c.roles.accentText`, `r.accent` becomes `r.accentText`):
+
+- `mac/JawUI/Sources/ChatList/ChatListController.swift`: an unread chat's time, line 435 (`chat.unread > 0 && !chat.muted ? roles.accent : roles.secondary`), and Draft:, line 517 (`[.foregroundColor: roles.accent.nsColor]`).
+- `mac/JawUI/Sources/Components/Glyphs.swift`: the chip's name, line 148 (`name.textColor = roles.accent.nsColor`); its doc comment, line 105, says `its picture beside its name in the accent drawn as text:` where it said `its picture beside its name in the accent:`.
+- `mac/JawUI/Sources/Components/Tone.swift`, line 14: `case .accent: roles.accent` becomes `case .accent: roles.accentText`, as a tone is a piece of text's or a symbol's colour.
+- `mac/JawUI/Sources/Layout/MessageLayout.swift`: a mention of someone else, line 494 (`(mine ? roles.mention : roles.accent)`), Show more, line 666 (`line("Show more", fonts.small, roles.accent)`), and You in a reply in bubbles, line 751, and in lines, line 806 (`reply.from == "You" ? roles.accent : roles.sender(Self.colourIndex(reply.from))`), its name and its bar both.
+- `mac/JawUI/Sources/Layout/Cards.swift`: what can be done about a file, line 465 (`.ctColour: roles.accent.cgColor`); a file's symbol, line 544; a file of yours on its way, main's, its progress ring, line 566 (`max(CGFloat(going.percent) / 100, 0.02), roles.accent.cgColor`), and its ×, line 567 (`symbol("xmark", 9, roles.accent, centredIn: action)`), its track at line 565 staying the accent at 25%; a download's progress ring, line 575 (`max(m.media?.progress ?? 0, 0.02), roles.accent.cgColor`), its track at line 574 staying the accent at 25%; the download's symbols, lines 576, 579 and 581; and a place's symbol, line 590.
+- `mac/JawUI/Sources/Layout/ContactCards.swift`: a contact card's action, line 129 (`line(action, fonts.body, roles.accent)`).
+- `mac/JawUI/Sources/Palette/Palette.swift`: the strip's kind in use, lines 514 and 517 (`? roles.accent : roles.secondary`); a picked chat's tick, line 574; a row's key, line 580; and the marks in a title, line 593 (`span.t == .mark ? roles.accent : roles.text`).
+- `mac/JawUI/Sources/Library/LibraryDrawing.swift`: the marks in a caption, line 271 (`mark ? c.roles.accent : c.roles.secondary`), and a file's symbol, line 281 (`symbol(Self.fileSymbol(f), 13, r.accent, …`).
+- `mac/JawUI/Sources/Library/LibraryController.swift`: the header's mark, line 921 (`hierarchicalColor: roles.accent.nsColor`).
+- `mac/JawUI/Sources/Views/Views.swift`: the status line's state, line 209 (`warn ? roles.mention : roles.accent`).
+- `mac/JawUI/Sources/Window/GlanceView.swift`: You in the glance, line 94 (`m.mine ? roles.accent : roles.sender(m.from?.colour ?? 0)`).
+
+- [ ] **Step 10: Draw the dim text in the secondary text's colour on your bubbles, a selected row, a selected message's band and a well**
+
+In `mac/JawUI/Sources/Components/Glyphs.swift`, `Ticks.of` (lines 38-47) becomes:
+
+```swift
+    /// How many ticks a status has, and in which colour: one sent and two delivered in the dim text's
+    /// colour on `base` (`Roles.faint(on:)`), two in the link colour read; nil for the states said in
+    /// words or symbols.
+    public static func of(_ status: MessageStatus?, _ roles: Roles, on base: Roles.Base = .surface) -> (Int, RGBA)? {
+        switch status {
+        case .sent: (1, roles.faint(on: base))
+        case .delivered: (2, roles.faint(on: base))
+        case .read, .played: (2, roles.link)
+        case .pending, .failed, nil: nil
+        }
+    }
+```
+
+In `mac/JawUI/Sources/ChatList/ChatListController.swift`'s `ChatCell`:
+
+- after `isSelected` (lines 381-383), add:
+
+```swift
+
+    /// The ground the row's words and marks are drawn on: the selection while it's selected, the
+    /// surface otherwise.
+    var place: Roles.Base {
+        isSelected ? .selection : .surface
+    }
+```
+
+- the pin and the mute mark, lines 442 and 445, take `colour: roles.faint(on: place)` where they take `colour: roles.tertiary`;
+- `ticks(_:_:)`, line 494, `return Ticks.of(last.status, roles)` becomes `return Ticks.of(last.status, roles, on: place)`;
+- the pending clock, line 531, takes `roles.faint(on: place).nsColor` where it takes `roles.tertiary.nsColor`.
+
+In `mac/JawUI/Sources/Layout/MessageLayout.swift`:
+
+- `MessageContext` learns whether its message is selected, as main's `sending` is kept: its doc comment (lines 47-49) becomes
+
+```swift
+/// What a message's lines depend on beyond the message: whether its sender's name and its time
+/// show, the day above it, whether a long one is unfolded, how far its files of yours on their way
+/// have got, and whether it's selected in lines.
+```
+
+  and after `public var sending: [String: Sending] = [:]` (line 62) comes
+
+```swift
+    /// The message is selected in lines, where it's drawn on the selection's band, so its foot and its
+    /// card draw their dim marks as on a selected row; in bubbles it keeps its bubble's ground.
+    public var selected = false
+```
+
+  Its initialiser stays as it is: every place that makes a context leaves it false but the conversation's controller, below.
+- in the builder, after `init`'s closing brace (after `roles = style.roles` at line 376 and the `}` under it), add:
+
+```swift
+
+        /// The ground a message's words, foot and card are drawn on: your bubble or theirs in bubbles;
+        /// in lines the window's ground, or the band a selected message is drawn on.
+        var cardGround: Roles.Base {
+            style.look == .bubbles ? (m.mine ? .yours : .surface) : context.selected ? .band : .ground
+        }
+```
+
+- `stateMark()`, `footParts(_:at:)` and `footer(time:)` (lines 586-629) take the ground their foot is drawn on, the window's unless they're told otherwise:
+
+```swift
+        /// What's said for your message's state in text, on `base`: pending and failed; ticks are drawn.
+        func stateMark(on base: Roles.Base) -> (String, RGBA)? {
+            guard m.mine, let status = m.status else { return nil }
+            switch status {
+            case .pending: return ("◷", roles.faint(on: base))
+            case .failed: return ("!", roles.failed)
+            case .sent, .delivered, .read, .played: return nil
+            }
+        }
+
+        var tickSize: CGFloat {
+            CTFontGetSize(fonts.time) + 1
+        }
+
+        /// A foot line drawn at a point on `base`, with the ticks drawn in the room it leaves for them.
+        func footParts(_ foot: CTLine, at point: CGPoint, on base: Roles.Base = .ground) -> [Laid.Part] {
+            var out: [Laid.Part] = [.line(foot, point)]
+            if m.mine, let (count, colour) = Ticks.of(m.status, roles, on: base) {
+                let w = Ticks.width(count, size: tickSize)
+                out.append(.ticks(count, CGPoint(x: point.x + width(of: foot) - w, y: point.y), colour.cgColor, tickSize))
+            }
+            return out
+        }
+
+        /// The time and what's said around it on `base`: a star, Edited, your ticks.
+        func footer(time: Bool = true, on base: Roles.Base = .ground) -> CTLine {
+            let out = NSMutableAttributedString()
+            let quiet: [NSAttributedString.Key: Any] = [.ctFont: fonts.time, .ctColour: roles.secondary.cgColor]
+            if m.starred { out.append(NSAttributedString(string: "★ ", attributes: quiet)) }
+            if m.edited, !m.deleted { out.append(NSAttributedString(string: "Edited ", attributes: [.ctFont: fonts.smallItalic, .ctColour: roles.secondary.cgColor])) }
+            if time { out.append(NSAttributedString(string: Format.clock(m.at), attributes: quiet)) }
+            if let (mark, colour) = stateMark(on: base) {
+                out.append(NSAttributedString(string: " " + mark, attributes: [.ctFont: fonts.small, .ctColour: colour.cgColor]))
+            } else if m.mine, let (count, _) = Ticks.of(m.status, roles) {
+                // Room for the ticks: an invisible x, kerned to their width, since trailing spaces
+                // aren't measured.
+                let x = NSAttributedString(string: "x", attributes: [.ctFont: fonts.time])
+                let xWidth = width(of: CTLineCreateWithAttributedString(x))
+                out.append(NSAttributedString(string: " ", attributes: [.ctFont: fonts.time]))
+                out.append(NSAttributedString(string: "x", attributes: [.ctFont: fonts.time, .ctColour: CGColor.clear,
+                                                                        .kern: Ticks.width(count, size: tickSize) - xWidth]))
+            }
+            return CTLineCreateWithAttributedString(out)
+        }
+```
+
+- in `bubble()`, line 688, `let foot = footer()` becomes `let foot = footer(on: cardGround)`, and line 742, `parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY)))`, becomes `parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY), on: cardGround))`;
+- in `lines()`, line 789, `let foot = footer(time: context.showTime || self.m.edited || self.m.mine)` becomes `let foot = footer(time: context.showTime || self.m.edited || self.m.mine, on: cardGround)`, and line 830, `parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: footY)))`, becomes `parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: footY), on: cardGround))`. `bigEmoji()` (line 774) and `alone()` draw their foot under the picture, off the band, on the window's ground, so they keep calling `footer()` and `footParts(_:at:)` as they do.
+
+In `mac/JawUI/Sources/Layout/Cards.swift`, a poll's open circles (line 625, `symbol(several ? "square" : "circle", 14, roles.tertiary, centredIn: tick)`) and its voted line (line 640, `text(Self.pollVoted(poll), fonts.small, roles.tertiary, …`) take `roles.faint(on: cardGround)` where they take `roles.tertiary`; and a link card's host, drawn on the card's well, line 694, `text(link.host, fonts.small, roles.tertiary, x: x, top: top, most: most)`, becomes `text(link.host, fonts.small, roles.secondary, x: x, top: top, most: most)`, as the dim text isn't held on a well.
+
+In `mac/JawUI/Sources/Library/LibraryDrawing.swift`'s `tile`, the placeholder of a tile with no picture yet, drawn on the tile's well, line 164, `symbol(item.kind == .video ? "play.rectangle" : "photo", 20, r.tertiary, centredIn: rect, into: &d.under)`, becomes `symbol(item.kind == .video ? "play.rectangle" : "photo", 20, r.secondary, centredIn: rect, into: &d.under)`, for the same reason.
+
+In `mac/JawUI/Sources/Conversation/ConversationController.swift`, the controller tells the layout which message is selected, in lines:
+
+- in `rebuild()` (lines 348-370), after main's block that fills `cs[i].sending` and before `contexts = cs` (line 369), add:
+
+```swift
+        if spec.style.look == .lines, let id = selected, let i = rows.firstIndex(where: { $0.id == id }) {
+            cs[i].selected = true
+        }
+```
+
+- `select(_:)` (lines 771-785) becomes:
+
+```swift
+    public func select(_ id: String?) {
+        let previous = selected
+        selected = id
+        for changed in [previous, id].compactMap({ $0 }) {
+            guard let i = rows.firstIndex(where: { $0.id == changed }) else { continue }
+            let lines = spec.style.look == .lines
+            if lines { contexts[i].selected = selected == changed }
+            if let cell = table.view(atColumn: 0, row: i, makeIfNecessary: false) as? MessageView {
+                cell.selected = selected == changed
+                if lines { cell.laid = layouts.laid(rows[i], width: layoutWidth, spec: spec, context: contexts[i]) }
+            }
+        }
+        if let id, let i = rows.firstIndex(where: { $0.id == id }) {
+            table.scrollRowToVisible(i)
+        }
+        composer.selecting = id != nil
+    }
+```
+
+  A selected message's layout differs from its unselected one only in its colours, so its height stays and the table needn't measure it again; `relayout()`, which a change of look runs, runs `rebuild()`; and main's `took(_:)`, which lays a file of yours on its way out again as it goes, lays it out from `contexts[i]`, so a selected message keeps its band's colours as its ring fills.
+
+In `mac/JawUI/Sources/Palette/Palette.swift`'s `row(_:selected:)`, an action's chevron, line 572, takes `.foregroundStyle(roles.faint(on: selected ? .selection : .surface).color)` where it takes `.foregroundStyle(roles.tertiary.color)`.
+
+In `mac/JawUI/Sources/Library/LibraryDrawing.swift`, a row's date takes the selection's tone, so `file`, `link` and `twoLines` are told whether the row is selected:
+
+- in `row(_:size:selected:_:)`, lines 242-243 become:
+
+```swift
+        case .file: file(item, icon: icon, x: x, right: right, size: size, selected: selected, c, into: &d)
+        case .link: link(item, icon: icon, x: x, right: right, size: size, selected: selected, c, into: &d)
+```
+
+- `file`'s signature (line 277) becomes `static func file(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ c: Context, into d: inout LibraryDrawn) {`, and its last line (284) `twoLines(f?.name.isEmpty == false ? f!.name : "a file", details, x: x, right: right, size: size, selected: selected, item, c, into: &d)`;
+- `link`'s signature (line 311) becomes `static func link(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ c: Context, into d: inout LibraryDrawn) {`, and its last line (330) `twoLines(title, details, x: x, right: right, size: size, selected: selected, item, c, into: &d)`;
+- `twoLines` (lines 249-255) becomes, to its `when`:
+
+```swift
+    /// Two lines: a title, with when at its right, over details.
+    static func twoLines(_ title: String, _ details: CTLine, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ item: LibraryRow,
+                         _ c: Context, into d: inout LibraryDrawn)
+    {
+        let r = c.roles
+        let name = font(.body), small = font(.caption)
+        let when = line(Self.when(item, c), small, r.faint(on: selected ? .selection : c.style.look == .bubbles ? .surface : .ground))
+```
+
+  the rest as it is.
+
+In `mac/JawUI/Sources/Conversation/ContactCardsView.swift`'s `CardRow`, line 186, `Text("No number").textStyle(.callout).tone(.tertiary, roles)` becomes `Text("No number").textStyle(.callout).foregroundStyle(roles.faint(on: selected ? .selection : .surface).color)`; and in `mac/JawUI/Sources/Conversation/ContactForm.swift`'s `FormCardRow`, line 339, `.textStyle(.callout).tone(numbers.isEmpty ? .tertiary : .secondary, roles).lineLimit(1)` becomes `.textStyle(.callout).foregroundStyle((numbers.isEmpty ? roles.faint(on: chosen ? .selection : .surface) : roles.secondary).color).lineLimit(1)`.
+
+- [ ] **Step 11: Draw three small marks on one ground**
+
+Three marks sat on a tint laid on a tint, and holding them there moved a whole theme's secondary text, accent drawn as text and links for a few small marks (the plan's): they're drawn on one ground, which the hold covers, and the hold's table has no tint on a tint.
+
+In `mac/JawUI/Sources/Layout/Cards.swift`'s `linkPreview(_:)`, the thumbnail's placeholder (lines 675-679):
+
+```swift
+            // Its well until the image queue has it, and where it can't be read: jawd keeps it as the
+            // JPEG it came as, so nothing else is decoded.
+            let thumb = CGRect(x: r.minX + 6, y: (r.midY - Self.thumbnail / 2).rounded(), width: Self.thumbnail, height: Self.thumbnail)
+            parts.append(.fill(thumb, well.cgColor, Radius.small))
+            symbol("link", 18, roles.secondary, centredIn: thumb)
+```
+
+becomes:
+
+```swift
+            // Its link symbol, on the card's own well, until the image queue has it, and where it can't
+            // be read: jawd keeps it as the JPEG it came as, so nothing else is decoded.
+            let thumb = CGRect(x: r.minX + 6, y: (r.midY - Self.thumbnail / 2).rounded(), width: Self.thumbnail, height: Self.thumbnail)
+            symbol("link", 18, roles.secondary, centredIn: thumb)
+```
+
+In `mac/Tests/JawUITests/LinkPreviewTests.swift`'s `` `a preview with neither title nor description has no card, and one whose thumbnail can't be read keeps its place` ``, lines 86-87, which looked for the thumbnail's own well, become:
+
+```swift
+    #expect(read.parts.contains { if case let .image(_, rect) = $0 { slot.rect.contains(CGPoint(x: rect.midX, y: rect.midY)) } else { false } },
+            "its link symbol on the card's well where it goes, which shows until it's decoded, and where it can't be")
+```
+
+HeldInkTests' `a link card's thumbnail waits on the card's own well…` checks there's no second well.
+
+In `mac/JawUI/Sources/Library/LibraryDrawing.swift`, where `file` and `link` know whether their row is selected since Step 10:
+
+- `row(_:size:selected:_:)`'s doc comment (lines 225-226) becomes:
+
+```swift
+    /// A voice message's, a file's or a link's row: on a card in bubbles, between hairlines in lines,
+    /// with the kind's mark at its left, a file's and a link's on their tint, or on the selection itself
+    /// while the row's selected, its words, and who shared it, where and when.
+```
+
+- in `file`, the tint behind its symbol (line 280, `d.under.append(.fill(icon, r.accentTint.cgColor, Radius.small + 2))` as Step 8 left it) becomes `if !selected { d.under.append(.fill(icon, r.accentTint.cgColor, Radius.small + 2)) }`;
+- in `link`, the well behind its icon (line 314, `d.under.append(.fill(icon, well(c).cgColor, Radius.small + 2))`) becomes `if !selected { d.under.append(.fill(icon, well(c).cgColor, Radius.small + 2)) }`. A link's preview, where it has one, is still drawn in the icon's place over it.
+
+- [ ] **Step 12: Read the system's orange, green and red with its accent**
+
+In `mac/JawUI/Sources/Style/Preferences.swift`:
+
+- `accent`'s doc comment (lines 76-77) becomes:
+
+```swift
+    /// The system's colours in each appearance, its accent, orange, green and red, which Neutral draws
+    /// in, read again by `systemColoursChanged()`, and not kept, as they're the system's.
+```
+
+- `systemColoursChanged()`'s doc comment (line 186) becomes `/// Reads the system's accent, orange, green and red again, as the app does when AppKit says the system's colours changed.`
+- `SystemAccent`'s extension, lines 211-221, becomes:
+
+```swift
+public extension SystemAccent {
+    /// The system's accent, orange, green and red as AppKit draws them now, in a dark appearance and in
+    /// a light one; where AppKit has no appearance of the name, the fixed colours of the one asked for.
+    @MainActor static func current() -> SystemAccent {
+        func drawn(_ colour: NSColor, otherwise fixed: SystemColour) -> SystemColour {
+            func half(_ name: NSAppearance.Name, _ otherwise: RGBA) -> RGBA {
+                var out = otherwise
+                NSAppearance(named: name)?.performAsCurrentDrawingAppearance { out = RGBA(colour) }
+                return out
+            }
+            return SystemColour(dark: half(.darkAqua, fixed.dark), light: half(.aqua, fixed.light))
+        }
+        let accent = drawn(.controlAccentColor, otherwise: SystemColour(dark: blue.dark, light: blue.light))
+        return SystemAccent(dark: accent.dark, light: accent.light, orange: drawn(.systemOrange, otherwise: .orange),
+                            green: drawn(.systemGreen, otherwise: .green), red: drawn(.systemRed, otherwise: .red))
+    }
+}
+```
+
+In `mac/JawUI/Sources/Settings/Panes.swift`, `RGBA.init(_ colour: NSColor)`'s doc comment, line 147, `/// From a colour picked, in sRGB.`, becomes `/// From a colour AppKit gives, a colour picked or one of the system's, in sRGB.`, as `current()` reads four of the system's through it.
+
+The app already calls `systemColoursChanged()` on `NSColor.systemColorsDidChangeNotification` (`AppDelegate.swift`, lines 43-45), and `accent`'s `didSet` redraws when any of the four changes, so nothing else is needed.
+
+- [ ] **Step 13: The harness's Roles scene shows the accent drawn as text**
+
+In `mac/JawHarness/Sources/Scenes/FoundationScenes.swift`'s `RolesScene`, `named` (line 33) gains `("accent as text", roles.accentText),` after `("accent", roles.accent),`; in `textColours` (line 40), `("accent", roles.accent),` becomes `("accent as text", roles.accentText),`; and the second band's note begins `"Secondary and tertiary text, the accent drawn as text, the links and read ticks, mentions, online and failed,` where it began `"Secondary and tertiary text, the accent's counts, the links and read ticks, mentions, online and failed,`.
+
+- [ ] **Step 14: Run the UI tests, and take the reference pictures that changed**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1. Every failure is a reference picture's, `<name>: <n> pixels differ from the reference`, and every other test passes, `HeldInkTests.swift`'s seven among them. Which pictures fail depends on what each shows. Tokyo Night's own colours move under the comparison's 24 a channel (its dim text 17, `565F89` to `66709A`; its secondary text 13, `737AA2` to `7E87AF`), as do Tokyo Night Day's dim text (15, `848CB5` to `757FAC`) and mention (23, `B15C00` to `9A5814`). What moves past it: Tokyo Night Day's accent drawn as text and links (37, `2E7DE9` to `2D68C4`), its red (`F52A65` to `C0316D`) and six of its senders; in either, the dim text drawn in the secondary text's colour off the window's ground and the surface (your bubbles' grey ticks and clock, a selected row's marks, a link card's host, a library tile's placeholder); and the three small marks (a link card's waiting thumbnail, which loses its second well, and a selected library row's file or link mark, which loses its tint). A picture failing for anything else, or with `its size changed`, is a fault: stop and say so.
+
+List them and take each again:
+
+```bash
+mkdir -p mac/build/settings
+ssh -o BatchMode=yes build-mac 'grep -oE "[a-z0-9-]+: [0-9]+ pixels differ from the reference" ~/src/build-mac/jaw/jaw-mac-settings/mac/build/check.log' \
+    | cut -d: -f1 | sort -u > mac/build/settings/changed.txt
+cat mac/build/settings/changed.txt
+while read -r name; do rm "mac/Tests/JawUITests/References/$name.png"; done < mac/build/settings/changed.txt
+```
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 1, the same pictures each recording `<name>: no reference yet; wrote <name>.png to look at and commit`, nothing else failing.
+
+Run: `mac/scripts/build-mac references`, then look at each picture `changed.txt` names, in `mac/Tests/JawUITests/References/`, with the Read tool.
+Expected: each the picture it was, its layout and every word where they were, but for its colours and three small marks: in a light one Tokyo Night Day's links, read ticks, unread times, Draft:, mentions of others, Show more and You in a reply a deeper blue than its unread badges, and its failed messages and first sender a deeper rose; in either, your bubbles' grey ticks and clock, a selected row's pin, mute mark and ticks, a link card's host and a library tile's placeholder in the time's grey; a link card waiting for its thumbnail showing its link symbol on the card's well, with no square of its own; a selected file or link in the library showing its mark on the selection, with no tint behind it; and, in a dark one taken again for any of those, Tokyo Night's dim text and times a shade lighter (`66709A`, `7E87AF`), the dim text still the quieter. If one shows anything else changed, stop and say so.
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: exit 0, `** TEST SUCCEEDED **`, `✔ Test run with 425 tests in 1 suite passed`, seven more than the 418 the branch has before this task.
+
+- [ ] **Step 15: Build, test the rest and look**
+
+Run: `mac/scripts/build-mac test JawHarnessTests`, `mac/scripts/build-mac build` and `make check-parity`.
+Expected: each exits 0, JawHarnessTests with its 29 tests; the build runs `check-components` and `check-harness`, which pass, as nothing here sets a font, a corner or a line width by hand.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/day.png -appearance light -themeLight jaw`
+Expected: `"snapshot":1.0` among the last lines; the main window in Tokyo Night Day, looked at with the Read tool: the chat list's unread times a deeper blue (`2D68C4`) than the unread badges beside them (`2E7DE9`), the badges' counts white on them, and nothing cut or moved.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/redlamp.png -appearance light -themeLight redlamp:redlamp`
+Expected: the main window on Redlamp's paper (`F3EEE8`): the unread badges in its accent, the safelight drawn on paper (`D8352A`), and the times beside them a hair darker (`CF3429`); a mention of you, where the demo's chat shows one, in a brown (`936654`), not red, for the owner to look at; and a group's senders' names in yellows, greens, blues and purples, none red.
+
+Run: `mac/scripts/build-mac snapshot mac/build/settings/neutral.png -appearance dark -themeDark redlamp:neutral`
+Expected: the main window in Neutral's dark greys, drawn in the build Mac's own system colours, read by `SystemAccent.current()`: with macOS's default accent the unread badges in `007AFF` and the times beside them a hair lighter (`1A87FC`), and wherever the demo shows one, a mention of you or the "new" marker in macOS 27.0.1's dark orange (`FF9230`). If the build Mac's accent isn't the default, the badges take it, which is right; say which it was.
+
+- [ ] **Step 16: Commit**
+
+```bash
+git add mac/JawThemes/Sources mac/Tests/JawThemesTests mac/JawUI/Sources mac/Tests/JawUITests \
+    mac/JawHarness/Sources/Scenes/FoundationScenes.swift
+git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
+Every colour Jaw draws as text or as a mark reads at 3:1 wherever it's drawn, in every theme, Tokyo Night Day included, as the owner chose on 6 November: each theme's roles go through one hold after their own mapping, where Theme is made and where Catalog.jaw is, which moves each colour toward the text along theme.rs's straight line until it reads at 3:1 on every ground JawUI draws it on, the window's, the surface, a selected row, your bubbles and a selected message's band in lines, and the tints JawUI lays over them, a card's and a quote's well, the accent's tint behind its symbols, the box's chip and a mention of you on its own tint, which moves with it in passes that end, a selected row's online at 4.5:1, and keeps the accent's fills, the grounds, the text and the borders as the theme wrote them, the tints now made once in Roles and taken by every draw site, a file of yours on its way, which main's attachments draw, taking the accent's tint and the accent drawn as text as a download does; three small marks that sat on a tint on a tint, a link card's waiting thumbnail and a selected library row's file and link marks, are drawn on one ground, so a few marks no longer move a whole theme's secondary text, accent drawn as text and links; the accent drawn as text takes a role of its own, accentText, while the unread badge keeps the accent; the dim text is held on the window's ground and the surface, and everywhere else it's drawn, your bubbles, a selected row, a selected message's band and a card's or a tile's well, its words and marks take the secondary text's colour, as WhatsApp draws its grey ticks in its time's, so the dim text stays quieter than the secondary text, and the conversation tells a message's layout it's selected in lines; the Redlamp family keeps its red to its accent, its light half's mentions taking the brand's filament, darkened to read on paper, and its senders' eight hues spread 37.5° apart away from the red; Neutral takes the system's orange, green and red from AppKit with its accent, again when the system's colours change, and the tests and the harness draw it in macOS 27.0.1's, its default accent 007AFF in both appearances, as AppKit resolves it there; under a grey accent such as Graphite's Neutral's senders take the system's blue's hue, so they come out as eight colours; and the tests pin the hold's table, what it moves in each of the 69 halves and where each moved colour lands, within 0.05 of its target, as they now do for theme.rs's moves, the surface's hold and Redlamp's bands, the reference pictures that changed taken again
+EOF
+```
+
+Then remove the scratch list, `rm mac/build/settings/changed.txt`; the pictures `day.png`, `redlamp.png` and `neutral.png` stay with the others for the reviewer, as the Global Constraints have them.
+
+---
+
 ### Task 5: Omarchy's themes from jawd, remembered for the next launch
 
 **Files:**
@@ -2383,7 +3928,7 @@ EOF
 - Test: `mac/Tests/JawKitTests/FixtureTests.swift`, `mac/Tests/JawKitTests/ClientTests.swift`, `mac/Tests/JawKitTests/LiveTests.swift`, `mac/Tests/JawUITests/PreferencesTests.swift`
 
 **Interfaces:**
-- Consumes: `OmarchyTheme`, `Catalog.themes(omarchy:accent:)`, `Catalog.roles(_:of:omarchy:accent:)`, `Preferences`' `slots`, `accent`, `made`, `listed`, `tell()` and `roles(_:)` (Task 4); JawKit's `ask`, `NoParams`, `Failure`, `ErrorCode.unknownMethod`; `Situation.Reach`; and in the tests `FakeJawd.answer(_:id:)`, `connected`, `drain`, `requests`, `DemoJawd`, `Held`, `repo` and `scratchPreferences`.
+- Consumes: `OmarchyTheme`, `Catalog.themes(omarchy:accent:)`, `Catalog.roles(_:of:omarchy:accent:)`, `Preferences`' `slots`, `accent`, `made`, `listed`, `tell()` and `roles(_:)` (Task 4); `Roles.held()` (Task 4b); JawKit's `ask`, `NoParams`, `Failure`, `ErrorCode.unknownMethod`; `Situation.Reach`; and in the tests `FakeJawd.answer(_:id:)`, `connected`, `drain`, `requests`, `DemoJawd`, `Held`, `repo` and `scratchPreferences`.
 - Produces, in JawKit: `public struct ServedTheme: Codable, Hashable` (`id`, `name`, `mode: ServedTheme.Mode` (`.dark`, `.light`), `colors: [String: String]`); `Expect.themes`; `Reply.themes([ServedTheme])`; `Jawd.themes()`; `Jawd.Asked.themes`; `JawUpdate.themes([ServedTheme])` and `JawUpdate.noThemes(older: Bool, why: String)`.
 - Produces, in JawUI: `public enum OmarchyState: Hashable` (`.connecting`, `.asking`, `.starting`, `.unreachable`, `.older`, `.refused(String)`), with `init(_ reach: Situation.Reach)` and `line: String?`; `Preferences.served: [OmarchyTheme]?`, `Preferences.omarchyState: OmarchyState` and `Preferences.omarchyLine: String?`; the copies `themeDarkColours` and `themeLightColours`.
 - Produces, in the app: `themes` asked after each hello, its answer given to `Preferences.served`, and the Omarchy section's state following `reach`.
@@ -2589,7 +4134,7 @@ func omarchy(_ id: String) throws -> OmarchyTheme {
     #expect(toldFirst == 0, "jawd's first answer leaves Jaw's in both slots, so nothing is drawn again")
     let chosen = try #require(first.themes.first { $0.id == "omarchy:gruvbox" })
     first.slots = first.slots.choosing(chosen, for: .dark)
-    let dark = try #require(Omarchy.roles(gruvbox.colours, dark: true))
+    let dark = try #require(Omarchy.roles(gruvbox.colours, dark: true)).held()
     #expect(first.roles(.dark) == dark && first.roles(.light) == Catalog.jaw.light)
     let copy = defaults.dictionary(forKey: "themeDarkColours") as? [String: String]
     #expect(copy?["id"] == "gruvbox" && copy?["name"] == "Gruvbox" && copy?["background"] == "#282828" && copy?.count == 27)
@@ -2605,7 +4150,7 @@ func omarchy(_ id: String) throws -> OmarchyTheme {
     var newer = gruvbox
     newer.colours["accent"] = "#ff0000"
     next.served = [newer, latte]
-    #expect(told == 1 && next.roles(.dark) == Omarchy.roles(newer.colours, dark: true), "jawd's colours replace the copy, drawn once")
+    #expect(told == 1 && next.roles(.dark) == Omarchy.roles(newer.colours, dark: true)?.held(), "jawd's colours replace the copy, drawn once")
     #expect((defaults.dictionary(forKey: "themeDarkColours") as? [String: String])?["accent"] == "#ff0000")
     next.served = [latte]
     #expect(told == 2 && next.roles(.dark) == Catalog.jaw.dark && next.slots.dark == "omarchy:gruvbox",
@@ -2782,7 +4327,7 @@ In `mac/JawUI/Sources/Settings/Panes.swift`, `AppearancePane`'s footer says what
 ```
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: exit 0, `** TEST SUCCEEDED **`, two more tests than Task 4 left.
+Expected: exit 0, `** TEST SUCCEEDED **`, two more tests than Task 4b left.
 
 - [ ] **Step 7: The app asks after each hello**
 
@@ -2846,7 +4391,7 @@ EOF
 - Test: `mac/Tests/JawUITests/GalleryTests.swift`, and the reference pictures `mac/Tests/JawUITests/References/theme-gallery-dark.png` and `theme-gallery-light.png`
 
 **Interfaces:**
-- Consumes: `Theme` with `name(_:)`, `Slot`, `Slots`, `Catalog.jaw`, `Catalog.jawTheme`, `Catalog.themes(omarchy:accent:)`, `Omarchy.name`, `Appearance` (Task 4); `Preferences.themes`, `roles(_:)`, `slots`, `appearance`, `served`, `omarchyState`, `omarchyLine` and `Preferences(defaults:accent:)` (Tasks 4 and 5); `OmarchyState` (Task 5); `SettingsPane` and `SettingsWindowController` (Task 1); `Roles.link` (Task 2); `TextStyle`, `Space`, `Radius`, `Stroke`, `RGBA.color`; the tests' `scratchPreferences`, `omarchy(_:)`, `picture(_:on:)` and `compare(_:_:)`.
+- Consumes: `Theme` with `name(_:)`, `Slot`, `Slots`, `Catalog.jaw`, `Catalog.jawTheme`, `Catalog.themes(omarchy:accent:)`, `Omarchy.name`, `Appearance` (Task 4); `Preferences.themes`, `roles(_:)`, `slots`, `appearance`, `served`, `omarchyState`, `omarchyLine` and `Preferences(defaults:accent:)` (Tasks 4 and 5); `OmarchyState` (Task 5); `SettingsPane` and `SettingsWindowController` (Task 1); `Roles.link` (Task 2); `Roles.accentText` and `Roles.mentionTint` (Task 4b); `TextStyle`, `Space`, `Radius`, `Stroke`, `RGBA.color`; the tests' `scratchPreferences`, `omarchy(_:)`, `picture(_:on:)` and `compare(_:_:)`.
 - Produces, in JawUI:
   - `public struct ThemeChat: View` (`init(_ roles: Roles)`, `static let size`, 144 by 104).
   - `public struct ThemeCard: View` (`init(theme:slot:roles:ticked:hovered:label:)`), `public struct GalleryGrid: View` (`init(themes:slot:slots:choose:)`, `choose: (Theme, _ only: Bool) -> Void`), `public struct GallerySection: View` (`init(section:slot:slots:choose:)`), `public struct SettingsSection<Content: View>: View` (`init(_ title:footer:content:)`) and `public struct SlotTileView: View` (`init(tile:roles:outlined:)`).
@@ -3033,7 +4578,7 @@ func allOmarchy() throws -> [OmarchyTheme] {
 }
 ```
 
-The pictures tick no card, as the system's accent would draw the tick, and Neutral is drawn in macOS's blue, which `scratchPreferences` gives, so they don't depend on the build Mac.
+The pictures tick no card, as the system's accent would draw the tick, and Neutral is drawn in macOS 27.0.1's colours (`SystemAccent.blue`), which `scratchPreferences` gives, so they don't depend on the build Mac.
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -3205,7 +4750,7 @@ public struct ThemeChat: View {
     }
 
     /// Lisbon Climbing's row, unread, as the chat list draws one: the avatar in a sender's colour with
-    /// the online dot, the name, Rui's line, the time in the accent and the count on it.
+    /// the online dot, the name, Rui's line, the time in the accent drawn as text and the count on the accent.
     var row: some View {
         HStack(spacing: Space.xs) {
             Circle().fill(roles.sender(2).color).frame(width: 16, height: 16)
@@ -3216,7 +4761,7 @@ public struct ThemeChat: View {
             }
             Spacer(minLength: 0)
             VStack(alignment: .trailing, spacing: 0) {
-                Text("13:58").foregroundStyle(roles.accent.color)
+                Text("13:58").foregroundStyle(roles.accentText.color)
                 Text("2").bold().foregroundStyle((roles.isDark ? roles.ground : RGBA(0xFFFFFF)).color)
                     .padding(.horizontal, Space.xs)
                     .background(Capsule().fill(roles.accent.color))
@@ -3234,7 +4779,7 @@ public struct ThemeChat: View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Ana").bold().foregroundStyle(roles.sender(0).color)
             HStack(spacing: 0) {
-                Text("@Pedro").bold().foregroundStyle(roles.mention.color).background(roles.mention.opacity(0.16).color)
+                Text("@Pedro").bold().foregroundStyle(roles.mention.color).background(roles.mentionTint.color)
                 Text(" bring the rope").foregroundStyle(roles.text.color)
             }
         }
@@ -3244,11 +4789,11 @@ public struct ThemeChat: View {
         .background(RoundedRectangle(cornerRadius: Radius.small).fill(roles.surface.color))
     }
 
-    /// Yours: "On it" in your bubble, its time in the dim text and its read ticks in the link colour.
+    /// Yours: "On it" in your bubble, its time in the secondary text's colour, as the conversation draws your bubble's, and its read ticks in the link colour.
     var yours: some View {
         HStack(spacing: Space.xxs) {
             Text("On it").foregroundStyle(roles.text.color)
-            Text("13:59").foregroundStyle(roles.tertiary.color)
+            Text("13:59").foregroundStyle(roles.secondary.color)
             Text("✓✓").foregroundStyle(roles.link.color)
         }
         .textStyle(.micro)
@@ -3752,8 +5297,8 @@ extension Fixtures {
         }
         .sorted { $0.id < $1.id }
 
-    /// Every theme there is to choose, as the gallery lists them, Neutral in macOS's blue, so the
-    /// harness's pictures don't depend on the Mac's accent.
+    /// Every theme there is to choose, as the gallery lists them, Neutral in macOS 27.0.1's colours
+    /// (`SystemAccent.blue`), so the harness's pictures don't depend on the Mac's colours.
     static let themes = Catalog.themes(omarchy: omarchy, accent: .blue)
 }
 ```
@@ -3834,8 +5379,8 @@ extension HarnessScene {
 
 /// Settings' preferences for a scene: the harness's own, emptied once a launch so each starts from the
 /// app's defaults; the scene's look, density, text size, font and appearance; its theme in the slot of
-/// its appearance and Jaw's in the other; Omarchy's themes as jawd serves them; and Neutral in macOS's
-/// blue, so the pictures don't depend on the Mac's accent.
+/// its appearance and Jaw's in the other; Omarchy's themes as jawd serves them; and Neutral in macOS
+/// 27.0.1's colours (`SystemAccent.blue`), so the pictures don't depend on the Mac's colours.
 @MainActor
 func scenePreferences(_ conditions: Conditions) -> Preferences {
     let preferences = Preferences(defaults: SettingsDefaults.shared, accent: .blue)
@@ -3919,8 +5464,8 @@ private struct ThemeGalleryScene: View {
     func note(_ source: ThemeSource) -> String {
         switch source {
         case .jaw: "Tokyo Night, or Tokyo Night Day for Light: the app's own, as it was before the slots."
-        case .omarchy: "The 18 dark or the 5 light, in jawd's order, each mapped as the terminal maps it and held on the surface: no line should be hard to read."
-        case .redlamp: "Neutral in macOS's blue, then Redlamp and the twenty from omoi-station, held by the same bands: no line should be faint, and Redlamp's red only its accent."
+        case .omarchy: "The 18 dark or the 5 light, in jawd's order, each mapped as the terminal maps it and held where it's drawn: no line should be hard to read."
+        case .redlamp: "Neutral in macOS 27.0.1's colours, then Redlamp and the twenty from omoi-station, held by the same bands and where they're drawn: no line should be faint, Redlamp's red only its accent, its light half's mention a brown and no sender's name red."
         }
     }
 }
@@ -4023,7 +5568,7 @@ Then `mac/scripts/build-mac build`, `mac/scripts/build-mac test JawThemes`, `mac
 ```bash
 git add mac/Project.swift mac/JawHarness/Sources mac/JawThemes/Sources/Roles.swift mac/Tests/JawHarnessTests
 git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
-The harness draws every theme the app offers, as the Settings and themes design asks: Omarchy's 23 are copied into its bundle from protocol/themes and read as jaw-proto reads them, its Theme condition lists Jaw's, Omarchy's and Redlamp's by section, --theme takes jaw, omarchy:<id> or redlamp:<id>, Neutral is drawn in macOS's blue so no picture depends on the Mac's accent, and the Roles scene draws any of them with its contrast; a Settings section draws the three panes at the window's width, every card for the slot of the appearance, and a card at rest, under the pointer and filling its slot, the slots' tiles and the Omarchy section while jawd starts, can't be reached and is older; and Catalog.families and Catalog.family, which nothing reads now, go
+The harness draws every theme the app offers, as the Settings and themes design asks: Omarchy's 23 are copied into its bundle from protocol/themes and read as jaw-proto reads them, its Theme condition lists Jaw's, Omarchy's and Redlamp's by section, --theme takes jaw, omarchy:<id> or redlamp:<id>, Neutral is drawn in macOS 27.0.1's colours (SystemAccent.blue) so no picture depends on the Mac's colours, and the Roles scene draws any of them with its contrast; a Settings section draws the three panes at the window's width, every card for the slot of the appearance, and a card at rest, under the pointer and filling its slot, the slots' tiles and the Omarchy section while jawd starts, can't be reached and is older; and Catalog.families and Catalog.family, which nothing reads now, go
 EOF
 ```
 
@@ -4064,7 +5609,7 @@ Settings › Appearance holds a theme for dark and one for light, each chosen fr
 - **Redlamp keeps themes as families,** each a matched dark and light pair, so a choice survives an appearance change. A family is either authored directly or ten colours (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, and `primaryRoles`, which keeps a brand colour to the places it's allowed), mapped to tokens. Its catalog is Neutral, Redlamp, and twenty ported from omoi-station: Kanagawa, Tokyo Night, Moonlight, Catppuccin, Rosé Pine, Nord, Everforest, Gruvbox, Dracula, Solarized, One Dark, Monokai, Ocean, Sakura, Copper, Vinyl Noir, Neon Dusk, Burnt Tape, Phantom Frequency and Velvet Static. Around them: a tint from 0 (the theme's tones in grey) to 1, native controls in the theme's accent or the system's, the panels' translucency (solid under Reduce Transparency), and the palette in a theme of its own, which come in Mac-M5 (Owner, 6 Nov).
 - **Its tokens are a photo editor's** (labels, tracks, thumbs, wells, an edited dot), so jaw maps the ten colours to a chat's roles itself, below.
 - **Copied, not linked** (Owner, 26 Oct), **under jaw's licence** (Owner, 6 Nov). `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 200 lines in `JawThemes/Sources/RedlampCatalog.swift`: `ThemePalette`, `PrimaryRoles`, the HSL parser, the families' ten colours in Redlamp's slot order, and the brand's nine colours the Redlamp family is made of. Its owner relicensed Redlamp's catalog for jaw under jaw's MIT licence ("I own redlamp, MIT is fine"), so the copy carries jaw's licence with a line saying whose it is, and there's no `docs/licenses/redlamp.txt`. `scripts/sync-themes` copies it from a checkout of Redlamp at a pinned commit with `git show`, never touching the checkout, and with `--check` says what differs and what Redlamp's main has changed since, Neutral's tokens included; CI has no checkout of Redlamp, so there it says so and checks nothing.
-- **Held readable** (Owner, 6 Nov): mapped by the table below, then held as Omarchy's are, every colour at 3:1 on the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1, and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, readable over exact: 37 of the 42 halves move a little, a photo editor's faint labels most. Neutral is Redlamp's standard greys with the system's accent, read in both appearances and again when it changes.
+- **Held readable** (Owner, 6 Nov): mapped by the table below, then held as Omarchy's are, every colour at 3:1 on the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1, and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, readable over exact: 37 of the 42 halves move a little, a photo editor's faint labels most. Neutral is Redlamp's standard greys in the system's colours, its accent, orange, green and red, read in both appearances and again when they change. The Redlamp family keeps its red to its accent: its light half's mentions take the brand's filament, darkened to read on paper, and its senders' eight hues keep 30° or more from the red. Under a grey accent, as Graphite's is, Neutral's senders take the system's blue's hue, so a group's are still eight colours (Owner, 6 Nov).
 
 ### Omarchy's themes, from jawd
 
@@ -4073,7 +5618,7 @@ Settings › Appearance holds a theme for dark and one for light, each chosen fr
 
 ### jaw's own theme
 
-- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Its light half is Tokyo Night Day, Tokyo Night's own light palette. Omarchy's Tokyo Night and Redlamp's, a lighter take, are in their own sections of the gallery.
+- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Held as every theme is (below), it draws its secondary and dim text a step lighter, `#7e87af` and `#66709a`, and Tokyo Night Day's blue as text and links, its red, its mention and its dim text a shade deeper. Its light half is Tokyo Night Day, Tokyo Night's own light palette. Omarchy's Tokyo Night and Redlamp's, a lighter take, are in their own sections of the gallery.
 
 ### The roles
 
@@ -4085,16 +5630,18 @@ Every colour the app draws is asked for by what it's for, as `theme.rs` asks, ne
 | The sidebar, the list, their bubbles | surface `#24283b` | `card` |
 | Text | fg `#c0caf5` | `foreground` |
 | Secondary text: previews, times | muted `#737aa2` | `muted` |
-| Quieter text, ticks not yet read | comment `#565f89` | `muted` at 62%, Redlamp's tertiary |
+| Quieter text, ticks not yet read (in the secondary text's colour everywhere but on the window's ground and the surface) | comment `#565f89` | `muted` at 62%, Redlamp's tertiary |
 | Separators | gutter `#3b4261` | `border` |
 | Focus, selection, unread counts | blue `#7aa2f7`, selection `#283457` | `primary`, or `neutral` where `primaryRoles` keeps it out |
+| The accent drawn as text: an unread chat's time, Draft:, a mention of someone else, Show more, You in a reply | blue `#7aa2f7` | as the accent |
 | Links, read ticks | blue `#7aa2f7` | as the accent |
 | Your bubbles | blue at 18% over the ground | `primary` at 18% over `background` (12% in light), `neutral` where `primaryRoles` keeps it out |
-| Mentions, the "new" marker | orange `#ff9e64` | `accent` |
+| Mentions, the "new" marker | orange `#ff9e64` | `accent`, the brand's filament in the Redlamp family's light half |
 | Online, typing | green `#9ece6a` | `success` |
 | Failed, destructive | red `#f7768e` | `destructive` |
-| Group senders | red, yellow, blue, purple, cyan, green, orange, teal | eight hues 45° apart from `primary`'s, each lightened or darkened until it reads at 4.5:1 on their bubble |
+| Group senders | red, yellow, blue, purple, cyan, green, orange, teal | eight hues 45° apart from `primary`'s, 37.5° apart away from it in the Redlamp family, each lightened or darkened until it reads at 4.5:1 on their bubble |
 
+- **Held where they're drawn** (Owner, 6 Nov): every theme's roles, of every source, then go through one hold, which moves each colour drawn as text or as a mark toward the text until it reads at 3:1 on every ground it's drawn on, the window's, the surface, a selected row, your bubbles and a selected message's band, and the tints laid over them, a card's and a quote's well, the accent's tint behind its symbols, the box's chip and a mention of you on its own tint; a selected row's online at 4.5:1; while the accent's fills, the grounds, the text and the borders keep the theme's colours. The accent drawn as text is a role of its own, and the dim text is held on the window's ground and the surface and drawn in the secondary text's colour everywhere else, so it stays the quietest (the Settings and themes design's "Every theme, held where it's drawn").
 - **The slots** (Owner, 6 Nov): a theme for dark and one for light, kept in the app's preferences as `themeDark` and `themeLight` (`jaw`, `omarchy:<id>` or `redlamp:<id>`), both Jaw's Tokyo Night at first, the single `theme` key read into both once. A theme with both halves fills both; one of Omarchy's, which have one mode each, fills the slot of its mode; ⌥-click fills only the slot chosen for. Jaw draws the dark slot's theme while the Mac is dark, and the light one's while it's light.
 - **Tint, appearance and translucency** as Redlamp's, in Mac-M5: the tint pulls every role toward the grey of its own lightness; appearance is dark, light or the system's, as built; the sidebar's glass shows through by the translucency setting, solid under Reduce Transparency. Increase Contrast draws borders and secondary text a step stronger.
 - **Switching a theme is live:** the roles are read as views draw, and every window redraws on the change, with no relaunch.
@@ -4176,7 +5723,7 @@ Expected: no match (rg exits 1): none of the old words for Redlamp's licence, Ma
 ```bash
 git add docs/plans/2026-10-26-jaw-mac-design.md docs/plans/2026-10-26-jaw-mac-plan.md docs/plans/2026-10-27-jaw-mac-parity-plan.md mac/README.md
 git commit -F- --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" <<'EOF'
-The Mac's docs say what the Settings and themes plan built: the Mac design's Settings is a window of its own with the toolbar's tabs, its Themes a slot for dark and one for light filled from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd mapped as the terminal maps them and held on the surface, and Redlamp's 22 families copied under jaw's MIT by their owner and held readable, with links and read ticks in a role of their own, the tint and translucency left for Mac-M5; the Mac plan's Mac-M5 keeps what's left of its themes, and sync-themes is run by hand, since CI has no checkout of Redlamp; the parity plan's step 3.5 has both sets of themes together, its check keeping settings.set and the settings push for jawd's own settings; and the README gives --keys settings:<pane>, a theme in a slot by argument and the harness's --theme for any theme
+The Mac's docs say what the Settings and themes plan built: the Mac design's Settings is a window of its own with the toolbar's tabs, its Themes a slot for dark and one for light filled from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd mapped as the terminal maps them and held on the surface, and Redlamp's 22 families copied under jaw's MIT by their owner and held readable, every colour held at 3:1 wherever it's drawn, the tints laid over a ground too, with links and read ticks, and the accent drawn as text, in roles of their own, Neutral in the system's colours, the tint and translucency left for Mac-M5; the Mac plan's Mac-M5 keeps what's left of its themes, and sync-themes is run by hand, since CI has no checkout of Redlamp; the parity plan's step 3.5 has both sets of themes together, its check keeping settings.set and the settings push for jawd's own settings; and the README gives --keys settings:<pane>, a theme in a slot by argument and the harness's --theme for any theme
 EOF
 ```
 
@@ -4191,4 +5738,4 @@ Expected: `sync-themes: jaw's copy is Redlamp's catalog at 9fa9d9155`.
 Run: `rm -rf mac/build/settings && make prune-builds`
 Expected: the scratch pictures gone, and `prune-builds` saying what it freed from this worktree's `target/` and the others'.
 
-Report: the branch's commits (`git log --oneline origin/main..HEAD`, eleven: the design, the owner's answers, this plan, then one for each of Tasks 1 to 8), each test run's count, what the pictures showed, any decision a task took that this plan didn't, whether the parity canvas's two cells changed, and what's left for the controller: the budgets, `--bench launch` and `--bench idle` with Settings open, to measure with a Release build, and the owner's look by hand that the design's Testing ends with, the window on a real screen with its toolbar and the gallery, the Mac's appearance switched to Auto while both slots hold themes of their own, and VoiceOver over the gallery, its cards' press and Use for Dark Only among it. Don't push: the controller lands it.
+Report: the branch's commits (`git log --oneline origin/main..HEAD`: the design, the owner's answers, this plan and its fixes, Task 4b's section and the design's amendments, then one for each of Tasks 1 to 4, Task 1's fix, 4b and 5 to 8), each test run's count, what the pictures showed, any decision a task took that this plan didn't, whether the parity canvas's two cells changed, and what's left for the controller: the budgets, `--bench launch` and `--bench idle` with Settings open, to measure with a Release build, and the owner's look by hand that the design's Testing ends with, the window on a real screen with its toolbar and the gallery, the Mac's appearance switched to Auto while both slots hold themes of their own, and VoiceOver over the gallery, its cards' press and Use for Dark Only among it. Don't push: the controller lands it.
