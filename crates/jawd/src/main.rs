@@ -506,7 +506,7 @@ fn engine_with(kind: EngineKind, home: &Path, fail: Option<Failure>, pauses: Pau
             Some(program) => Ok(Arc::new(GoEngine::new(program, home.to_path_buf()).with_pauses(pauses))),
             None => Err((
                 "go",
-                "jaw-engine isn't beside jawd, in libexec/jaw/ beside its folder or on PATH; make build builds it"
+                "jaw-engine isn't beside jawd, in libexec/jaw/ beside its folder or on PATH; mise run build builds it"
                     .into(),
             )),
         },
@@ -514,7 +514,7 @@ fn engine_with(kind: EngineKind, home: &Path, fail: Option<Failure>, pauses: Pau
 }
 
 /// Where jaw-engine is: `JAW_ENGINE` if set; beside jawd, as in Jaw.app's Contents/Helpers/, in
-/// libexec/jaw/ beside jawd's folder as `make install` and Homebrew put it, or in target/engine/
+/// libexec/jaw/ beside jawd's folder as `mise run install` and Homebrew put it, or in target/engine/
 /// when jawd runs from a checkout's target/, each looked for from where jawd really is; then as
 /// `GoEngine::find` looks, which ends on PATH.
 fn engine_program() -> Option<std::path::PathBuf> {

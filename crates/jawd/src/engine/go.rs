@@ -106,7 +106,7 @@ impl GoEngine {
         command
     }
 
-    /// Where jaw-engine is: `JAW_ENGINE` if set, beside jawd as `make install` puts it, in
+    /// Where jaw-engine is: `JAW_ENGINE` if set, beside jawd, as in Jaw.app's Contents/Helpers/, in
     /// target/engine/ when jawd runs from a checkout's target/, or on PATH.
     pub fn find() -> Option<PathBuf> {
         if let Some(program) = std::env::var_os("JAW_ENGINE") {
@@ -414,13 +414,13 @@ async fn handshake(reader: &mut BufReader<ChildStdout>, writer: &mut BufWriter<C
     };
     if hello.protocol != PROTOCOL {
         bail!(
-            "jaw-engine speaks link protocol {} and jawd {PROTOCOL}: rebuild them together with make build",
+            "jaw-engine speaks link protocol {} and jawd {PROTOCOL}: rebuild them together with mise run build",
             hello.protocol
         );
     }
     if hello.whatsmeow != wa_proto::whatsmeow() {
         bail!(
-            "jaw-engine was built with whatsmeow {} but jawd reads WhatsApp's protobufs from {}: run make sync-protos and make build",
+            "jaw-engine was built with whatsmeow {} but jawd reads WhatsApp's protobufs from {}: run mise run sync-protos, then mise run build",
             hello.whatsmeow,
             wa_proto::whatsmeow()
         );
@@ -519,15 +519,15 @@ mod tests {
     use super::*;
     use crate::engine::supervisor::{Backoff, State, Supervisor};
 
-    /// The engine `make engine` builds. Without it the test says so and passes, except in CI,
-    /// where `make test` builds it first.
+    /// The engine `mise run engine` builds. Without it the test says so and passes, except in CI,
+    /// where `mise run test` builds it first.
     fn built() -> Option<PathBuf> {
         let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/engine/jaw-engine");
         if program.is_file() {
             return Some(program);
         }
-        assert!(std::env::var_os("CI").is_none(), "make test builds jaw-engine before the Rust tests");
-        eprintln!("skipped: {} isn't built; make engine builds it", program.display());
+        assert!(std::env::var_os("CI").is_none(), "mise run test builds jaw-engine before the Rust tests");
+        eprintln!("skipped: {} isn't built; mise run engine builds it", program.display());
         None
     }
 
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(acking.await.unwrap(), 2_000);
     }
 
-    /// The engine `make engine` builds, started on `home`, once its session is open: it says it's
+    /// The engine `mise run engine` builds, started on `home`, once its session is open: it says it's
     /// unlinked then, as it is on a folder of its own.
     async fn serving(program: &Path, home: &Path) -> (GoEngine, Instance, mpsc::Receiver<Incoming>) {
         let engine = GoEngine::new(program.to_path_buf(), home.to_path_buf()).with_pauses(fake::PATIENT);

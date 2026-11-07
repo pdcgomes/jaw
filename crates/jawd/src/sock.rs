@@ -623,7 +623,7 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
                 let mut error = Error::new(
                     code::VERSION,
                     format!(
-                        "jawd speaks protocol {PROTOCOL} and this interface speaks {}: {older}, so run make install again",
+                        "jawd speaks protocol {PROTOCOL} and this interface speaks {}: {older}, so install jaw again with mise run install",
                         hello.protocol
                     ),
                 );

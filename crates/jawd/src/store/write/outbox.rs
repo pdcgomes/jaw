@@ -2602,7 +2602,7 @@ mod tests {
             let mut sorted = took.clone();
             sorted.sort();
             let ms = |took: Duration| took.as_secs_f64() * 1e3;
-            // `make perf` reads this line.
+            // `mise run perf` reads this line.
             eprintln!(
                 "steps of {what} at their quickest of three: {}, {:.2} ms at the median, {:.2} ms at most, {over} of 3 ms or more",
                 took.len(),

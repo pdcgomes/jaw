@@ -18,7 +18,7 @@ import (
 	"github.com/pdcgomes/jaw/engine/internal/wa"
 )
 
-// version is the one jaw and jawd say too, from git describe: make engine sets it.
+// version is the one jaw and jawd say too, from git describe: mise run engine sets it.
 var version = "unknown"
 
 func main() {
