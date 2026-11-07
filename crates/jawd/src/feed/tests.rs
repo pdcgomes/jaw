@@ -1213,13 +1213,17 @@ async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<
     (socket, pushes)
 }
 
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
+
 /// Holds jaw.db's write lock from outside until dropped, so jawd's writer waits meanwhile.
 struct Locked(rusqlite::Connection);
 
 impl Locked {
     fn on(bed: &Bed) -> Locked {
         let side = rusqlite::Connection::open(bed.home.path().join("jaw.db")).unwrap();
-        side.busy_timeout(Duration::from_secs(5)).unwrap();
+        side.busy_timeout(SIDE_WAITS).unwrap();
         side.execute_batch("BEGIN IMMEDIATE").unwrap();
         Locked(side)
     }
@@ -1506,7 +1510,7 @@ async fn a_window_whose_read_fails_is_read_again_at_its_pace_then_resynced() {
     let want = Want::Messages { chat: OPEN.into(), anchor: None, before: 10, after: 0 };
     // A row the window shows that can't be read, written behind the store's back.
     let side = rusqlite::Connection::open(bed.home.path().join("jaw.db")).unwrap();
-    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    side.busy_timeout(SIDE_WAITS).unwrap();
     // The schema's CHECK (json_valid(spans)) keeps the store from writing such a row.
     side.pragma_update(None, "ignore_check_constraints", true).unwrap();
     let spans = |spans: Option<&str>| {

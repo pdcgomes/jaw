@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jaw_proto::{ConnectionState, Push, code};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
 
@@ -22,6 +22,12 @@ const MARTA: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lopes;Marta;;;\r\nFN:Marta 
     TEL;TYPE=CELL;waid=351213456789:+351 21 345 6789\r\nEND:VCARD\r\n";
 const RUI: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Costa;Rui;;;\r\nFN:Rui Costa\r\n\
     TEL;TYPE=CELL;waid=351913333333:+351 913 333 333\r\nEND:VCARD\r\n";
+
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s. Its transactions take the
+/// lock as they begin, before any read: a deferred one's first insert has met a snapshot a commit
+/// of jawd's made stale (SQLITE_BUSY_SNAPSHOT), which no wait cures.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
 
 /// jawd's sending on a jaw.db in `home`, through the demo engine, with Ana's chat and the climbing
 /// group's.
@@ -390,8 +396,8 @@ async fn past_a_thousand_messages_waiting_a_card_is_refused_and_nothing_of_it_wr
     let running = Running::start(home.path(), false).await;
     {
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
-        let tx = db.transaction().unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         for n in 0..1_000i64 {
             tx.execute(
                 "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
@@ -425,7 +431,7 @@ async fn past_a_thousand_messages_waiting_a_card_is_refused_and_nothing_of_it_wr
         "neither the card nor its key kept, so asking again once there's room sends it"
     );
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute("DELETE FROM outbox WHERE state = 'failed'", []).unwrap();
     assert!(running.call("send.contact", params).await.is_ok(), "taken once some have gone");
 }

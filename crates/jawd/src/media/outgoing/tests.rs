@@ -23,6 +23,10 @@ use crate::store::{Amend, Amendment, Chat, Lane, read};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
 
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
+
 /// jawd's media, sending, store and sync on a folder of their own, with the demo engine on `world`.
 struct Rig {
     home: PathBuf,
@@ -917,6 +921,7 @@ async fn a_copy_jaw_db_cant_say_is_made_or_uploaded_fails_its_message_rather_tha
     let picked = tempfile::tempdir().unwrap();
     let rig = Rig::on(home.path(), world()).await;
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     let refuse = |state: &str| {
         db.execute_batch(&format!(
             "DROP TRIGGER IF EXISTS refused;
@@ -1208,6 +1213,7 @@ async fn a_copy_of_your_file_goes_only_once_a_synced_commit_has_stopped_naming_i
     let file = home.path().join(&name);
     std::fs::write(&file, b"a copy of yours nothing needs any more").unwrap();
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute("INSERT INTO outgoing_drop (path) VALUES (?1)", [&name]).unwrap();
     // jaw.db's write lock, held from outside, so nothing can be committed until it's let go.
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1636,7 +1642,7 @@ async fn sd_gone_and_hd_on_its_way(rig: &Rig, picked: &Path) -> String {
     });
     both.await.expect("both copies made and on their way up");
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     let marked =
         db.execute("UPDATE outgoing SET state = 'ready' WHERE variant = 'sd' AND state = 'uploading'", []).unwrap();
     assert_eq!(marked, 1);
@@ -1712,7 +1718,7 @@ async fn send_retry_never_sends_the_failed_hd_copy_of_a_message_deleted_for_ever
     both.await.expect("both copies made and on their way up");
     // The HD copy's upload refused for good, as Unsent leaves it, and the SD copy's done.
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute_batch(
         "UPDATE outgoing SET state = 'failed', error = 'refused in the audit' WHERE variant = 'hd';
          UPDATE outbox SET state = 'failed', error = 'refused in the audit' WHERE kind = 'hd';
@@ -1786,7 +1792,7 @@ async fn an_hd_copy_whose_message_is_deleted_for_everyone_is_withdrawn_whatever_
     let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
     // Deleted for everyone by something that leaves its HD copy's row, as nothing in jaw.db does now.
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute("UPDATE messages SET deleted = 1 WHERE id = ?1", [&id]).unwrap();
     rig.world.gate_uploads(false);
     let gone = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1813,7 +1819,7 @@ async fn an_hd_copy_read_withdrawn_goes_once_its_messages_deletion_is_refused_be
     // Your deletion of it for everyone on its way, leaving its HD copy's row, as a deletion done to
     // the other copy of a merge does, written from outside.
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     let (stopped, go) = rig.sending.pause_next_withdrawal();
     db.execute(
         "INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at)
@@ -1844,7 +1850,7 @@ async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone
     let rig = Rig::on(home.path(), world()).await;
     let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     // Its HD copy refused, and the message deleted for everyone by something that leaves the HD
     // copy's row, as nothing in jaw.db does now.
     db.execute_batch(&format!(
@@ -1866,7 +1872,7 @@ async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone
 /// outside names one, refused so nothing makes it.
 fn kept_already(rig: &Rig, bytes: u64) {
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute(
         "INSERT INTO outbox (jid, id, kind, raw, state, error, next_at, created_at)
          VALUES (?1, '3EB0KEPT', 'video', x'01', 'failed', 'by the test', 0, 0)",
@@ -1983,7 +1989,7 @@ async fn an_hd_copy_whose_messages_row_has_gone_fails_rather_than_going() {
     // Its message's row removed by something other than a deletion for you, which takes its HD
     // copies itself, written from outside: the HD copy has nothing left to go after.
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.pragma_update(None, "foreign_keys", true).unwrap();
     db.execute("DELETE FROM messages WHERE id = ?1", [&id]).unwrap();
     let orphaned: i64 = rig
@@ -2025,7 +2031,7 @@ async fn a_failed_hd_copy_whose_sent_message_is_deleted_for_you_leaves_nothing()
     });
     both.await.expect("both copies made and on their way up");
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute_batch(
         "UPDATE outgoing SET state = 'failed', error = 'refused in the audit' WHERE variant = 'hd';
          UPDATE outbox SET state = 'failed', error = 'refused in the audit' WHERE kind = 'hd';
@@ -2081,7 +2087,7 @@ async fn an_erased_photo_of_yours_whose_hd_copy_is_on_its_way_leaves_no_copy_row
     // The SD copy is up, as its upload's answer leaves it, and its message goes; the HD copy's
     // upload is still held.
     let db = Connection::open(rig.home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute("UPDATE outgoing SET state = 'ready' WHERE variant = 'sd'", []).unwrap();
     drop(db);
     rig.media.inner.sending.changed();

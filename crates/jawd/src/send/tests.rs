@@ -435,7 +435,7 @@ fn a_scene_of_jawd_to_be_killed() {
                 let running = Running::on(home, world, true).await;
                 running.chats(&[ANA]).await;
                 let holder = Connection::open(home.join("jaw.db")).unwrap();
-                holder.busy_timeout(Duration::from_secs(5)).unwrap();
+                holder.busy_timeout(SIDE_WAITS).unwrap();
                 holder.execute_batch("BEGIN IMMEDIATE").unwrap();
                 let sending = running.sending.clone();
                 let answer =
@@ -3983,7 +3983,7 @@ async fn a_reaction_or_an_edit_asked_again_with_its_key_goes_once_even_asked_twi
     // Asked twice at once while jaw.db can't be written, so each finds its key names nothing yet,
     // and only the writer, taking them one at a time, sees the first.
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
-    holder.busy_timeout(Duration::from_secs(5)).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     let release = tokio::task::spawn_blocking(move || {
         std::thread::sleep(Duration::from_millis(300));
@@ -4433,8 +4433,8 @@ async fn until_echoed(running: &Running, patch: &pb::AppStatePatch) {
 /// Fills the outbox with `rows` reactions waiting to send, which nothing sends.
 fn fill_outbox(home: &Path, rows: i64) {
     let mut db = Connection::open(home.join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
-    let tx = db.transaction().unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
     for n in 0..rows {
         tx.execute(
             "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
@@ -4931,7 +4931,7 @@ async fn a_mark_read_that_goes_while_its_chat_merges_waits_for_the_merge_then_se
     // Ana's LID and number turn out to be one person: her LID's chat starts merging into her
     // number's, and its messages can't move until the test lets them, whatever wakes the merge.
     let side = Connection::open(home.path().join("jaw.db")).unwrap();
-    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    side.busy_timeout(SIDE_WAITS).unwrap();
     side.execute_batch(
         "CREATE TRIGGER moving_waits BEFORE UPDATE OF chat ON messages BEGIN SELECT RAISE(ABORT, 'not yet'); END;",
     )
@@ -5323,7 +5323,7 @@ async fn a_patch_that_doesnt_decode_is_kept_in_quarantine_its_wait_over_every_co
     // The pin's outbox row is spoilt before it can go.
     let spoilt = b"not a patch".to_vec();
     let side = Connection::open(home.path().join("jaw.db")).unwrap();
-    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    side.busy_timeout(SIDE_WAITS).unwrap();
     let id: String = side.query_row("SELECT id FROM outbox WHERE kind = 'app_state'", [], |r| r.get(0)).unwrap();
     side.execute("UPDATE outbox SET raw = ?1 WHERE kind = 'app_state'", [&spoilt]).unwrap();
     drop(side);

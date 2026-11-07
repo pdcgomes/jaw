@@ -2610,6 +2610,7 @@ async fn the_engine_next_word_waits_until_the_account_it_said_before_is_stored()
         crate::feed::Typing::default(),
     ));
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     tx.send(connection_event(State::Connected)).await.unwrap();
     tx.send(connection_event(State::LoggedOut)).await.unwrap();
@@ -2794,6 +2795,10 @@ async fn measure_live_previews_with_and_without_a_thumbnail() {
 /// How long a test waits for a push it expects, however busy the machine.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// How long a test's own connection to jaw.db waits for the write lock beside a running sync,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
+
 /// The supervisor of `engine`, pausing `pause` before it starts another, long enough to see the
 /// pause on a busy machine.
 fn supervised_pausing(engine: &Scripted, pause: Duration) -> (Supervisor, mpsc::Receiver<crate::engine::Incoming>) {
@@ -2971,6 +2976,7 @@ async fn what_a_stopped_engine_sent_comes_before_jawd_says_it_is_reconnecting_an
     // Holding jaw.db's writer holds sync on the account the next Connected names, so what the
     // engine sends after it waits in `incoming` while the engine stops.
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     engine.send(connection_event(State::Connected).event).await;
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
@@ -3029,6 +3035,7 @@ async fn a_stop_while_sync_waits_on_jaw_db_for_longer_than_the_pause_is_still_sa
     // Holding jaw.db's writer holds sync on the account the next Connected names, while the engine
     // stops and for longer than the pause before the next would start.
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     engine.send(connection_event(State::Connected).event).await;
     assert_eq!(
@@ -3105,6 +3112,7 @@ async fn pings_that_get_through_again_after_a_keepalive_timeout_say_online_with_
     let before = kept();
     // Holding jaw.db's writer holds sync on any write it waits for, so the word after one would wait.
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
     // Named otherwise than at the connection, so that writing what a restore says would show.

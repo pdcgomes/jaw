@@ -26,6 +26,11 @@ const RUI: &str = "351913333333@s.whatsapp.net";
 const SPEECH: &[u8] = include_bytes!("../../../jaw-voice/tests/fixtures/speech-16k.ogg");
 /// How long a test waits for anything.
 const PATIENCE: Duration = Duration::from_secs(60);
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s. Its transactions take the
+/// lock as they begin, before any read: a deferred one's first insert has met a snapshot a commit
+/// of jawd's made stale (SQLITE_BUSY_SNAPSHOT), which no wait cures.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
 /// How often typing is said again while it goes on, and how long after it was last said it stops,
 /// shortened so a test sees both.
 const TYPING_AGAIN: Duration = Duration::from_millis(200);
@@ -457,7 +462,7 @@ async fn what_cant_be_played_is_refused_as_the_protocol_says() {
     for (column, id) in [("deleted", "3EB0GONE"), ("view_once", "3EB0ONCE")] {
         rig.cached(id, SPEECH).await;
         let db = rusqlite::Connection::open(rig.home.join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         db.execute(&format!("UPDATE messages SET {column} = 1 WHERE id = ?1"), [id]).unwrap();
         let e = refused(rig.call("voice.play", json!({ "message": id })).await);
         assert_eq!(e.code, code::NOT_ALLOWED, "{column}: {e:?}");
@@ -1051,8 +1056,8 @@ async fn a_full_outbox_refuses_it_and_keeps_the_recording() {
     rig.recorded(&heard).await;
     {
         let mut db = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(10)).unwrap();
-        let tx = db.transaction().unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
         for n in 0..1_000i64 {
             tx.execute(
                 "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
@@ -1112,7 +1117,7 @@ async fn kept_bytes_past_their_bound_refuse_it_and_keep_the_recording() {
     rig.recorded(&heard).await;
     {
         let db = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         db.execute_batch(&format!(
             "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
                 VALUES ((SELECT n FROM chats WHERE id = '{RUI}'), 'big', 1, 1, 'audio', 1, 'failed', 1);

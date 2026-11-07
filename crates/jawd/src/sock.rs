@@ -959,6 +959,10 @@ mod tests {
     use crate::store::{Change, Chat, Lane, Message, Store};
     use crate::work::Priority;
 
+    /// How long a test's own connection to jaw.db waits for the write lock beside a serving jawd,
+    /// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+    const SIDE_WAITS: Duration = Duration::from_secs(60);
+
     /// jawd serving on a socket in a folder of its own, for as long as the test runs.
     async fn serving() -> (tempfile::TempDir, std::path::PathBuf) {
         let home = tempfile::tempdir().unwrap();
@@ -1106,6 +1110,7 @@ mod tests {
         assert_eq!(welcome.account.state, AccountState::Linked);
         // jaw.db's write lock, held from outside, so the account can't be forgotten until it's let go.
         let holder = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.busy_timeout(SIDE_WAITS).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
         let synced = store.storage().synced_commits;
         // On a thread of its own, so an answer or a push that never comes fails the test rather than
@@ -1638,6 +1643,7 @@ mod tests {
                 .unwrap();
         // jaw.db's write lock, held from outside, so the setting can't be kept until it's let go.
         let holder = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.busy_timeout(SIDE_WAITS).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
         let synced = store.storage().synced_commits;
         let (answered, mut answer) = tokio::sync::oneshot::channel();
@@ -2193,6 +2199,7 @@ mod tests {
             // jaw.db's write lock, held from outside, so the set waits on the writer, and the get
             // sent after it waits for it.
             let holder = rusqlite::Connection::open(&db).unwrap();
+            holder.busy_timeout(SIDE_WAITS).unwrap();
             holder.execute_batch("BEGIN IMMEDIATE").unwrap();
             let set = jaw.send("layout.set", json!({ "v": 5, "layout": halves(5) }));
             let get = jaw.send("layout.get", Value::Null);

@@ -23,6 +23,10 @@ use crate::store::{Change, Lane, Message, read};
 const ANA: &str = "351912345678@s.whatsapp.net";
 const RUI: &str = "351913333333@s.whatsapp.net";
 
+/// How long a test's own connection to jaw.db waits for the write lock beside a running jawd,
+/// whose writer, on a busy 2-core machine, can keep it more than 5 s.
+const SIDE_WAITS: Duration = Duration::from_secs(60);
+
 /// jawd's media, store and sync on a folder of their own, with the demo engine.
 struct Rig {
     home: Arc<tempfile::TempDir>,
@@ -690,7 +694,7 @@ async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent
 async fn the_cache_keeps_to_its_size_past_the_starred_files_it_cant_drop() {
     let rig = rig(Config { cache_bytes: 1_000_000, ..quick() }).await;
     let db = Connection::open(rig.home.path().join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute("INSERT INTO chats (id, kind, v) VALUES (?1, 'direct', 1)", [ANA]).unwrap();
     // Four starred photos used longest ago, 1.2 MB between them, more than the cache holds; then
     // ten others of 50 kB.
@@ -746,6 +750,7 @@ async fn a_file_goes_only_once_a_synced_commit_has_stopped_naming_it() {
     let file = rig.file(&row["media"]["path"]);
     // jaw.db's write lock, held from outside, so nothing can be committed until it's let go.
     let holder = Connection::open(rig.home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(SIDE_WAITS).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     let dropping = {
         let (inner, sha256) = (rig.media.inner.clone(), lake.sha256.clone());
@@ -2628,7 +2633,7 @@ async fn a_job_that_panics_gives_its_place_back() {
 async fn files_no_copy_names_past_a_page_that_jobs_hold_still_go() {
     let rig = rig(quick()).await;
     let db = Connection::open(rig.home.path().join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     // A page of files no copy names, every one held by a job, and one more past them that none holds.
     let mut held = Vec::new();
     let mut files = Vec::new();
@@ -3136,7 +3141,7 @@ async fn a_photo_stored_before_media_in_gets_a_copy_to_show_and_fetch() {
     let lake = Picture::lake(640, 480);
     rig.photo_from_history(&lake, "3EB0BEFORE").await;
     let db = Connection::open(rig.home.path().join("jaw.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.busy_timeout(SIDE_WAITS).unwrap();
     db.execute("DELETE FROM media WHERE message = (SELECT n FROM messages WHERE id = '3EB0BEFORE')", []).unwrap();
     // The row migration 20 leaves on a jaw.db holding it, which this one, made empty, didn't get;
     // nothing takes its steps here until the test does.
@@ -3588,7 +3593,7 @@ async fn a_view_once_photo_erased_or_gone_while_open_is_open_no_more_and_closing
     {
         // Gone with nothing said of it, as one erased just before `view_once.close` looks.
         let db = rusqlite::Connection::open(rig.home.path().join("jaw.db")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.busy_timeout(SIDE_WAITS).unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
         db.execute("DELETE FROM messages WHERE id = '3EB0VANISH'", []).unwrap();
     }
