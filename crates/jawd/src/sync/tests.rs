@@ -2973,6 +2973,9 @@ async fn what_a_stopped_engine_sent_comes_before_jawd_says_it_is_reconnecting_an
     let (supervisor, incoming) = supervised_pausing(&engine, Duration::from_secs(1));
     let (_live, mut told, running) = syncing(&store, home.path(), supervisor.clone(), incoming);
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    // jawd says Online before it writes the account the Connected names, and sync waits for that
+    // write: held behind the writer too, it would keep sync from the next Connected.
+    until("the account and its JIDs to be stored", || store.remembered(ME).is_ok_and(|me| me.is_some())).await;
     // Holding jaw.db's writer holds sync on the account the next Connected names, so what the
     // engine sends after it waits in `incoming` while the engine stops.
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
