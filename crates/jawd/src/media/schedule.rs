@@ -117,6 +117,12 @@ pub(super) struct Schedule {
     /// How long the next look takes once it has read what's wanted, as a test has it.
     #[cfg(test)]
     pub(super) next_look_pause: Mutex<Duration>,
+    /// The looks begun since jawd started, as a test counts them.
+    #[cfg(test)]
+    pub(super) looks: AtomicU64,
+    /// Has every look's read of what's wanted fail while set, the next look's after its pause.
+    #[cfg(test)]
+    pub(super) refuse_reads: std::sync::atomic::AtomicBool,
 }
 
 impl Schedule {
@@ -281,6 +287,8 @@ async fn run(inner: Arc<Inner>) {
     loop {
         let woken = inner.schedule.wake.notified();
         let looked = Instant::now();
+        #[cfg(test)]
+        inner.schedule.looks.fetch_add(1, Ordering::SeqCst);
         let room = inner.store.disk().room();
         if room && let Err(e) = take(&inner).await {
             eprintln!("jawd: can't read which media is wanted: {e:#}");
@@ -323,6 +331,13 @@ impl Drop for Slot {
 async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
     #[cfg(test)]
     let pause = std::mem::take(&mut *inner.schedule.next_look_pause.lock().expect("schedule"));
+    #[cfg(test)]
+    if inner.schedule.refuse_reads.load(Ordering::SeqCst) {
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+        anyhow::bail!("the test has jaw.db refuse to read what's wanted");
+    }
     let waiting = inner.schedule.later.lock().expect("schedule").len();
     for pass in Pass::ALL {
         let (priority, most) = (pass.priority(), pass.most());

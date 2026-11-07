@@ -2400,10 +2400,9 @@ async fn a_phone_that_cant_be_reached_is_asked_again_and_one_that_cant_be_asked_
     assert_eq!(rig.media.status().waiting_for_phone, 0);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_copy_whose_wait_ends_while_the_scheduler_looks_is_tried_again_with_nothing_else_to_wake_it() {
-    let wait = Duration::from_secs(1);
-    let rig = rig(Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+/// Photo `id` from Ana, which the server answers 404 for and whose ask can't reach the phone, once
+/// its job has ended and it waits to be tried again.
+async fn waiting_to_be_tried_again(rig: &Rig, id: &str) {
     // What sync brings in as the engine connects is in before the photo comes, so it can't wake the
     // scheduler after the look.
     let quiet = tokio::time::timeout(Duration::from_secs(60), async {
@@ -2417,21 +2416,60 @@ async fn a_copy_whose_wait_ends_while_the_scheduler_looks_is_tried_again_with_no
     let lake = Picture::lake(640, 480);
     rig.world.expire(&lake.direct_path);
     rig.world.fail_asks(1, true);
-    rig.photo(&lake, ANA, ANA, "3EB0DUE").await;
+    rig.photo(&lake, ANA, ANA, id).await;
     let waiting = |row: &Value| row["media"]["error"] == "the server answered 404";
-    rig.until(ANA, "3EB0DUE", "waiting to be tried again", waiting).await;
+    rig.until(ANA, id, "waiting to be tried again", waiting).await;
     let ended = tokio::time::timeout(Duration::from_secs(60), async {
         while rig.media.inner.schedule.running() > 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
     assert!(ended.await.is_ok(), "the job whose ask couldn't reach the phone never ended");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_whose_wait_ends_while_the_scheduler_looks_is_tried_again_with_nothing_else_to_wake_it() {
+    let wait = Duration::from_secs(1);
+    let rig = rig(Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+    waiting_to_be_tried_again(&rig, "3EB0DUE").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     // Begun well within its wait and ended past it, with nothing to wake the scheduler after it.
     rig.media.look_slowly(wait * 2);
     rig.until(ANA, "3EB0DUE", "downloaded from the phone's upload once tried again", previewed).await;
     let asks = rig.world.asked().iter().filter(|k| matches!(k, pb::command::Kind::MediaRetry(_))).count();
     assert_eq!(asks, 2, "the ask that couldn't reach the phone, then the one that did");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_ends_while_the_scheduler_looks_brings_one_more_look_not_a_spin() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let wait = Duration::from_secs(1);
+    let rig = rig(Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+    let schedule = &rig.media.inner.schedule;
+    waiting_to_be_tried_again(&rig, "3EB0DUE").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // No look can take the photo, nor write anything that would wake the scheduler again.
+    schedule.refuse_reads.store(true, SeqCst);
+    rig.media.look_slowly(wait * 2);
+    let began = tokio::time::timeout(Duration::from_secs(10), async {
+        while !schedule.next_look_pause.lock().unwrap().is_zero() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    assert!(began.await.is_ok(), "the slow look never began");
+    // The slow look counted itself before it took its pause.
+    let slow = schedule.looks.load(SeqCst);
+    // Past the slow look's end, and long enough for a spin to make thousands of looks.
+    tokio::time::sleep(wait * 2 + Duration::from_secs(2)).await;
+    let looks = schedule.looks.load(SeqCst) - slow;
+    schedule.refuse_reads.store(false, SeqCst);
+    // One, the look its wait brought, whose read failed as well; none if the slow look began after
+    // the wait ended; one more if a wake that came as it began waited until it was over. A spin
+    // makes thousands.
+    assert!(looks <= 2, "{looks} looks after the slow one, whose wait ended during it");
+    assert!(!previewed(&rig.row(ANA, "3EB0DUE").await), "nothing was read, so nothing was done");
+    schedule.wake();
+    rig.until(ANA, "3EB0DUE", "downloaded once reads work again and a wake comes", previewed).await;
 }
 
 /// The audit's A3: a photo that arrives while a window shows history is done ahead of what the
