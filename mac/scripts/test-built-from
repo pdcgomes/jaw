@@ -283,7 +283,7 @@ for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work mise.lo
     .mise/config.toml .config/mise.toml .config/mise/config.toml .tool-versions mise/tasks/new .config/mise.local.toml \
     .miserc.toml .config/miserc.toml mise.macos.toml mise.x.local.toml .config/mise.x.toml mac/mise.toml \
     .MISE/config.toml .Config/mise/config.toml .CARGO/config.toml Rust-Toolchain.toml mac/.mise/config.toml \
-    mac/mise-tasks/mac mac/.config/mise.toml; do
+    mac/mise-tasks/mac mac/.config/mise.toml mac/mise/config.toml mac/.mise-tasks/mac; do
     n=$((n + 1))
     copy "new-$n"
     mkdir -p "$(dirname "$new")"
@@ -302,6 +302,15 @@ mkdir "$scratch/settings"
 echo '# new' > "$scratch/settings/mise.toml"
 ln -s "$scratch/settings" .config
 says "a new .config, a symlink to a folder outside the checkout that holds a mise.toml" changed "main at $at, $changed"
+n=0
+for new in .MISE/config.toml Rust-Toolchain.toml; do
+    n=$((n + 1))
+    copy "staged-$n"
+    mkdir -p "$(dirname "$new")"
+    echo '# new' > "$new"
+    git add "$new"
+    says "a new $new, staged" changed "main at $at, $changed"
+done
 n=0
 for input in mise.toml mise/tasks/engine scripts/version VERSION; do
     n=$((n + 1))
@@ -323,6 +332,17 @@ echo more >> crates/lib.rs
 git update-index --assume-unchanged crates/lib.rs
 says "a file under crates changed, which git is told to assume unchanged" changed \
     "main at $at, with files jawd is built from whose changes git is told to ignore"
+copy assumed-case
+mkdir .MISE
+echo '[env]' > .MISE/config.toml
+git add .MISE/config.toml
+git commit -q -m 'on origin/main, with a .MISE/config.toml'
+git update-ref refs/remotes/origin/main HEAD
+m="$(git rev-parse --short HEAD)"
+echo more >> .MISE/config.toml
+git update-index --assume-unchanged .MISE/config.toml
+says "a .MISE/config.toml on origin/main changed, which git is told to assume unchanged" changed \
+    "main at $m, with files jawd is built from whose changes git is told to ignore"
 copy skipped
 echo more >> crates/lib.rs
 git update-index --skip-worktree crates/lib.rs
@@ -400,6 +420,18 @@ aged
 touch -t 200001010000 mac/.mise.local.toml
 echo '[env]' > mac/.mise.local.toml
 says "a mac/.mise.local.toml on origin/main written since the file it's given, its content the same" changed \
+    "main at $m, with what jawd is built from written since $since" "$PWD" "$since"
+copy written-folder
+mkdir mac/.mise
+echo '[env]' > mac/.mise/config.toml
+git add mac/.mise/config.toml
+git commit -q -m 'on origin/main, with a mac/.mise/config.toml'
+git update-ref refs/remotes/origin/main HEAD
+m="$(git rev-parse --short HEAD)"
+aged
+touch -t 200001010000 mac/.mise mac/.mise/config.toml
+echo '[env]' > mac/.mise/config.toml
+says "a mac/.mise/config.toml on origin/main written since the file it's given, its content the same" changed \
     "main at $m, with what jawd is built from written since $since" "$PWD" "$since"
 
 copy locks
