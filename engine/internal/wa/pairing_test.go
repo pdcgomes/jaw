@@ -361,6 +361,47 @@ func TestLinkStartRefusesOnlyALinkedAccountOrALinkFinishingAndClearsOneThatCant(
 	}
 }
 
+func TestLinkStartWaitsForTheDeviceALogoutOrAFailedLinkLeftToBeCleared(t *testing.T) {
+	// whatsmeow has deleted the device, and the engine hasn't heard the logout yet.
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	e.reach = &fakeReach{}
+	if err := e.cli().Store.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if reply := replyTo(t, jawd, 1, linkStart()); !refused(reply, notCleared, true) {
+		t.Fatalf("linking while whatsmeow deletes the device got %v", reply)
+	}
+
+	// The phone logged the account out, and session.db can't be written, so renew can't clear it.
+	e, jawd, closeLink = linkedEngine(t)
+	defer closeLink()
+	e.reach = &fakeReach{}
+	old := e.cli()
+	if err := e.container.Close(); err != nil {
+		t.Fatal(err)
+	}
+	go e.handleFrom(old, &events.LoggedOut{Reason: events.ConnectFailureMainDeviceGone})
+	if said := recv(t, jawd).GetEvent().GetConnection(); said.GetState() != enginepb.Connection_LOGGED_OUT {
+		t.Fatalf("a logout said %v", said)
+	}
+	if reply := replyTo(t, jawd, 2, linkStart()); !refused(reply, notCleared, true) || e.cli() != old {
+		t.Fatalf("linking with the logged-out device not cleared got %v", reply)
+	}
+
+	// A half-made device that can't finish, which linking clears first, but can't renew.
+	e, jawd, closeLink = unlinkedEngine(t, &fakeReach{})
+	defer closeLink()
+	client := e.cli()
+	pairedByThePhone(t, e, client)
+	if err := e.container.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reply := replyTo(t, jawd, 3, linkStart()); !refused(reply, notCleared, true) || e.half(client) {
+		t.Fatalf("linking with the half-made device not cleared got %v", reply)
+	}
+}
+
 func TestAPairingThatFailsOnceWhatsmeowHasGivenTheDeviceItsIDLeavesNoDevice(t *testing.T) {
 	jid := types.JID{User: "351910000001", Device: 22, Server: types.DefaultUserServer}
 	for _, c := range []struct {
