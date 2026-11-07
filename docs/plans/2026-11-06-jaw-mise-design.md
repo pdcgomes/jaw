@@ -10,7 +10,7 @@ jaw has no such script: `make mac` builds Jaw.app and signs it with the Develope
 
 ## Decisions
 
-- **mise first, then the Mac app's release** (Owner, 6 Nov), so the release is written as mise tasks among the others, with nothing left calling make. Neither was to land before `v0.1.0` was tagged, since the 0.1.0 checklist (`docs/releases/0.1.0-publish.md`) and its formula used make; then the owner said to land this one overnight without waiting for it (Owner, 6 Nov, 21:19). So if 0.1.0 is cut from the new main, its notes and checklist say mise's commands (62b1f8a9), and its tarball and the tap's formula install with `mise/tasks/install`.
+- **mise first, then the Mac app's release** (Owner, 6 Nov), so the release is written as mise tasks among the others, with nothing left calling make. Neither was to land before `v0.1.0` was tagged, since the 0.1.0 checklist (`docs/releases/0.1.0-publish.md`) and its formula used make; then the owner said to land this one overnight without waiting for it (Owner, 6 Nov, 21:19). The owner then tagged `v0.1.0` first, at fdeba680 on 7 November at 05:30, so 0.1.0 ships with make: its notes, checklist, tarball and formula keep make's commands, and the next release is the first with mise's.
 - **The Makefile is deleted in the same branch** (Owner, 6 Nov), which changes the rules, the READMEs, CI and the Homebrew formula with it. Not a stub that prints the mise command, and not a Makefile that runs the mise tasks.
 - **One file per task in `mise/tasks/`** (Owner, 6 Nov), as the owner's other projects have them, rather than tasks inline in `mise.toml`'s `[tasks]`, which Homebrew couldn't run without mise.
 - **One `mise.toml`, at the root** (Owner, 6 Nov), holding `mac/mise.toml`'s tools and settings; `mac/mise.toml` goes.
@@ -35,9 +35,10 @@ swiftlint = { version = "0.65.0", os = ["macos"] }
 task.run_auto_install = false
 
 [env]
-# Signing and identity. To override one on a machine, set it in the environment or in
-# ~/.config/mise/config.toml: built-from counts a .mise.local.toml here as an uncommitted change,
-# so a Jaw built with one wouldn't start jawd on an account's folder.
+# Signing and identity. Under mise these win over the environment and mise's global config; only
+# a .mise.local.toml here overrides them, and built-from counts that as an uncommitted change, so a
+# Jaw built with one won't start jawd on an account's folder. mac/scripts/bundle run without mise
+# takes JAW_TEAM_ID from the environment.
 JAW_TEAM_ID = "3JP75Z3F98"
 JAW_BUNDLE_ID = "dev.badcoffee.jaw"
 # notarytool's keychain profile for the team's Apple ID, which Redlamp shares with Drift Station.
@@ -103,7 +104,7 @@ The formula (`packaging/homebrew/jaw.rb`) runs the task itself:
 
 Homebrew needs no mise, so it never installs Tuist; the files land where they do today, so the formula's test is unchanged. The tarball holds `mise/tasks/`, as `.gitattributes` keeps nothing out, and `git archive` keeps the files' modes.
 
-If 0.1.0 is cut from the new main, as it is when this lands first, its tarball has `mise/tasks/install`, and the tap's formula for 0.1.0, which `mise run release` fills in from this one, runs that; so `brew install --HEAD`, which builds main with the tap's formula, keeps working. If `v0.1.0` is tagged before this lands, its formula keeps `make install`, which its tarball has, and HEAD fails with it until the next release puts the new formula in the tap. The tap is made by 0.1.0's checklist, still to be run, so nobody installs from HEAD yet.
+`v0.1.0` was tagged before this landed (fdeba680, 7 November), so 0.1.0's tarball has the Makefile, and the tap's formula for 0.1.0 keeps `make install`, which works with it. `brew install --HEAD`, which builds main with the tap's formula, fails from this landing until the next release puts the new formula, running `mise/tasks/install`, in the tap; the tap is made by 0.1.0's checklist, so nobody has installed from HEAD yet.
 
 ## Building from source
 
@@ -128,7 +129,7 @@ The README's install section and `docs/first-run.md` say `mise run install`, `PR
 - **Comments and docstrings:** `crates/jaw-proto/src/local.rs`, `crates/jaw/src/bench.rs`, `crates/jawd/build.rs`, `crates/jawd/src/demo/mod.rs`, `crates/jawd/tests/installed.rs`, `crates/jawd/src/store/write/outbox.rs`, `scripts/perf.py`, `scripts/prune-builds.py`, `marketing/jaw-in-a-minute/jaw.py`, `engine/cmd/jaw-engine/main.go`, and `proto/engine/engine.proto`, with the Go generated from it, which copies its comment.
 - **`scripts/release.sh`'s two mentions elsewhere:** the formula's first comment and a case in `mac/scripts/test-built-from`.
 
-The records keep what they say: `docs/audits/`, `docs/reviews/`, `docs/releases/` (but 0.1.0's notes and checklist, which say mise's commands while 0.1.0 is still to be released from the new main) and the dated plans, about 400 mentions, each saying what was run when it was written.
+The records keep what they say: `docs/audits/` (but its README, which says how the audits are checked), `docs/reviews/`, `docs/releases/` (0.1.0's notes and checklist with them, since 0.1.0 was tagged before this landed) and the dated plans, about 400 mentions, each saying what was run when it was written.
 
 ### The data layer
 
@@ -141,7 +142,7 @@ Added while planning, on 6 November. `mac/scripts/built-from` calls a Jaw `chang
 ## How it lands
 
 - **Built** on the branch `mise`, in `~/src/jaw-mise`, from origin/main.
-- **Lands overnight, without waiting for `v0.1.0`** (Owner, 6 Nov, 21:19), with the gate any branch passes and the database expert's approved note. If `v0.1.0` isn't tagged by then, 0.1.0 is cut from the new main: its notes and checklist, still to be run against it, say mise's commands (62b1f8a9), its tarball and the tap's formula use `mise/tasks/install`, and `brew install --HEAD` keeps working. Tagging the commit before the landing would release 0.1.0 with make, as its notes and checklist first said.
+- **Lands overnight, without waiting for `v0.1.0`** (Owner, 6 Nov, 21:19), with the gate any branch passes and the database expert's approved note. `v0.1.0` was tagged first, at fdeba680 on 7 November, so 0.1.0 ships with make: its notes and checklist keep make's commands, and the commit that had moved them to mise's (Task 14, Step 12) was dropped at the landing.
 - **`mac-menus` and `mac-perf` change the Makefile too:** `mac-perf` adds `perf-mac` and a line in `mac-test`. A branch that lands after this one moves its own make lines into tasks as it rebases; if this one lands after them, it moves theirs.
 - **The coordinator is told** when it lands: its briefs and gate scripts, kept outside the repository, call make's targets.
 
@@ -164,4 +165,4 @@ Added while planning, on 6 November. `mac/scripts/built-from` calls a Jaw `chang
   - Its questions: Sparkle's updates now, or with the Mac plan's Mac-M5 step 8; one version and tag for the terminal and the app, or the app's own (`mac/Version.xcconfig` says 0.1.0-prealpha); whether `mise run release` publishes, as Redlamp's does, or prints the commands, as jaw's does; and a Homebrew cask, named so it doesn't clash with the formula's `jaw`.
   - Making the disk image mounts it, which the agents' sandbox refuses (as Redlamp's scripts say), so the release is run in the owner's own terminal.
 - **Pinning Rust and Go,** if it's wanted later, in `rust-toolchain.toml` and in `engine/go.mod`'s `toolchain` line, which every cargo and go here reads, mise's tasks' included, rather than in `mise.toml`.
-- **`brew install --HEAD`,** if `v0.1.0` is tagged before this lands, works again once the next release's formula is in the tap; if 0.1.0 is cut from the new main, it keeps working.
+- **`brew install --HEAD`** works again once the next release's formula is in the tap, `v0.1.0` having been tagged before this landed.

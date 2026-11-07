@@ -23,8 +23,8 @@ as_needed() {
     shift
     if [ -w "$folder" ]; then "$@"; else sudo "$@"; fi
 }
-# Both folders before either copy, with sudo for one you can't write, so that sudo asks before
-# anything is replaced and a cancelled prompt leaves nothing half-installed.
+# Both folders before either copy, with sudo for one you can't write, so that sudo's first prompt
+# comes before anything is replaced.
 for folder in "$bindir" "$libexecdir"; do
     if ! mkdir -p "$folder" 2>/dev/null || [ ! -w "$folder" ]; then
         sudo mkdir -p "$folder"

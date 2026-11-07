@@ -10,9 +10,10 @@ swiftlint = { version = "0.65.0", os = ["macos"] }
 task.run_auto_install = false
 
 [env]
-# Signing and identity. To override one on a machine, set it in the environment or in
-# ~/.config/mise/config.toml: built-from counts a .mise.local.toml here as an uncommitted change,
-# so a Jaw built with one wouldn't start jawd on an account's folder.
+# Signing and identity. Under mise these win over the environment and mise's global config; only
+# a .mise.local.toml here overrides them, and built-from counts that as an uncommitted change, so a
+# Jaw built with one won't start jawd on an account's folder. mac/scripts/bundle run without mise
+# takes JAW_TEAM_ID from the environment.
 JAW_TEAM_ID = "3JP75Z3F98"
 JAW_BUNDLE_ID = "dev.badcoffee.jaw"
 # notarytool's keychain profile for the team's Apple ID, which Redlamp shares with Drift Station.
