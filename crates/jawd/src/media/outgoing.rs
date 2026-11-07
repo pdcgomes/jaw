@@ -91,9 +91,23 @@ pub(super) struct Sending {
     pub hold_hd: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub hd_held: std::sync::atomic::AtomicUsize,
+    /// How long the next look takes once it has gone through what's to do, as a test has it.
+    #[cfg(test)]
+    next_look_pause: Mutex<Duration>,
+    /// The looks begun since jawd started, as a test counts them.
+    #[cfg(test)]
+    looks: std::sync::atomic::AtomicU64,
 }
 
 impl Sending {
+    /// Has the runner look at what's to do now and take `pause` once it has gone through it, as a
+    /// busy machine's look may.
+    #[cfg(test)]
+    fn look_slowly(&self, pause: Duration) {
+        *self.next_look_pause.lock().expect("sending") = pause;
+        self.wake();
+    }
+
     #[cfg(test)]
     fn hd_held_while_made(&self, cancel: &Cancel) {
         use std::sync::atomic::Ordering::SeqCst;
@@ -168,8 +182,11 @@ impl Sending {
         self.later.lock().expect("sending").get(&outbox).is_some_and(|(at, _)| *at > Instant::now())
     }
 
-    fn next_try(&self) -> Option<Instant> {
-        self.later.lock().expect("sending").values().map(|(at, _)| *at).filter(|at| *at > Instant::now()).min()
+    /// When the next copy waiting may be tried again, of those whose wait ends after `looked`, when
+    /// the last look began: one whose wait ended during the look may have been passed over by it,
+    /// so it's due now.
+    fn next_try(&self, looked: Instant) -> Option<Instant> {
+        self.later.lock().expect("sending").values().map(|(at, _)| *at).filter(|at| *at > looked).min()
     }
 
     fn try_later(&self, outbox: i64, first: Duration, most: Duration) {
@@ -421,10 +438,13 @@ async fn drop_some(inner: &Arc<Inner>) -> anyhow::Result<bool> {
 async fn run(inner: Arc<Inner>) {
     loop {
         let woken = inner.sending.wake.notified();
+        let looked = Instant::now();
+        #[cfg(test)]
+        inner.sending.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Err(e) = take(&inner).await {
             eprintln!("jawd: can't read which copies of your files are to make or upload: {e:#}");
         }
-        let next = inner.sending.next_try();
+        let next = inner.sending.next_try(looked);
         tokio::select! {
             () = woken => {}
             () = async {
@@ -441,6 +461,8 @@ async fn run(inner: Arc<Inner>) {
 /// copies to make together, so a photo is decoded once for both and a video's SD copy is made, and
 /// uploads, while its HD one is.
 async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    let pause = std::mem::take(&mut *inner.sending.next_look_pause.lock().expect("sending"));
     let copies = inner.store.reads().query(Priority::Interactive, |db| outgoing::to_do(db, AT_ONCE)).await?;
     let busy = |copy: &Copy| inner.sending.running(copy.outbox) || inner.sending.waiting(copy.outbox);
     let mut files: Vec<Vec<Copy>> = Vec::new();
@@ -498,6 +520,10 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
             drop(running);
             doing.sending.wake();
         });
+    }
+    #[cfg(test)]
+    if !pause.is_zero() {
+        tokio::time::sleep(pause).await;
     }
     Ok(())
 }

@@ -855,6 +855,62 @@ async fn an_upload_that_fails_on_the_way_is_tried_again_and_one_refused_fails_un
     assert_eq!(rig.world.uploads().len(), 5, "uploaded again from where it got to, not made again");
 }
 
+/// Sends a photo of yours whose first upload fails, and waits until that upload's job has ended,
+/// the photo waiting to be uploaded again; says its message's ID.
+async fn upload_failed_once(rig: &Rig, picked: &Path) -> String {
+    rig.world.fail_uploads(1);
+    let path = yours(picked, "a.jpg", &Picture::lake(640, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let ended = until(Duration::from_secs(60), || {
+        !rig.world.uploads().is_empty() && rig.media.inner.sending.running.lock().unwrap().is_empty()
+    });
+    assert!(ended.await, "its first upload never failed");
+    answer["messages"][0].as_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_whose_wait_ends_while_the_sender_looks_is_tried_again_with_nothing_else_to_wake_it() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let wait = Duration::from_secs(1);
+    let rig = Rig::with(home.path(), world(), Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+    let id = upload_failed_once(&rig, picked.path()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Begun well within its wait and ended past it, with nothing to wake the sender after it.
+    rig.media.inner.sending.look_slowly(wait * 2);
+    rig.until(&id, "sent once its upload is tried again", sent).await;
+    assert_eq!(rig.world.uploads().len(), 2, "the upload that failed, then the one that didn't");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_ends_while_the_sender_looks_brings_one_more_look_not_a_spin() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let wait = Duration::from_secs(1);
+    let rig = Rig::with(home.path(), world(), Config { retry_first: wait, retry_most: wait, ..quick() }).await;
+    let sending = &rig.media.inner.sending;
+    let id = upload_failed_once(&rig, picked.path()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    rig.world.gate_uploads(true);
+    sending.look_slowly(wait * 2);
+    let began = until(Duration::from_secs(10), || sending.next_look_pause.lock().unwrap().is_zero());
+    assert!(began.await, "the slow look never began");
+    // The slow look counted itself before it took its pause.
+    let slow = sending.looks.load(SeqCst);
+    let held = until(Duration::from_secs(60), || rig.files(UPLOADS).iter().any(|f| f.ends_with(".part"))).await;
+    // Long enough for a spin to make thousands of looks.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let looks = sending.looks.load(SeqCst) - slow;
+    rig.world.gate_uploads(false);
+    assert!(held, "its upload was never tried again");
+    // One, the look its wait brought, which took the upload; none if the slow look began after the
+    // wait ended and took it itself; one more if a wake that came as it began waited until it was
+    // over. A spin makes thousands.
+    assert!(looks <= 2, "{looks} looks after the slow one, whose wait ended during it");
+    rig.until(&id, "sent once its upload goes on", sent).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_copy_jaw_db_cant_say_is_made_or_uploaded_fails_its_message_rather_than_going_round_again() {
     let home = tempfile::tempdir().unwrap();
