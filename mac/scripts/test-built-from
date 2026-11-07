@@ -69,7 +69,7 @@ base="$scratch/base"
 git init -q -b main "$base"
 inside "$base"
 mkdir -p crates engine proto protocol mac/scripts docs scripts mise/tasks
-printf '.DS_Store\ntarget/\n' > .gitignore
+printf '.DS_Store\ntarget/\n.mise.local.toml\n' > .gitignore
 echo '[workspace]' > Cargo.toml
 echo '# the lock' > Cargo.lock
 echo 'pub fn jawd() {}' > crates/lib.rs
@@ -218,6 +218,19 @@ if got="$(GIT_DIR="$base/.git" GIT_WORK_TREE="$base" "$built_from" "$PWD" 2>&1)"
 else
     fail "$what" "$(printf 'wanted:\n%s\ngot:\n%s' "$want" "$got")"
 fi
+n=0
+for setting in GIT_LITERAL_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1; do
+    n=$((n + 1))
+    copy "pathspecs-$n"
+    echo '# new' > mise.x.toml
+    what="a new mise.x.toml, with $setting"
+    want="$(printf 'changed\nmain at %s, %s' "$at" "$changed")"
+    if got="$(env "$setting" "$built_from" "$PWD" 2>&1)" && [ "$got" = "$want" ]; then
+        echo "ok: $what"
+    else
+        fail "$what" "$(printf 'wanted:\n%s\ngot:\n%s' "$want" "$got")"
+    fi
+done
 copy core-worktree
 echo more >> crates/lib.rs
 git config core.worktree "$base"
@@ -266,13 +279,22 @@ for new in go.work .cargo/config.toml; do
     says "a new $new that origin/main's .gitignore leaves out" changed "main at $m, $changed"
 done
 n=0
-for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work mise.local.toml .mise.toml .mise.local.toml .mise/config.toml .config/mise.toml .config/mise/config.toml .tool-versions mise/tasks/new; do
+for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work mise.local.toml .mise.toml .mise.local.toml \
+    .mise/config.toml .config/mise.toml .config/mise/config.toml .tool-versions mise/tasks/new .config/mise.local.toml \
+    .miserc.toml .config/miserc.toml mise.macos.toml mise.x.local.toml .config/mise.x.toml mac/mise.toml; do
     n=$((n + 1))
     copy "new-$n"
     mkdir -p "$(dirname "$new")"
     echo '# new' > "$new"
     says "a new $new" changed "main at $at, $changed"
 done
+copy new-mac-local
+echo '# new' > mac/.mise.local.toml
+says "a new mac/.mise.local.toml, which origin/main's .gitignore leaves out" changed "main at $at, $changed"
+copy new-case
+echo '# new' > .Mise.local.toml
+says "a new .Mise.local.toml, which mise reads for .mise.local.toml where the volume ignores case" changed \
+    "main at $at, $changed"
 n=0
 for input in mise.toml mise/tasks/engine scripts/version VERSION; do
     n=$((n + 1))
@@ -280,6 +302,15 @@ for input in mise.toml mise/tasks/engine scripts/version VERSION; do
     echo more >> "$input"
     says "$input changed" changed "main at $at, $changed"
 done
+copy deleted-setting
+echo '[env]' > mise.ci.toml
+echo '[env]' > mise.dev.toml
+git add mise.ci.toml mise.dev.toml
+git commit -q -m 'on origin/main, with mise.ci.toml and mise.dev.toml'
+git update-ref refs/remotes/origin/main HEAD
+m="$(git rev-parse --short HEAD)"
+rm mise.dev.toml
+says "mise.dev.toml deleted, beside a mise.ci.toml, both on origin/main" changed "main at $m, $changed"
 copy assumed
 echo more >> crates/lib.rs
 git update-index --assume-unchanged crates/lib.rs
@@ -352,6 +383,17 @@ rm crates/new.rs
 says "a new file under crates made and removed again since the file it's given" changed \
     "main at $at, with what jawd is built from written since $since" "$PWD" "$since"
 refuses "given a file that isn't there" "$PWD" "$scratch/missing"
+copy written-setting
+echo '[env]' > mac/.mise.local.toml
+git add -f mac/.mise.local.toml
+git commit -q -m 'on origin/main, with a mac/.mise.local.toml'
+git update-ref refs/remotes/origin/main HEAD
+m="$(git rev-parse --short HEAD)"
+aged
+touch -t 200001010000 mac/.mise.local.toml
+echo '[env]' > mac/.mise.local.toml
+says "a mac/.mise.local.toml on origin/main written since the file it's given, its content the same" changed \
+    "main at $m, with what jawd is built from written since $since" "$PWD" "$since"
 
 copy locks
 touch -t 200001010000 crates/lib.rs

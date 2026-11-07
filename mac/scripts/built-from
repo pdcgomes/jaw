@@ -8,7 +8,10 @@
 # has that checkout's main for it; "changed" is a tree with uncommitted changes to what jawd and
 # jaw-engine are built from, Cargo's, rustup's and go's settings beside them, mise's tasks and settings and what
 # gives the version included, which the app's own sources, the docs and the READMEs aren't; and a
-# tree outside git says branch. It reads origin/main by its whole ref, which a branch or tag called
+# tree outside git says branch. mise's tasks and settings are the folders mise/, .mise/ and
+# .config/mise/, and at the top, in .config/ and in mac/, where mise run mac may start, every
+# file whose name has mise in it and ends .toml, has miserc in it or is .tool-versions, whatever
+# its case, which the volume ignores. It reads origin/main by its whole ref, which a branch or tag called
 # origin/main can't stand in for; counts as a change every untracked file but a .DS_Store, whatever
 # an ignore file or status.showUntrackedFiles says, since Cargo runs a new build.rs and go compiles a
 # new .go file however git is told to ignore it, and every file git is told to assume unchanged or
@@ -19,22 +22,29 @@
 # stand for another; and stops when git can't read the tree, so mise run mac records nothing. Given a
 # file as well, it says changed when anything jawd is built from was written since that file was,
 # so mise run mac sees a change made and undone while it built. What it can't see: a change a filter of
-# git's hides, a file made at the checkout's top and removed again since the file given, a change
-# undone with its files' times put back, or kept with them put back within the second git last read
-# the files, since git may compare ctime only to the second, and settings outside the checkout,
-# Cargo's and go's own and the environment's. It only reads: git takes none of its optional locks.
+# git's hides, a file made at the checkout's top, in .config/ or in mac/ and removed again since the
+# file given, a change undone with its files' times put back, or kept with them put back within the
+# second git last read the files, since git may compare ctime only to the second, mise's settings in
+# other folders, such as mac/.mise/, or in .mise/ and .config/mise/ named in another case, and
+# settings outside the checkout, Cargo's, go's and mise's own (mise's global config, a parent
+# folder's) and the environment's. It only reads: git takes none of its optional locks.
 #
 #   mac/scripts/built-from [<checkout> [<since>]]   # this script's own checkout by default
-set -eu
+set -euf
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+    GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 # /var/empty is root's and always empty, so git finds no grafts there.
 export GIT_OPTIONAL_LOCKS=0 GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/var/empty/grafts
 host=github.com
 name=pdcgomes/jaw
 inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work"
-inputs="$inputs mise.toml mise.local.toml .mise.toml .mise.local.toml mise .mise .config/mise.toml .config/mise"
-inputs="$inputs .tool-versions scripts/version VERSION"
+inputs="$inputs mise .mise .config/mise scripts/version VERSION"
+# mise's settings at the top, in .config/ and in mac/: patterns git matches whatever the case, whose *
+# never crosses a /, and which reach git as written, since set -f turns the shell's globbing off.
+settings=":(icase,glob)*mise*.toml :(icase,glob).config/*mise*.toml :(icase,glob)mac/*mise*.toml"
+settings="$settings :(icase,glob)*miserc* :(icase,glob).config/*miserc* :(icase,glob)mac/*miserc*"
+settings="$settings :(icase,glob).tool-versions :(icase,glob).config/.tool-versions :(icase,glob)mac/.tool-versions"
 since=${2:-}
 cd "${1:-$(dirname "$0")/../..}"
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -50,16 +60,27 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
 changes=$(git -c core.fsmonitor=false -c core.trustctime=true -c core.checkStat=default \
-    status --porcelain --untracked-files=no --ignore-submodules=none -- $inputs)
-others=$(git -c core.fsmonitor=false ls-files --others -- $inputs)
+    status --porcelain --untracked-files=no --ignore-submodules=none -- $inputs $settings)
+# No pattern of the settings reaches two folders down: git, told to leave out every folder there, lists
+# the same files and reads only the top and its folders, where it would walk all of target/ for them.
+others=$(git -c core.fsmonitor=false ls-files --others -- $inputs &&
+    git -c core.fsmonitor=false ls-files --others --exclude='/*/*/' -- $settings)
 untracked=$(printf '%s\n' "$others" | sed '/\/\.DS_Store$/d')
-tracked=$(git -c core.fsmonitor=false ls-files -v -- $inputs)
+tracked=$(git -c core.fsmonitor=false ls-files -v -- $inputs $settings)
 unwatched=$(printf '%s\n' "$tracked" | sed -n '/^[^H]/p')
 written=
 if [ -n "$since" ]; then
     for input in $inputs; do
         if [ -e "$input" ] || [ -L "$input" ]; then
             found=$(find "$input" ! -name .DS_Store -newer "$since")
+            written="$written$found"
+        fi
+    done
+    # The files the settings' patterns name, which find matches in each of their three folders as git does.
+    for folder in . .config mac; do
+        if [ -d "$folder" ]; then
+            found=$(find "$folder" -maxdepth 1 \
+                \( -iname '*mise*.toml' -o -iname '*miserc*' -o -iname .tool-versions \) -newer "$since")
             written="$written$found"
         fi
     done
