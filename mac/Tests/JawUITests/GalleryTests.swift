@@ -137,6 +137,24 @@ func card(_ id: String, _ half: Slot = .dark, of preferences: Preferences, in ho
     return NSPoint(x: CGFloat(left + right) / 4, y: host.bounds.height - CGFloat(top + bottom) / 4)
 }
 
+/// The middle of the last word drawn across `host`, the window's content, in the height of `row`: the
+/// last stretch of light ink in the pane's picture, as the appearance's radio buttons, which SwiftUI
+/// draws, have no view of their own to ask where each is, and the view of AppKit's that takes their keys
+/// covers them as each macOS lays them out, on macOS 27.2 reaching past Light's word.
+@MainActor
+func lastWord(in row: NSRect, of host: NSView) throws -> NSPoint {
+    let image = try picture(host, on: RGBA(0x1E1E1E))
+    let p = pixels(image)
+    let rows = Int((host.bounds.height - row.maxY) * 2) ..< Int((host.bounds.height - row.minY) * 2)
+    let inked = (0 ..< image.width).filter { x in rows.contains { y in (0 ..< 3).contains { p[(y * image.width + x) * 4 + $0] > 150 } } }
+    var words: [ClosedRange<Int>] = []
+    for x in inked {
+        if let last = words.last, x - last.upperBound <= 6 { words[words.count - 1] = last.lowerBound ... x } else { words.append(x ... x) }
+    }
+    let word = try #require(words.last, "a word is drawn in the row")
+    return NSPoint(x: CGFloat(word.lowerBound + word.upperBound) / 4, y: row.midY)
+}
+
 @MainActor @Test(.timeLimit(.minutes(1))) func `the arrows choose card after card with no click and no keyboard navigation, previewing each from where they started, and the gallery scrolls to each`() async throws {
     let preferences = try scratchPreferences("gallery-keys")
     preferences.served = try allOmarchy()
@@ -248,10 +266,10 @@ func card(_ id: String, _ half: Slot = .dark, of preferences: Preferences, in ho
     let scroll = try #require(views(host).lazy.compactMap { $0 as? NSScrollView }.first)
     let radios = try #require(views(scroll.contentView).first { $0.acceptsFirstResponder },
                               "the appearance's radio buttons, which SwiftUI draws, have a view of AppKit's to take the keys")
-    let row = radios.convert(radios.bounds, to: nil)
+    let light = try lastWord(in: radios.convert(radios.bounds, to: nil), of: host)
     window.makeFirstResponder(nil)
-    try await click(NSPoint(x: row.maxX - Space.l, y: row.midY), in: window)
-    #expect(preferences.appearance == .light, "a click on Light, the last radio button, sets the appearance, as it did")
+    try await click(light, in: window)
+    #expect(preferences.appearance == .light, "a click on Light, the last radio button's word, sets the appearance, as it did")
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "and gives the gallery the keys")
 }
 
