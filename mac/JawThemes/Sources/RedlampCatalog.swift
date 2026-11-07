@@ -4,7 +4,7 @@
 
 import Foundation
 
-/// A theme's ten colors, in the layout omoi-station's themes are authored in. jaw's roles come from
+/// A theme's ten colours, in the layout omoi-station's themes are authored in. jaw's roles come from
 /// these by `RedlampRoles`.
 public struct ThemePalette: Sendable, Hashable {
     public var background, card, foreground, muted, primary, accent, border, success, destructive, neutral: RGBA

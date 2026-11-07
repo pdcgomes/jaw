@@ -7,7 +7,9 @@
 mac/JawThemes/Sources/RedlampCatalog.swift holds the data of Redlamp's catalog, its owner having
 relicensed it for jaw under jaw's MIT licence on 6 November 2026: between its `// sync-themes: <region>`
 markers, line for line as Redlamp has it, its families' ten HSL colours (`families`), the Redlamp
-family's two palettes (`redlamp`) and the brand's nine colours they're made of (`brand`). Redlamp's
+family's two palettes (`redlamp`) and the brand's nine colours they're made of (`brand`). The families
+Redlamp lists before those, its own, are written out by hand, so the families' IDs and names are
+compared in order too, Neutral's left out, as jaw makes Neutral from Redlamp's tokens. Redlamp's
 repository is private, so this reads a checkout of it, ~/src/darkroom or the folder REDLAMP names, with
 `git show` at REDLAMP_COMMIT, never checking anything out, fetching or writing there; with no checkout,
 as in CI, it says so and checks nothing. --check also says what the checkout's own main has changed in
@@ -34,28 +36,37 @@ BRAND = "packages/RedlampDesign/Sources/Tokens/Brand.swift"
 PALETTE = "packages/RedlampDesign/Sources/Tokens/Palette.swift"
 REGIONS = ("families", "redlamp", "brand")
 MARKED = r"(^[ ]*// sync-themes: {}\n)(.*?)(^[ ]*// sync-themes: end$)"
+# A family as either catalog lists it: written out, `ThemeFamily(id: "redlamp", displayName: "Redlamp", …`
+# in Redlamp's and `Family(id: "redlamp", name: "Redlamp", …` in jaw's copy, or `family("kanagawa", "Kanagawa", …`.
+FAMILY = re.compile(r'\b(?:Theme)?Family\(id: "([^"]+)", (?:displayName|name): "([^"]+)"|\bfamily\("([^"]+)", "([^"]+)"')
 
 
 def checkout() -> Path:
     return Path(os.environ.get("REDLAMP") or Path.home() / "src" / "darkroom")
 
 
+def named(rev: str) -> str:
+    """A revision as the messages say it: main, or the pinned commit's short hash."""
+    return rev if rev == "main" else rev[:9]
+
+
 def show(where: Path, rev: str, path: str) -> str:
-    """A file of Redlamp's at `rev`, read without touching the checkout; a checkout without `rev`
-    stops this, saying what to fetch there, which this never does itself."""
+    """A file of Redlamp's at `rev`, read without touching the checkout, and without fetching a blob
+    a partial clone lacks; a checkout without `rev` stops this, saying what to fetch there, which
+    this never does itself."""
     try:
         return subprocess.run(
             ["git", "-C", str(where), "show", f"{rev}:{path}"],
             check=True,
             capture_output=True,
             text=True,
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"},
         ).stdout
     except subprocess.CalledProcessError as e:
         sys.exit(f"sync-themes: {where} has no {path} at {rev}, so fetch {rev} there first ({e.stderr.strip()})")
 
 
-def families(catalog: str) -> list[str]:
+def families(catalog: str, rev: str) -> list[str]:
     """The families' lines, from omoi-station's classic palettes to the last of its originals."""
     lines = catalog.splitlines()
     start = next((i for i, line in enumerate(lines) if line.strip() == "// omoi-station classic palettes"), None)
@@ -64,21 +75,27 @@ def families(catalog: str) -> list[str]:
         None,
     )
     if start is None or end is None:
-        sys.exit("sync-themes: Redlamp's catalog doesn't have its families where it did")
+        sys.exit(f"sync-themes: Redlamp's catalog at {named(rev)} doesn't have its families where it did: look at {CATALOG} there")
     return lines[start:end]
 
 
-def palettes(catalog: str) -> list[str]:
+def palettes(catalog: str, rev: str) -> list[str]:
     """The Redlamp family's two palettes, as written, with a blank line between them."""
     blocks = re.findall(r"^    static let redlamp(?:Dark|Light) = ThemePalette\(\n.*?^    \)$", catalog, re.S | re.M)
     if len(blocks) != 2:
-        sys.exit("sync-themes: Redlamp's catalog doesn't have the Redlamp family's two palettes where it did")
+        sys.exit(f"sync-themes: Redlamp's catalog at {named(rev)} doesn't have the Redlamp family's two palettes where it did: look at {CATALOG} there")
     return "\n\n".join(blocks).splitlines()
 
 
 def brand(text: str) -> list[str]:
     """The brand's colours, one line each, as jaw's copy nests them."""
     return [f"        static let {name} = {value}" for name, value in re.findall(r"static let (\w+) = (RGBA\(red: [^)]*\))", text)]
+
+
+def listed(catalog: str) -> list[str]:
+    """The families a catalog lists, each `<id> <name>`, in its order, Neutral's left out."""
+    found = [f"{m.group(1) or m.group(3)} {m.group(2) or m.group(4)}" for m in FAMILY.finditer(catalog)]
+    return [family for family in found if not family.startswith("neutral ")]
 
 
 def neutral(palette: str) -> Optional[str]:
@@ -94,7 +111,12 @@ def neutral(palette: str) -> Optional[str]:
 
 def wanted(where: Path, rev: str) -> dict[str, list[str]]:
     catalog = show(where, rev, CATALOG)
-    return {"families": families(catalog), "redlamp": palettes(catalog), "brand": brand(show(where, rev, BRAND))}
+    return {
+        "families": families(catalog, rev),
+        "redlamp": palettes(catalog, rev),
+        "brand": brand(show(where, rev, BRAND)),
+        "listed": listed(catalog),
+    }
 
 
 def present(copy: str) -> dict[str, list[str]]:
@@ -104,14 +126,15 @@ def present(copy: str) -> dict[str, list[str]]:
         if not found:
             sys.exit(f"sync-themes: {COPY.relative_to(ROOT)} has no `// sync-themes: {name}` region")
         out[name] = found.group(2).rstrip("\n").splitlines()
+    out["listed"] = listed(copy)
     return out
 
 
 def written(copy: str, regions: dict[str, list[str]]) -> str:
-    for name, lines in regions.items():
+    for name in REGIONS:
         copy = re.sub(
             MARKED.format(name),
-            lambda m, lines=lines: m.group(1) + "\n".join(lines) + "\n" + m.group(3),
+            lambda m, lines=regions[name]: m.group(1) + "\n".join(lines) + "\n" + m.group(3),
             copy,
             count=1,
             flags=re.S | re.M,
@@ -127,28 +150,40 @@ def main() -> None:
     if not (where / ".git").exists():
         print(f"sync-themes: no checkout of Redlamp at {where}, so nothing is checked (REDLAMP names another)")
         return
-    pinned = wanted(where, REDLAMP_COMMIT)
     copy = COPY.read_text()
-    if not args.check:
-        COPY.write_text(written(copy, pinned))
-        print(f"sync-themes: {COPY.relative_to(ROOT)} has Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
-        return
     have = present(copy)
-    differs = [name for name in REGIONS if have[name] != pinned[name]]
+    pinned = wanted(where, REDLAMP_COMMIT)
+    short = named(REDLAMP_COMMIT)
+    if not args.check:
+        copy = written(copy, pinned)
+        COPY.write_text(copy)
+        if listed(copy) != pinned["listed"]:
+            print(f"sync-themes: the families' IDs and names differ from Redlamp's at {short}, and {COPY.relative_to(ROOT)} "
+                  "writes out those before its regions by hand:")
+            sys.stdout.writelines(difflib.unified_diff([l + "\n" for l in pinned["listed"]], [l + "\n" for l in listed(copy)], "redlamp", "jaw"))
+            sys.exit(1)
+        print(f"sync-themes: {COPY.relative_to(ROOT)} has Redlamp's catalog at {short}")
+        return
+    differs = [name for name in (*REGIONS, "listed") if have[name] != pinned[name]]
     for name in differs:
-        print(f"sync-themes: {name} differs from Redlamp's at {REDLAMP_COMMIT[:9]}:")
+        said = "the families' IDs and names differ" if name == "listed" else f"{name} differs"
+        print(f"sync-themes: {said} from Redlamp's at {short}:")
         sys.stdout.writelines(difflib.unified_diff([l + "\n" for l in pinned[name]], [l + "\n" for l in have[name]], "redlamp", "jaw"))
+    if not differs:
+        print(f"sync-themes: jaw's copy is Redlamp's catalog at {short}")
+    sys.stdout.flush()
     moved = wanted(where, "main")
     for name in REGIONS:
         if moved[name] != pinned[name]:
-            print(f"sync-themes: Redlamp's main has changed {name} since {REDLAMP_COMMIT[:9]}: move REDLAMP_COMMIT to take it")
+            print(f"sync-themes: Redlamp's main has changed {name} since {short}: move REDLAMP_COMMIT to take it")
+    if moved["listed"] != pinned["listed"]:
+        print(f"sync-themes: Redlamp's main lists other families than {short}: move REDLAMP_COMMIT to take them")
+        sys.stdout.writelines(difflib.unified_diff([l + "\n" for l in pinned["listed"]], [l + "\n" for l in moved["listed"]], short, "main"))
     now, then = neutral(show(where, "main", PALETTE)), neutral(show(where, REDLAMP_COMMIT, PALETTE))
     if now is None or then is None:
         print("sync-themes: Neutral's tokens aren't written in Redlamp's Tokens/Palette.swift as they were: look at RedlampRoles.neutral")
     elif now != then:
-        print(f"sync-themes: Redlamp's main has changed Neutral's tokens since {REDLAMP_COMMIT[:9]}: look at RedlampRoles.neutral")
-    if not differs:
-        print(f"sync-themes: jaw's copy is Redlamp's catalog at {REDLAMP_COMMIT[:9]}")
+        print(f"sync-themes: Redlamp's main has changed Neutral's tokens since {short}: look at RedlampRoles.neutral")
     sys.exit(1 if differs else 0)
 
 
