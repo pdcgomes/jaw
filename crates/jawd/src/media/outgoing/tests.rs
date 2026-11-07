@@ -2,6 +2,7 @@
 //! and uploaded by the demo engine, and sent through the outbox, with their rows as interfaces read
 //! them, the files left in jaw's folder, and what the demo's WhatsApp was given.
 
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1425,6 +1426,8 @@ async fn killed(home: &Path, picked: &Path, scene: &str) -> String {
     use std::io::{BufRead, BufReader};
     let (home, picked, scene) = (home.to_path_buf(), picked.to_path_buf(), scene.to_string());
     tokio::task::spawn_blocking(move || {
+        // In a process group of its own, so the kill takes the ffmpeg a scene runs with it, as a power
+        // cut would: one left running writes its partial file again once the next start has removed it.
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["media::outgoing::tests::a_scene_of_media_out_to_be_killed", "--exact", "--ignored", "--nocapture"])
             .env(SCENE_HOME, &home)
@@ -1432,19 +1435,27 @@ async fn killed(home: &Path, picked: &Path, scene: &str) -> String {
             .env(SCENE, &scene)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .process_group(0)
             .spawn()
             .unwrap();
         let pid = child.id() as libc::pid_t;
+        // The watchdog is stopped before the child is reaped: once it is, the system may give its PID
+        // to any other process.
+        let (stop, stopping) = std::sync::mpsc::channel::<()>();
         let watchdog = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(90));
-            // SAFETY: kill only sends a signal to the child this test started.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            if stopping.recv_timeout(Duration::from_secs(90)) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // SAFETY: kill only sends a signal, to the child's process group, which is stuck by now
+                // and whose leader is still unreaped, so the group is still its.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
         });
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let said = lines.map_while(Result::ok).find_map(|line| line.strip_prefix("AT ").map(str::to_string));
-        child.kill().unwrap();
+        // SAFETY: kill only sends a signal, to the child's process group, whose leader is unreaped.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        drop(stop);
+        watchdog.join().unwrap();
         child.wait().unwrap();
-        drop(watchdog);
         said.unwrap_or_else(|| panic!("the scene {scene} never got to where it stops"))
     })
     .await
@@ -1461,6 +1472,16 @@ fn partial(home: &Path, folder: &str) -> bool {
     std::fs::read_dir(home.join(folder))
         .map(|entries| entries.filter_map(Result::ok).any(|e| e.file_name().to_string_lossy().ends_with(".part")))
         .unwrap_or(false)
+}
+
+/// Whether ffmpeg is writing a copy made under a name of its own: its partial file, with something
+/// in it. jaw's copy of your file is a partial file there too, for a moment, before the copy's is
+/// claimed, and the copy's is claimed before ffmpeg starts.
+fn ffmpeg_writing(home: &Path) -> bool {
+    std::fs::read_dir(home.join(OUTGOING)).into_iter().flatten().filter_map(Result::ok).any(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        name.contains(".made.") && name.ends_with(".part") && e.metadata().is_ok_and(|m| m.len() > 0)
+    })
 }
 
 /// The scenes `killed` runs, each in a process of its own; run on its own, it does nothing.
@@ -1493,7 +1514,7 @@ fn a_scene_of_media_out_to_be_killed() {
                 );
                 let answer = send(json!([{ "path": video }])).await.unwrap();
                 loop {
-                    if partial(home, OUTGOING) {
+                    if ffmpeg_writing(home) {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
