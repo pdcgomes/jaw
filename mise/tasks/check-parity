@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Every request and push the terminal uses and the Mac doesn't has a step of the parity plan in mac/parity.toml (-- --terminal <branch> reads a branch before it lands; -- --table lists each with each side's use)"
 set -euo pipefail
+unset CDPATH
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 exec python3 scripts/check-parity.py "$@"

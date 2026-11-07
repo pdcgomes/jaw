@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="The Rust workspace for debug: target/debug/jawd, target/debug/jaw and the rest"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "rust takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 "${CARGO:-cargo}" build --workspace

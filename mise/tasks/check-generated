@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-#MISE description="Generate the engine's code again, and fail if it or proto/whatsapp/ differs from what's committed"
+#MISE description="Generate the engine's code again, and fail if it differs from what's committed, or proto/whatsapp/ from what engine/go.mod pins"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "check-generated takes no arguments" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/../.."
 "$here/proto"

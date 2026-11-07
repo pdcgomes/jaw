@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="The engine's Go code from proto/engine, with buf v1.74.0 and protoc-gen-go at the version engine/go.mod pins"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "proto takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 go="${GO:-go}"
 # protoc-gen-go is built again whenever engine/go.mod is newer than it.

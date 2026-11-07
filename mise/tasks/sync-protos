@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Copy the .proto files whatsmeow ships into proto/whatsapp/, from the version engine/go.mod pins (scripts/sync-protos.py; -- --check only checks)"
 set -euo pipefail
+unset CDPATH
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 exec python3 scripts/sync-protos.py "$@"

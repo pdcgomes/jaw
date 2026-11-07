@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Every commit since origin/main that touches the data layer names an approved audit (scripts/check-data-audit.py)"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "check-audit takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 exec python3 scripts/check-data-audit.py origin/main HEAD

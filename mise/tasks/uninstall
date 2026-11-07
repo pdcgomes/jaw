@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="Take out what mise run install put in, with the same PREFIX (sudo only for folders you can't write)"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "uninstall takes no arguments; set PREFIX and the rest in the environment, as PREFIX=~/.local mise run uninstall" >&2; exit 2; }
 destdir="${DESTDIR:-}"
 prefix="${PREFIX:-/usr/local}"
 bindir="$destdir${BINDIR:-$prefix/bin}"
@@ -10,11 +12,22 @@ as_needed() {
     shift
     if [ -w "$folder" ]; then "$@"; else sudo "$@"; fi
 }
+# Takes out whichever of the files exist, and calls nothing when none do, so it never asks for a
+# password to remove nothing.
+remove() {
+    folder="$1"
+    shift
+    for f in "$@"; do
+        shift
+        if [ -e "$f" ] || [ -L "$f" ]; then set -- "$@" "$f"; fi
+    done
+    if [ $# -gt 0 ]; then as_needed "$folder" rm -f "$@"; fi
+}
 if [ -d "$bindir" ]; then
-    as_needed "$bindir" rm -f "$bindir/jaw" "$bindir/jawd"
+    remove "$bindir" "$bindir/jaw" "$bindir/jawd"
 fi
 if [ -d "$libexecdir" ]; then
-    as_needed "$libexecdir" rm -f "$libexecdir/jaw-engine"
+    remove "$libexecdir" "$libexecdir/jaw-engine"
     if [ -z "$(ls -A "$libexecdir")" ]; then
         as_needed "$(dirname "$libexecdir")" rmdir "$libexecdir"
     fi

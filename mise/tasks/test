@@ -2,6 +2,8 @@
 #MISE description="jaw-engine, then Go's tests with -race and the Rust workspace's"
 #MISE alias="t"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "test takes no arguments" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/../.."
 "$here/engine"

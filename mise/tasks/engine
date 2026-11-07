@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="jaw-engine in target/engine/, stamped with the version jaw and jawd say (scripts/version)"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "engine takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 version="$(sh scripts/version)"
 cd engine

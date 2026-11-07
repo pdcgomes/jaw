@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="jaw, jawd and jaw-engine built for release and installed: jaw and jawd in PREFIX/bin, jaw-engine in PREFIX/libexec/jaw (PREFIX is /usr/local unless set; sudo only for folders you can't write)"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "install takes no arguments; set PREFIX and the rest in the environment, as PREFIX=~/.local mise run install" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/../.."
 destdir="${DESTDIR:-}"
@@ -16,16 +18,18 @@ fi
 for built in target/release/jaw target/release/jawd target/engine/jaw-engine; do
     [ -x "$built" ] || { echo "install: nothing to install yet; run mise run install as yourself" >&2; exit 1; }
 done
-copy() {
+as_needed() {
     folder="$1"
     shift
-    if mkdir -p "$folder" 2>/dev/null && [ -w "$folder" ]; then
-        install -m 755 "$@" "$folder"
-    else
-        sudo mkdir -p "$folder"
-        sudo install -m 755 "$@" "$folder"
-    fi
+    if [ -w "$folder" ]; then "$@"; else sudo "$@"; fi
 }
-copy "$bindir" target/release/jaw target/release/jawd
-copy "$libexecdir" target/engine/jaw-engine
+# Both folders before either copy, with sudo for one you can't write, so that sudo asks before
+# anything is replaced and a cancelled prompt leaves nothing half-installed.
+for folder in "$bindir" "$libexecdir"; do
+    if ! mkdir -p "$folder" 2>/dev/null || [ ! -w "$folder" ]; then
+        sudo mkdir -p "$folder"
+    fi
+done
+as_needed "$bindir" install -m 755 target/release/jaw target/release/jawd "$bindir"
+as_needed "$libexecdir" install -m 755 target/engine/jaw-engine "$libexecdir"
 echo "==> jaw and jawd in $bindir, jaw-engine in $libexecdir"

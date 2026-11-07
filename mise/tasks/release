@@ -10,6 +10,8 @@
 # JAW_URL is where Homebrew will download the tarball, the GitHub release's by default, and JAW_TAP
 # the tap's repository, pdcgomes/homebrew-jaw by default.
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "release takes no arguments" >&2; exit 2; }
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"

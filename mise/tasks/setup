@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="One-time setup for a clone: the pre-push hook, in the hooks folder every worktree shares, which refuses a push to main whose data-layer commits name no approved audit"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "setup takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 hooks="$(git rev-parse --git-common-dir)/hooks"
 mkdir -p "$hooks"

@@ -2,6 +2,8 @@
 #MISE description="jaw-engine, then the Rust workspace: target/engine/jaw-engine, target/debug/jawd and target/debug/jaw"
 #MISE alias="b"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "build takes no arguments" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$here/engine"
 "$here/rust"

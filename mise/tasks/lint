@@ -2,6 +2,8 @@
 #MISE description="go vet, gofmt, rustfmt, and clippy with warnings as errors"
 #MISE alias="l"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "lint takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 (cd engine && "${GO:-go}" vet ./...)
 unformatted="$(gofmt -l engine)"

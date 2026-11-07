@@ -4,8 +4,15 @@ tuist = { version = "4.197.3", os = ["macos"] }
 swiftformat = { version = "0.62.1", os = ["macos"] }
 swiftlint = { version = "0.65.0", os = ["macos"] }
 
+[settings]
+# mise run runs a task without installing the tools above first, so one that fails to download
+# stops no task; mise exec, which bundle and build-mac run Tuist with, still installs it.
+task.run_auto_install = false
+
 [env]
-# Signing and identity. Override per machine in .mise.local.toml if needed.
+# Signing and identity. To override one on a machine, set it in the environment or in
+# ~/.config/mise/config.toml: built-from counts a .mise.local.toml here as an uncommitted change,
+# so a Jaw built with one wouldn't start jawd on an account's folder.
 JAW_TEAM_ID = "3JP75Z3F98"
 JAW_BUNDLE_ID = "dev.badcoffee.jaw"
 # notarytool's keychain profile for the team's Apple ID, which Redlamp shares with Drift Station.

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="Format the engine with gofmt and the Rust workspace with rustfmt"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "fmt takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 gofmt -w engine
 "${CARGO:-cargo}" fmt --all

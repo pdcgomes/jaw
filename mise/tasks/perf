@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Every budget in the design, on release builds against a made-up million-message account, as one table in target/perf/ (scripts/perf.py says how; -- --quick leaves out the slowest, -- --small checks the harness)"
 set -euo pipefail
+unset CDPATH
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/../.."
 "$here/engine"

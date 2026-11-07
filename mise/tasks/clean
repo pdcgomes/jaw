@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="cargo clean: this checkout's whole target/, which costs it a full build (mise run prune-builds frees most of it without one)"
 set -euo pipefail
+unset CDPATH
+[ $# -eq 0 ] || { echo "clean takes no arguments" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 "${CARGO:-cargo}" clean
