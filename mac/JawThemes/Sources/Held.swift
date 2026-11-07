@@ -112,14 +112,24 @@ public extension Roles {
         colour.opacity(0.16)
     }
 
-    /// What JawUI draws a word or a mark in on a fill of the theme's own colours: on the accent's, the
-    /// unread count, the ▶, ♪ and × on a voice note's or an audio file's disc, a poll's chosen ✓, a
-    /// filled button's symbol and the "new ↓" pill; a muted chat's count on the dim text and the @ on
-    /// the mention colour. The ground in dark and white in light, which read at 3:1 or more on each in
-    /// every theme: the hold keeps the dim text and mentions so, Redlamp's bands Neutral's accent under
-    /// any of the system's, and the tests pin the rest.
+    /// What JawUI draws a word or a mark in on `fill`, a fill of the theme's own colours: on the
+    /// accent's, the unread count, the ▶, ♪ and × on a voice note's or an audio file's disc, a poll's
+    /// chosen ✓, a filled button's symbol and the "new ↓" pill; a muted chat's count on the dim text and
+    /// the @ on the mention colour. The ground in dark and white in light wherever that reads at 3:1 or
+    /// more on the fill, as it does on each in every theme this build has, the hold keeping the dim text
+    /// and mentions so and Redlamp's bands Neutral's accent under any of the system's; elsewhere, as on
+    /// a pale accent a theme a newer jawd serves could bring, whichever of that and white in dark, or the
+    /// text in light, reads more.
+    func onFill(_ fill: RGBA) -> RGBA {
+        let kept = isDark ? ground : RGBA(0xFFFFFF)
+        guard Contrast.ratio(kept.hex, fill.hex) < 3 else { return kept }
+        let other = isDark ? RGBA(0xFFFFFF) : text
+        return Contrast.ratio(other.hex, fill.hex) > Contrast.ratio(kept.hex, fill.hex) ? other : kept
+    }
+
+    /// `onFill(_:)` on the accent, where most of those marks are drawn.
     var onFill: RGBA {
-        isDark ? ground : RGBA(0xFFFFFF)
+        onFill(accent)
     }
 
     /// A base's colour, the band as it's drawn on the window's ground.

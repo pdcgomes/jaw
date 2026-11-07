@@ -553,7 +553,7 @@ final class ChatCell: NSView {
     func badge(_ text: String, right: CGFloat, fill: RGBA, _ roles: Roles) -> CGFloat {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: TextStyle.caption.emphasised,
-            .foregroundColor: roles.onFill.nsColor,
+            .foregroundColor: roles.onFill(fill).nsColor,
         ]
         let s = NSAttributedString(string: text, attributes: attributes)
         let w = badgeWidth(text)

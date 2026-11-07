@@ -98,14 +98,15 @@ public final class IconButton: NSControl {
 
     override public func draw(_: NSRect) {
         guard let roles else { return }
+        let fill = hovering ? roles.accent.mixed(with: roles.text, 0.15) : roles.accent
         if filled {
-            (hovering ? roles.accent.mixed(with: roles.text, 0.15) : roles.accent).nsColor.setFill()
+            fill.nsColor.setFill()
             NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
         } else if hovering {
             roles.selection.nsColor.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: Radius.small, yRadius: Radius.small).fill()
         }
-        let colour = filled ? roles.onFill.nsColor : (hovering ? Tone.primary : tone).color(roles).nsColor
+        let colour = filled ? roles.onFill(fill).nsColor : (hovering ? Tone.primary : tone).color(roles).nsColor
         var x = Space.m
         if let image = symbol.isEmpty ? nil : NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
             .withSymbolConfiguration(configuration.applying(.init(hierarchicalColor: colour)))

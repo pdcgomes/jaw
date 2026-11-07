@@ -208,6 +208,26 @@ let heldSenders: [String: Int] = [
             "the count on its badge, in the accent as written, at 3.42:1 at the least, in Rosé Pine")
 }
 
+@Test func `a mark on a fill keeps the ground in dark and white in light wherever that reads at 3:1 on it, as in every half there is, and otherwise takes whichever reads more`() throws {
+    var pale = Catalog.jaw.light
+    pale.accent = RGBA(0xF4E27A)
+    #expect(Contrast.ratio(0xFFFFFF, pale.accent.hex) < 3, "white on a pale accent, as a newer jawd's theme could bring")
+    #expect(pale.onFill(pale.accent) == pale.text && Contrast.ratio(pale.onFill.hex, pale.accent.hex) >= 3, "takes the text there")
+    var deep = Catalog.jaw.dark
+    deep.accent = RGBA(0x2A2F6E)
+    #expect(Contrast.ratio(deep.ground.hex, deep.accent.hex) < 3, "and the ground on a deep one in dark")
+    #expect(deep.onFill(deep.accent) == RGBA(0xFFFFFF) && Contrast.ratio(deep.onFill.hex, deep.accent.hex) >= 3, "takes white there")
+    var halves = Catalog.themes(omarchy: try servedThemes(), accent: .blue).flatMap { theme in Slot.allCases.compactMap { theme.roles($0) } }
+    for accent in systemAccents {
+        halves += Slot.allCases.compactMap { Catalog.neutral(accent).roles($0) }
+    }
+    for r in halves {
+        for fill in [r.accent, r.accent.mixed(with: r.text, 0.15), r.tertiary, r.mention] {
+            #expect(r.onFill(fill) == (r.isDark ? r.ground : RGBA(0xFFFFFF)), "every half there is keeps its marks' colour exactly")
+        }
+    }
+}
+
 /// The system's accents as AppKit draws them on macOS 27.2, light then dark: each colour System
 /// Settings offers, Graphite as the system's grey, and the system's blue beside the default accent;
 /// and orange, yellow and green as AppKit drew them before macOS 26.
