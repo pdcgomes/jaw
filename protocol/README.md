@@ -63,7 +63,7 @@ The first request on a connection. Anything else first gets error 6.
 ```
 
 - `root`: jaw's folder. Every `path` jawd sends is relative to it, and the files are readable by the same user.
-- `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects (`offline` when jawd has no engine to run). If the account was logged out meanwhile, a `connection` push says `logged_out` once the engine finds out, with a `reason`: WhatsApp's, or `this device isn't linked any more` when the engine finds no device. A folder never linked says `unlinked`, and so does one from a jawd before this, until its engine connects.
+- `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects (`offline` when jawd has no engine to run). If the account was logged out meanwhile, a `connection` push says `logged_out` once the engine finds out, with a `reason`: WhatsApp's, or `this device isn't linked any more` when the engine finds no device. A folder never linked says `unlinked`, and so does one from a jawd before this, until its engine connects. A link the phone has paired isn't `linked` until it has finished, when the `link` push says `done`.
 - `connection.state`: as the `connection` push below.
 - `settings`: the settings of the connection's own domain, the one its `client` names, with the values in effect, as "Settings" says; absent for a client jawd keeps no settings for.
 
@@ -246,9 +246,9 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `settings.set` | any of `theme`, `messages` | `settings`, all of them, once kept. See Settings |
 | `themes` | | `themes`: every theme with its colours. See Settings |
 | `focus` | `focused` | |
-| `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
-| `link.cancel` | | |
-| `link.logout` | | Answered once the account is logged out and jawd has forgotten it; a `connection` push says `logged_out` (`logged out from jaw`), on the connection that asked just after the answer |
+| `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes. Refused (`not_allowed`) while an account is linked, whatever hello said, since the engine knows; and (`engine_unavailable`) while a link the phone has paired is connected and finishing. One the phone paired that can't finish is cleared first, and linking starts afresh |
+| `link.cancel` | | Stops linking the phone hasn't paired yet; a link it has paired finishes or fails by itself, and a linked account stays connected, so an interface can ask it whenever its linking screen goes |
+| `link.logout` | | Logs the account out with WhatsApp, which removes the device, and is answered once the engine has deleted it from `session.db` and jawd has forgotten the account, with a synced commit; the messages stay. A `connection` push says `logged_out` (`logged out from jaw`), on the connection that asked just after the answer. Refused (`not_allowed`) when no account is linked, and (`engine_unavailable`) when WhatsApp can't be reached to be told, the account linked as it was |
 | `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows, and `since` and `have` when watching again | `watch`, `seq`, `total`, `rows`, `remove` (with `have`); `older` and `newer` for messages; `typing` but for the folder tree, and `presence` for a one-to-one chat's messages (see Presence and typing in chats) |
 | `watch.move` | `watch`, `around`, `before`, `after`, and `open` for a chat list | As its watch's, with only the rows the client lacks and `remove`; a library window keeps its kind and filters |
 | `unwatch` | `watch` | |
@@ -312,7 +312,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 
 | Push | Params |
 | --- | --- |
-| `link` | `state`: `qr` with `code` and `expires`, `code` with the phone `code` to type, `done`, or `failed` with `reason` |
+| `link` | `state`: `qr` with `code` and `expires`, `code` with the phone `code` to type, `done` with the account's `phone` once linking has finished (the phone has paired, and the engine has connected with the new device), or `failed` with `reason`. After `failed`, `link.start` starts afresh: whatever device a link the phone had paired left, WhatsApp having refused it or a minute having passed without its connection, the engine has cleared |
 | `connection` | `state`: `connecting`, `online`, `catching_up` (with `done` and `total`), `phone_offline`, `offline`, `logged_out`, `update_needed`, `banned` (with `until`) or `engine_restarting` |
 | `settings` | its domain's settings, as hello's `settings` |
 | `typing` | `chat`, `who` (each `id`, `name` and `state`, `typing` or `recording`; empty once nobody is) |

@@ -34,7 +34,7 @@ class Jaw < Formula
       jaw is a linked device, as WhatsApp Web is. Run `jaw`, then on the phone go to
       WhatsApp › Settings › Linked devices › Link a device and scan the code jaw shows;
       `jaw link --phone 351912345678`, with your number, gives a code to type instead.
-      To unlink it, log it out on the phone, in Linked devices.
+      `jaw unlink` logs it out again, as Linked devices on the phone does.
 
       jaw starts jawd, the daemon that keeps your chats, when it isn't running, and
       `jaw agent install` starts it at login and again if it stops. After an upgrade
