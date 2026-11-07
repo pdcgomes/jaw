@@ -308,6 +308,7 @@ fn link(socket: &Path, phone: Option<String>, out: &mut impl std::io::Write) -> 
                 writeln!(out, "Linked {phone}. jawd is fetching your history; jaw status says how far it has got.")?;
                 return Ok(());
             }
+            LinkStep::Failed { belongs_to: Some(number), .. } => bail!(data::kept_for(&number)),
             LinkStep::Failed { reason, .. } => bail!(reason),
         }
     }
@@ -530,6 +531,25 @@ mod tests {
         let jawd = Answering::new(unlinked(), failing);
         let failed = link(&jawd.socket, None, &mut Vec::new()).unwrap_err();
         assert_eq!(failed.to_string(), "WhatsApp refused the new device: 401");
+    }
+
+    #[test]
+    fn jaw_link_says_which_number_the_folder_belongs_to_when_the_phone_linked_another() {
+        let refusing = |_: &str| {
+            let reason = "the phone linked +351919999999, and this folder keeps +351910000001's messages";
+            let code = link_push(json!({ "state": "code", "code": "ABCD-EFGH" }));
+            let failed = link_push(json!({ "state": "failed", "reason": reason, "belongs_to": "+351910000001" }));
+            (json!({}), vec![code, failed])
+        };
+        let jawd = Answering::new(unlinked(), refusing);
+        let mut out = Vec::new();
+        let failed = link(&jawd.socket, Some("351919999999".into()), &mut out).unwrap_err();
+        assert_eq!(
+            failed.to_string(),
+            "this folder belongs to +351910000001, whose messages jaw keeps in it, so only +351910000001 links here: \
+            link it, or start jaw on a folder of its own for the other account, with JAW_HOME=<folder> jaw"
+        );
+        assert!(String::from_utf8(out).unwrap().contains("then type ABCD-EFGH"), "the code shown first");
     }
 
     #[test]

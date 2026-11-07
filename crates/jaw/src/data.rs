@@ -1111,6 +1111,15 @@ impl OtherJawd {
     }
 }
 
+/// What jaw says when the phone linked another account than `number`, whose messages this folder
+/// keeps (`link`'s `belongs_to`), which alone links here until jaw can choose what becomes of them.
+pub fn kept_for(number: &str) -> String {
+    format!(
+        "this folder belongs to {number}, whose messages jaw keeps in it, so only {number} links here: \
+        link it, or start jaw on a folder of its own for the other account, with JAW_HOME=<folder> jaw"
+    )
+}
+
 /// What arrives on the main thread's channel from jawd, or from the made-up account.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {

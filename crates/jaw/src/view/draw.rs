@@ -1243,6 +1243,12 @@ impl View {
                 text.push(Line::from("The QR code needs a bigger window;"));
                 text.push(Line::from("p links with a code typed on the phone instead."));
             }
+            Some(LinkStep::Failed { belongs_to: Some(number), .. }) => {
+                let said = format!("Linking failed: {}.", crate::data::kept_for(number));
+                for l in layout::wrap(&[(said, Style::new().fg(t.warn))], right_w, right_w) {
+                    text.push(Line::from(l.into_iter().map(|(s, style)| Span::styled(s, style)).collect::<Vec<_>>()));
+                }
+            }
             Some(LinkStep::Failed { reason, .. }) => {
                 text.push(Line::from(Span::styled(format!("Linking failed: {reason}"), Style::new().fg(t.warn))));
             }

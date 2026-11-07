@@ -636,6 +636,22 @@ fn a_link_that_failed_offers_to_link_again_and_enter_starts_afresh() {
 }
 
 #[test]
+fn another_number_refused_says_which_number_the_folder_belongs_to_and_what_to_do() {
+    let (mut v, rx) = view_in(State::Linking, 100, 36);
+    let reason = "the phone linked +351919999999, and this folder keeps +351910000001's messages".to_string();
+    v.apply(Update::Link(LinkStep::Failed { reason, belongs_to: Some("+351910000001".into()) }));
+    let screen = frame(&mut v);
+    let said = screen.split(|c: char| c == '│' || c.is_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>();
+    let words = "Linking failed: this folder belongs to +351910000001, whose messages jaw keeps in it, so only \
+        +351910000001 links here: link it, or start jaw on a folder of its own for the other account, with \
+        JAW_HOME=<folder> jaw.";
+    assert!(said.join(" ").contains(words), "jaw's words, whole:\n{screen}");
+    assert!(screen.contains("⏎ link again"), "{screen}");
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("It changes in"), "Enter links again");
+}
+
+#[test]
 fn the_header_says_how_the_connection_is() {
     for (state, said) in [
         (State::CatchingUp, "online · catching up 1,204 of 5,000 ━"),

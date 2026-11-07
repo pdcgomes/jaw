@@ -441,6 +441,49 @@ fn logged_out_from_jaw_jaw_unlink_asks_first_keeps_the_messages_and_jaw_link_lin
     assert!(ok && said == "jaw is already linked to +351910000001; jaw unlink logs it out\n", "{said}");
 }
 
+/// jaw's words when the phone linked another account than the one whose messages the folder keeps.
+const BELONGS: &str = "this folder belongs to +351910000001, whose messages jaw keeps in it, so only +351910000001 \
+    links here: link it, or start jaw on a folder of its own for the other account, with JAW_HOME=<folder> jaw";
+
+#[test]
+fn after_a_logout_another_number_is_refused_saying_whose_folder_it_is_and_that_number_links_again() {
+    let jawd = Jawd::demo(&[]);
+    let stored = status_of(jawd.home()).and_then(|s| s.stored).expect("jawd says what it stores");
+    let (ok, said) = jaw(jawd.home(), &["unlink", "--yes"], "");
+    assert!(ok && said.contains("Logged out."), "{said}");
+    jawd.until("jaw to be logged out", |s| s.account.state == AccountState::Unlinked);
+    let (ok, said) = jaw(jawd.home(), &["link", "--phone", "351919999999"], "");
+    assert!(
+        !ok && said.contains("then type DEMO-") && said.contains(BELONGS),
+        "the code typed on another's phone:\n{said}"
+    );
+    let now = status_of(jawd.home()).unwrap();
+    assert_eq!(now.account.state, AccountState::Unlinked, "nothing of the other account linked");
+    let kept = now.stored.expect("jawd says what it stores");
+    assert_eq!((kept.messages, kept.chats), (stored.messages, stored.chats), "nor stored");
+    let (ok, said) = jaw(jawd.home(), &["link"], "");
+    assert!(ok && said.contains("Linked +351910000001."), "the made-up account's phone links it:\n{said}");
+    jawd.until("jaw to be linked again", |s| {
+        s.connection.state == ConnectionState::Online
+            && s.account.me.as_ref().is_some_and(|me| me.phone == "+351910000001")
+    });
+}
+
+#[test]
+fn a_folder_that_keeps_no_accounts_messages_links_any_number() {
+    let home = tempfile::tempdir().unwrap();
+    let log = std::fs::File::create(home.path().join("jawd.log")).unwrap();
+    let mut jawd = command(jawd_binary(), home.path());
+    jawd.args(["--engine", "demo-unlinked"]).stdout(log.try_clone().unwrap()).stderr(log);
+    let jawd = Jawd { child: jawd.spawn().expect("jawd starts"), home };
+    jawd.until("the engine to run", |s| s.engine.state == "running" && s.account.state == AccountState::Unlinked);
+    let (ok, said) = jaw(jawd.home(), &["link", "--phone", "351919999999"], "");
+    assert!(ok && said.contains("then type DEMO-") && said.contains("Linked +351919999999."), "{said}");
+    jawd.until("the other number to be linked", |s| {
+        s.account.state == AccountState::Linked && s.account.me.as_ref().is_some_and(|me| me.phone == "+351919999999")
+    });
+}
+
 #[test]
 fn when_whatsapp_wants_a_newer_jaw_the_header_says_update_needed_and_reading_still_works() {
     let jawd = Jawd::demo(&["--fail", "outdated"]);
