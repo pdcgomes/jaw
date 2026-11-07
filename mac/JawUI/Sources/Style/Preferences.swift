@@ -57,14 +57,15 @@ public struct Style: Sendable, Hashable {
     }
 }
 
-/// The app's settings, kept in the user's defaults. Changing one redraws every window at once.
+/// The app's settings, kept in the user's defaults, each under its own key as it changes, but for one
+/// given for the run as an argument, which lasts the run. Changing one redraws every window at once.
 @MainActor @Observable
 public final class Preferences {
-    public var look: Look { didSet { save() } }
-    public var density: Density { didSet { save() } }
-    public var textSize: CGFloat { didSet { save() } }
-    public var font: MessageFont { didSet { save() } }
-    public var appearance: Appearance { didSet { save() } }
+    public var look: Look { didSet { save(look.rawValue, as: "look") } }
+    public var density: Density { didSet { save(density.rawValue, as: "density") } }
+    public var textSize: CGFloat { didSet { save(Double(textSize), as: "textSize") } }
+    public var font: MessageFont { didSet { save(font.rawValue, as: "font") } }
+    public var appearance: Appearance { didSet { save(appearance.rawValue, as: "appearance") } }
     /// The theme in each slot, by ID, kept as `themeDark` and `themeLight`. Any change but the
     /// gallery's arrows' own ends their run (`arrowsFrom`).
     public var slots: Slots {
@@ -73,7 +74,12 @@ public final class Preferences {
             listed = nil
             arrowsFrom = nil
             remember()
-            save()
+            if slots != oldValue {
+                for slot in Slot.allCases {
+                    write(slots[slot], as: Self.key(slot))
+                }
+            }
+            tell()
         }
     }
 
@@ -123,14 +129,17 @@ public final class Preferences {
     }
 
     /// How much panes without the keys are dimmed, 0 to 0.6.
-    public var paneDim: Double { didSet { save() } }
+    public var paneDim: Double { didSet { save(paneDim, as: "paneDim") } }
     /// Whether the focused pane is outlined, and in what colour: nil for the theme's accent.
-    public var paneOutline: Bool { didSet { save() } }
-    public var paneOutlineColour: RGBA? { didSet { save() } }
+    public var paneOutline: Bool { didSet { save(paneOutline, as: "paneOutline") } }
+    public var paneOutlineColour: RGBA? { didSet { save(paneOutlineColour.map { Int($0.hex) }, as: "paneOutlineColour") } }
     /// Whether photos and videos attached go in HD unless Tab says otherwise.
-    public var sendHD: Bool { didSet { save() } }
+    public var sendHD: Bool { didSet { save(sendHD, as: "sendHD") } }
 
     @ObservationIgnored let defaults: UserDefaults
+    /// The preferences given as arguments for this run, as `-themeDark omarchy:nord`: read before what's
+    /// kept, and never written, whatever the run changes, so the next run finds what was kept.
+    @ObservationIgnored let given: Set<String>
     @ObservationIgnored public var changed: [() -> Void] = []
     /// Each slot's roles and every theme there is, worked out once until what they rest on changes,
     /// since the app reads its style on every layout.
@@ -148,6 +157,7 @@ public final class Preferences {
     public init(defaults: UserDefaults = .standard, accent: SystemAccent? = nil, keeps: Bool = true) {
         self.keeps = keeps
         self.defaults = defaults
+        given = Set(defaults.volatileDomain(forName: UserDefaults.argumentDomain).keys)
         look = Look(rawValue: defaults.string(forKey: "look") ?? "") ?? .bubbles
         density = Density(rawValue: defaults.string(forKey: "density") ?? "") ?? .comfortable
         let size = defaults.double(forKey: "textSize")
@@ -165,21 +175,17 @@ public final class Preferences {
         sendHD = defaults.bool(forKey: "sendHD")
     }
 
-    func save() {
-        if keeps {
-            defaults.set(look.rawValue, forKey: "look")
-            defaults.set(density.rawValue, forKey: "density")
-            defaults.set(Double(textSize), forKey: "textSize")
-            defaults.set(font.rawValue, forKey: "font")
-            defaults.set(appearance.rawValue, forKey: "appearance")
-            defaults.set(slots.dark, forKey: "themeDark")
-            defaults.set(slots.light, forKey: "themeLight")
-            defaults.set(paneDim, forKey: "paneDim")
-            defaults.set(paneOutline, forKey: "paneOutline")
-            if let c = paneOutlineColour { defaults.set(Int(c.hex), forKey: "paneOutlineColour") } else { defaults.removeObject(forKey: "paneOutlineColour") }
-            defaults.set(sendHD, forKey: "sendHD")
-        }
+    /// Keeps `value` as `key`, or forgets what's kept there where it's nil, and tells the app.
+    func save(_ value: Any?, as key: String) {
+        write(value, as: key)
         tell()
+    }
+
+    /// Writes `value` as `key`, or removes it where it's nil, but for a snapshot's preferences, which
+    /// write nothing, and a preference given for the run.
+    func write(_ value: Any?, as key: String) {
+        guard keeps, !given.contains(key) else { return }
+        if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
     }
 
     /// Tells the app to draw again, as something it draws from has changed.
@@ -258,6 +264,11 @@ public final class Preferences {
         }
     }
 
+    /// Where a slot's theme is kept.
+    static func key(_ slot: Slot) -> String {
+        slot.isDark ? "themeDark" : "themeLight"
+    }
+
     /// Where a slot's copy of its Omarchy theme is kept.
     static func copy(_ slot: Slot) -> String {
         slot.isDark ? "themeDarkColours" : "themeLightColours"
@@ -265,10 +276,10 @@ public final class Preferences {
 
     /// Keeps a copy of each slot's Omarchy theme as jawd serves it, with its ID and name, and drops one
     /// jawd no longer serves, so the next launch draws what this one does before jawd answers; a
-    /// snapshot's preferences keep none.
+    /// snapshot's preferences keep none, and a slot given for the run leaves the copy of the one kept.
     func remember() {
         guard keeps, let served else { return }
-        for slot in Slot.allCases {
+        for slot in Slot.allCases where !given.contains(Self.key(slot)) {
             if let theme = served.first(where: { "omarchy:" + $0.id == slots[slot] && $0.dark == slot.isDark }) {
                 defaults.set(theme.colours.merging(["id": theme.id, "name": theme.name]) { $1 }, forKey: Self.copy(slot))
             } else {

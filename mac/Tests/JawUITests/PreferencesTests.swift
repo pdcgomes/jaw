@@ -64,6 +64,60 @@ import Testing
             "the copy of the slot's Omarchy theme too, though jawd served it with other colours and the slot left it")
 }
 
+/// A suite's defaults with preferences given for one run, as `-themeDark omarchy:nord` gives one to the
+/// app: read before what's kept, and the argument domain's, here the test's own, as the process's is
+/// shared by every test running beside it.
+final class GivenDefaults: UserDefaults {
+    var given: [String: Any] = [:]
+
+    override func object(forKey key: String) -> Any? {
+        given[key] ?? super.object(forKey: key)
+    }
+
+    override func volatileDomain(forName name: String) -> [String: Any] {
+        name == UserDefaults.argumentDomain ? given : super.volatileDomain(forName: name)
+    }
+}
+
+@MainActor @Test func `a preference given for one run is read before what's kept and never written, nor the copy of a slot given so, whatever the run changes`() throws {
+    let suite = "jaw.tests.slots-one-run"
+    let defaults = try #require(GivenDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let gruvbox = try omarchy("gruvbox"), white = try omarchy("white")
+    let darkCopy = gruvbox.colours.merging(["id": "gruvbox", "name": "Gruvbox", "accent": "#ff0000"]) { $1 }
+    let lightCopy = white.colours.merging(["id": "white", "name": "White"]) { $1 }
+    defaults.set("omarchy:gruvbox", forKey: "themeDark")
+    defaults.set(darkCopy, forKey: "themeDarkColours")
+    defaults.set("omarchy:white", forKey: "themeLight")
+    defaults.set(lightCopy, forKey: "themeLightColours")
+    defaults.set("light", forKey: "appearance")
+    defaults.set("bubbles", forKey: "look")
+    defaults.given = ["themeDark": "omarchy:nord", "appearance": "dark", "look": "lines"]
+    let run = Preferences(defaults: defaults, accent: .blue)
+    #expect(run.slots == Slots(dark: "omarchy:nord", light: "omarchy:white") && run.appearance == .dark && run.look == .lines,
+            "what's given for the run is read before what's kept")
+    run.served = try allOmarchy()
+    let arrowed = try #require(Gallery(run.themes, for: .dark, omarchyLine: nil).moving(from: run.slots.dark, .right))
+    run.preview(arrowed, for: .dark)
+    let kanagawa = try #require(run.themes.first { $0.id == "omarchy:kanagawa" })
+    run.choose(kanagawa, for: .dark, only: false)
+    run.appearance = .system
+    run.textSize = 15
+    #expect(arrowed.id == "omarchy:osaka-jade" && run.slots == Slots(dark: "omarchy:kanagawa", light: "omarchy:white"),
+            "an arrow, then a click on Kanagawa's card, drawn in the run")
+    defaults.given = [:]
+    let next = Preferences(defaults: defaults, accent: .blue)
+    #expect(next.slots == Slots(dark: "omarchy:gruvbox", light: "omarchy:white"),
+            "the next launch finds the owner's own slots, though the run chose for the one given")
+    #expect(next.appearance == .light && next.look == .bubbles, "and the appearance and the look as they were kept")
+    #expect(defaults.dictionary(forKey: "themeDarkColours") as? [String: String] == darkCopy,
+            "the copy of the owner's own dark theme as it was, though jawd served the run's Nord and the run left it")
+    #expect(defaults.dictionary(forKey: "themeLightColours") as? [String: String] == lightCopy, "and the light slot's, which jawd serves as it was")
+    #expect(next.textSize == 15, "while a preference the run wasn't given is kept as it changes")
+    #expect(next.roles(.dark) == Omarchy.roles(darkCopy.filter { $0.key != "id" && $0.key != "name" }, dark: true)?.held(),
+            "so before jawd answers, the next launch draws the owner's Gruvbox from its copy")
+}
+
 /// One of Omarchy's themes as jawd serves it, read from `protocol/themes/`.
 func omarchy(_ id: String) throws -> OmarchyTheme {
     let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
