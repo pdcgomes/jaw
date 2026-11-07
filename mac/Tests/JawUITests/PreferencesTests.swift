@@ -46,16 +46,22 @@ import Testing
     let suite = "jaw.tests.slots-unkept"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
-    defaults.set("redlamp:nord", forKey: "themeDark")
+    let gruvbox = try omarchy("gruvbox")
+    let seeded = gruvbox.colours.merging(["id": "gruvbox", "name": "Gruvbox", "accent": "#ff0000"]) { $1 }
+    defaults.set("omarchy:gruvbox", forKey: "themeDark")
+    defaults.set(seeded, forKey: "themeDarkColours")
     let preferences = Preferences(defaults: defaults, accent: .blue, keeps: false)
+    preferences.served = [gruvbox]
     var told = 0
     preferences.changed.append { told += 1 }
-    #expect(preferences.slots.dark == "redlamp:nord", "it reads what's kept")
+    #expect(preferences.slots.dark == "omarchy:gruvbox", "it reads what's kept")
     preferences.slots = Slots(dark: "jaw", light: "jaw")
     preferences.appearance = .dark
     #expect(told == 2 && preferences.slots.dark == "jaw" && preferences.appearance == .dark)
-    #expect(defaults.string(forKey: "themeDark") == "redlamp:nord" && defaults.string(forKey: "appearance") == nil,
+    #expect(defaults.string(forKey: "themeDark") == "omarchy:gruvbox" && defaults.string(forKey: "appearance") == nil,
             "and writes nothing back, so a run on the build Mac leaves the next one's preferences as they were")
+    #expect(defaults.dictionary(forKey: "themeDarkColours") as? [String: String] == seeded,
+            "the copy of the slot's Omarchy theme too, though jawd served it with other colours and the slot left it")
 }
 
 /// One of Omarchy's themes as jawd serves it, read from `protocol/themes/`.
@@ -82,6 +88,11 @@ func omarchy(_ id: String) throws -> OmarchyTheme {
     let copy = defaults.dictionary(forKey: "themeDarkColours") as? [String: String]
     #expect(copy?["id"] == "gruvbox" && copy?["name"] == "Gruvbox" && copy?["background"] == "#282828" && copy?.count == 27)
     #expect(defaults.dictionary(forKey: "themeLightColours") == nil, "the light slot holds Jaw's")
+    let nord = try #require(first.themes.first { $0.id == "redlamp:nord" })
+    first.slots = first.slots.choosing(nord, for: .dark)
+    #expect(defaults.dictionary(forKey: "themeDarkColours") == nil, "a copy goes as its slot leaves Omarchy's themes")
+    first.slots = Slots(dark: "omarchy:gruvbox", light: "jaw")
+    #expect(defaults.dictionary(forKey: "themeDarkColours") as? [String: String] == copy, "and comes back with it")
 
     let next = Preferences(defaults: defaults, accent: .blue)
     var told = 0

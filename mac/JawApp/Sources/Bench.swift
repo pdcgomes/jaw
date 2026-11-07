@@ -21,6 +21,10 @@ import QuartzCore
 /// - `pictures` and `library`: a fling through a chat of pictures, and through the library's grid.
 @MainActor
 enum Bench {
+    /// Whether `--keys` presses its keys in Settings: from a `settings` or `settings:<pane>` step until
+    /// a `window` step or Settings closes, as they'd go to it as the key window.
+    static var keysToSettings = false
+
     static func run(_ what: String, model: AppModel) {
         deadline(what == "idle" ? 120 : what == "pictures" || what == "library" ? 150 : what == "pick" ? 60 : 30)
         switch what {
@@ -118,7 +122,10 @@ enum Bench {
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
-            if key == "window" { model.window?.window?.makeKeyAndOrderFront(nil) }
+            if key == "window" {
+                model.window?.window?.makeKeyAndOrderFront(nil)
+                keysToSettings = false
+            }
             if key == "card" || key.hasPrefix("card:") { card(key, model: model) }
             if contacts { contact(key, model: model) }
             if key.hasPrefix("drop:") {
@@ -140,10 +147,14 @@ enum Bench {
             if key.hasPrefix("type:") { (NSApp.keyWindow ?? model.window?.window)?.firstResponder?.insertText(String(key.dropFirst(5))) }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
-            if key == "settings" { model.showSettings() }
+            if key == "settings" {
+                model.showSettings()
+                keysToSettings = true
+            }
             if key.hasPrefix("settings:") {
                 if let pane = SettingsPane(rawValue: String(key.dropFirst(9))) {
                     model.showSettings(pane)
+                    keysToSettings = true
                 } else {
                     FileHandle.standardError.write(Data("\(key): no such pane\n".utf8))
                 }
@@ -184,15 +195,21 @@ enum Bench {
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
             let typed = arrows[char].map { String(UnicodeScalar($0)!) }
                 ?? (char == "return" ? "\r" : char == "tab" ? "\t" : char == "space" ? " " : char == "esc" ? "\u{1b}" : mods.contains(.shift) ? char.uppercased() : char)
+            // From the step that opens Settings until a window step or it closes, it takes the keys, as
+            // the key window would; the build Mac runs the app inactive, so it never is.
+            if model.settings?.window?.isVisible != true { keysToSettings = false }
+            let settings = keysToSettings ? model.settings?.window : nil
+            let window = settings ?? NSApp.keyWindow ?? model.window?.window
             if !step, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
-                                            windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
+                                            windowNumber: window?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
             {
                 // AppKit offers a key with ⌘ to the key window's views before the menu bar, as the
                 // library's ⌘↩ is taken; the build Mac runs the app inactive, with no key window, so
                 // that's done here first.
-                let window = NSApp.keyWindow ?? model.window?.window
-                if !(mods.contains(.command) && window?.performKeyEquivalent(with: event) == true) { NSApp.sendEvent(event) }
+                if !(mods.contains(.command) && window?.performKeyEquivalent(with: event) == true) {
+                    if let settings, !mods.contains(.command) { settings.sendEvent(event) } else { NSApp.sendEvent(event) }
+                }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + (key.hasPrefix("vote:") || key.hasPrefix("poll:") ? 0.8 : 0.3)) {
                 if key.hasPrefix("menu:") {

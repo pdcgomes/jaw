@@ -105,6 +105,10 @@ public final class Preferences {
     /// What the gallery's Omarchy section says while jawd hasn't served its themes.
     public var omarchyState: OmarchyState = .connecting
 
+    /// The slot the gallery chooses for, nil for the one in use; Settings sets it back each time it
+    /// opens, and it isn't kept.
+    public var choosing: Slot? = nil
+
     /// How much panes without the keys are dimmed, 0 to 0.6.
     public var paneDim: Double { didSet { save() } }
     /// Whether the focused pane is outlined, and in what colour: nil for the theme's accent.

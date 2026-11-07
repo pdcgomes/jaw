@@ -2,55 +2,90 @@ import AppKit
 import JawThemes
 import SwiftUI
 
-/// Settings › Appearance: dark, light or the system's, and the theme in each slot.
+/// Settings › Appearance: dark, light or the system's; the slots, Dark and Light, each a tile of what it
+/// draws; and the gallery that fills the outlined one, Jaw's, Omarchy's and Redlamp's themes each a
+/// card. It scrolls as a whole, as a grouped form does, the slots and the gallery open under their
+/// headers as the wireframes draw them, so an arrow's card can be scrolled to; the arrows move through
+/// the cards from the moment it opens, choosing each as they reach it.
 public struct AppearancePane: View {
     @Bindable var preferences: Preferences
+    @Environment(\.colorScheme) private var scheme
+    /// Counted up by each click in the pane, beside what the click does there, and by each card or tile
+    /// chosen with VoiceOver or a card's menu, which gives the gallery the window's keys again.
+    @State private var clicked = 0
 
     public init(preferences: Preferences) {
         self.preferences = preferences
     }
 
+    /// The slot the gallery chooses for: the one picked, or the one in use.
+    var slot: Slot {
+        preferences.choosing ?? (scheme == .dark ? .dark : .light)
+    }
+
     public var body: some View {
-        Form {
-            Section {
-                Picker("Appearance", selection: $preferences.appearance) {
-                    Text("The system's").tag(Appearance.system)
-                    Text("Dark").tag(Appearance.dark)
-                    Text("Light").tag(Appearance.light)
-                }
-                .pickerStyle(.inline)
-                ForEach(Slot.allCases, id: \.self) { slot in
-                    let listed = preferences.themes.filter { $0.roles(slot) != nil }
-                    Picker(slot.title, selection: pick(slot)) {
-                        ForEach(listed) { theme in
-                            Text("\(theme.name(slot)), \(theme.source.title)").tag(theme.id)
+        let gallery = Gallery(preferences.themes, for: slot, omarchyLine: preferences.omarchyLine)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.xl) {
+                    GroupBox {
+                        Picker("Appearance", selection: $preferences.appearance) {
+                            Text("The system's").tag(Appearance.system)
+                            Text("Dark").tag(Appearance.dark)
+                            Text("Light").tag(Appearance.light)
                         }
-                        if !listed.contains(where: { $0.id == preferences.slots[slot] }) {
-                            Text("\(preferences.slots[slot]), drawn as \(Catalog.jawTheme.name(slot))").tag(preferences.slots[slot])
+                        .pickerStyle(.radioGroup)
+                        .horizontalRadioGroupLayout()
+                        .padding(Space.xs)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    SettingsSection("Themes", footer: "Jaw draws the dark theme while the Mac is dark, and the light one while it's light.") {
+                        HStack(spacing: Space.m) {
+                            ForEach(Slot.allCases, id: \.self) { each in
+                                SlotTileView(tile: SlotTile(each, slots: preferences.slots, themes: preferences.themes,
+                                                            served: preferences.served != nil, appearance: preferences.appearance,
+                                                            dark: scheme == .dark),
+                                             roles: preferences.roles(each), outlined: each == slot)
+                                    .onTapGesture { pick(each) }
+                                    .accessibilityAction { pick(each) }
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(gallery.sections) { section in
+                        GallerySection(section: section, slot: slot, slots: preferences.slots) { theme, only in
+                            choose(theme, only: only)
                         }
                     }
                 }
-            } footer: {
-                VStack(alignment: .leading) {
-                    Text("Jaw draws the dark theme while the Mac is dark, and the light one while it's light.")
-                    if let line = preferences.omarchyLine { Text(line) }
-                }
+                .padding(Space.xl)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { clicked += 1 })
             }
+            .background(ArrowKeys(clicked: clicked) { arrow in move(arrow, in: gallery, proxy) })
         }
-        .formStyle(.grouped)
         .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
     }
 
-    /// A slot's menu: choosing a theme fills the slots as a click on its card will (`Slots.choosing`).
-    func pick(_ slot: Slot) -> Binding<String> {
-        Binding(
-            get: { preferences.slots[slot] },
-            set: { id in
-                if let theme = preferences.themes.first(where: { $0.id == id }) {
-                    preferences.slots = preferences.slots.choosing(theme, for: slot)
-                }
-            },
-        )
+    /// Makes `each` the slot the gallery chooses for, as a click on its tile does.
+    func pick(_ each: Slot) {
+        preferences.choosing = each
+        clicked += 1
+    }
+
+    /// Fills the slots with `theme` as a click on its card does, and gives the gallery the keys again.
+    func choose(_ theme: Theme, only: Bool) {
+        preferences.slots = preferences.slots.choosing(theme, for: slot, only: only)
+        clicked += 1
+    }
+
+    /// Chooses the card an arrow reaches, as the terminal previews a theme as it moves through its
+    /// list, and scrolls it into sight; says whether there was one.
+    func move(_ arrow: Gallery.Arrow, in gallery: Gallery, _ proxy: ScrollViewProxy) -> Bool {
+        guard let theme = gallery.moving(from: preferences.slots[slot], arrow) else { return false }
+        preferences.slots = preferences.slots.choosing(theme, for: slot)
+        proxy.scrollTo(theme.id)
+        return true
     }
 }
 
@@ -74,6 +109,7 @@ public struct MessagesPane: View {
                 Text(preferences.look == .bubbles
                     ? "Theirs on the left, yours on the right."
                     : "The terminal's layout: names on the left, yours from a third of the way across.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             Section {
                 Picker("Spacing", selection: $preferences.density) {
@@ -94,6 +130,7 @@ public struct MessagesPane: View {
                 Toggle("Send photos and videos in HD", isOn: $preferences.sendHD)
             } footer: {
                 Text("A sharper copy of each goes as well, as WhatsApp's HD sends it. Tab in the box switches what's there; ⌥ as you click Send sends HD.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -139,6 +176,7 @@ public struct PanesPane: View {
                 .disabled(!preferences.paneOutline)
             } footer: {
                 Text("With more than one pane, the one with the keys is outlined inside its edge, and the others dimmed, as iTerm does.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
