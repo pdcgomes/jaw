@@ -83,8 +83,8 @@ func pictureParts(_ l: Laid) -> Int {
     #expect(slot.source == PictureSource(small: "media/links/ipma.jpg", jpeg: true) && slot.rect.size == CGSize(width: 70, height: 70)
         && slot.fit == .fill, "its thumbnail a slot of its own, filled from its centre")
     #expect(linkCard(read).map { $0.rect.contains(slot.rect) } == true)
-    #expect(read.parts.contains { if case let .fill(rect, _, _) = $0 { rect == slot.rect } else { false } },
-            "its well under it, which shows until it's decoded, and where it can't be")
+    #expect(read.parts.contains { if case let .image(_, rect) = $0 { slot.rect.contains(CGPoint(x: rect.midX, y: rect.midY)) } else { false } },
+            "its link symbol on the card's well where it goes, which shows until it's decoded, and where it can't be")
     #expect(MessagePictures().drawable(slot, scale: 2) == nil, "nothing to draw it from yet: its place is the row's, so nothing moves when it's read")
     #expect(!read.regions.contains { if case .media = $0.1 { true } else { false } }, "a click opens the link, not the picture")
     #expect(MessageLayout.Builder.spoken(sampleLink("L1")) == "link: Previsão para Sintra · IPMA, ipma.pt")

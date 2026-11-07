@@ -101,7 +101,7 @@ final class MessageView: NSView {
     func paint(_: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext, let laid else { return }
         if selected, let roles {
-            ctx.setFillColor(roles.selection.opacity(0.55).cgColor)
+            ctx.setFillColor(roles.bandTint.cgColor)
             ctx.fill(CGRect(x: 0, y: laid.body.minY - 2, width: bounds.width, height: laid.body.height + 4))
         }
         Laid.draw(laid.parts, in: ctx, y: 0)

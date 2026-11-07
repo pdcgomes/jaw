@@ -916,9 +916,9 @@ final class LibraryHeader: NSView {
         name.textColor = roles.text.nsColor
         detail.textColor = roles.secondary.nsColor
         mark.layer?.cornerRadius = Radius.panel
-        mark.layer?.backgroundColor = roles.accent.opacity(0.15).cgColor
+        mark.layer?.backgroundColor = roles.accentTint.cgColor
         mark.image = NSImage(systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .medium).applying(.init(hierarchicalColor: roles.accent.nsColor)))
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .medium).applying(.init(hierarchicalColor: roles.accentText.nsColor)))
     }
 
     /// Where the window's buttons are; a header under them starts after them, as a conversation's does.

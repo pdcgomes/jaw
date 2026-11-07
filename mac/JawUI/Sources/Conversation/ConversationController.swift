@@ -366,6 +366,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 cs[i].sending = sending(in: rows[i])
             }
         }
+        if spec.style.look == .lines, let id = selected, let i = rows.firstIndex(where: { $0.id == id }) {
+            cs[i].selected = true
+        }
         contexts = cs
     }
 
@@ -772,10 +775,12 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let previous = selected
         selected = id
         for changed in [previous, id].compactMap({ $0 }) {
-            if let i = rows.firstIndex(where: { $0.id == changed }),
-               let cell = table.view(atColumn: 0, row: i, makeIfNecessary: false) as? MessageView
-            {
+            guard let i = rows.firstIndex(where: { $0.id == changed }) else { continue }
+            let lines = spec.style.look == .lines
+            if lines { contexts[i].selected = selected == changed }
+            if let cell = table.view(atColumn: 0, row: i, makeIfNecessary: false) as? MessageView {
                 cell.selected = selected == changed
+                if lines { cell.laid = layouts.laid(rows[i], width: layoutWidth, spec: spec, context: contexts[i]) }
             }
         }
         if let id, let i = rows.firstIndex(where: { $0.id == id }) {

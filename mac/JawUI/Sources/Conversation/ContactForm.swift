@@ -336,7 +336,7 @@ struct FormCardRow: View {
                 Text(card.name).textStyle(.body).fontWeight(.semibold).tone(.primary, roles).lineLimit(1)
                 let numbers = CardAction.numbers(card.shown).map(\.number)
                 Text(numbers.isEmpty ? "No number" : numbers.joined(separator: " · "))
-                    .textStyle(.callout).tone(numbers.isEmpty ? .tertiary : .secondary, roles).lineLimit(1)
+                    .textStyle(.callout).foregroundStyle((numbers.isEmpty ? roles.faint(on: chosen ? .selection : .surface) : roles.secondary).color).lineLimit(1)
             }
             Spacer(minLength: Space.m)
             Button(action: remove) { Image(systemName: "xmark") }

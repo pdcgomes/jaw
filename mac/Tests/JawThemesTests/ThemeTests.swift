@@ -44,11 +44,11 @@ func servedThemes() throws -> [OmarchyTheme] {
     let served = try servedThemes()
     let nord = try #require(RedlampCatalog.families.first { $0.id == "nord" })
     let both = Slots(dark: "redlamp:nord", light: "redlamp:nord")
-    #expect(Catalog.roles(.dark, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.dark, dark: true))
-    #expect(Catalog.roles(.light, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.light, dark: false))
+    #expect(Catalog.roles(.dark, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.dark, dark: true).held())
+    #expect(Catalog.roles(.light, of: both, omarchy: served, accent: .blue) == RedlampRoles.roles(nord.light, dark: false).held())
     let gruvbox = try #require(served.first { $0.id == "gruvbox" })
     let held = Slots(dark: "omarchy:gruvbox", light: "omarchy:gruvbox")
-    #expect(Catalog.roles(.dark, of: held, omarchy: served, accent: .blue) == Omarchy.roles(gruvbox.colours, dark: true))
+    #expect(Catalog.roles(.dark, of: held, omarchy: served, accent: .blue) == Omarchy.roles(gruvbox.colours, dark: true)?.held())
     #expect(Catalog.roles(.light, of: held, omarchy: served, accent: .blue) == Catalog.jaw.light, "Gruvbox has no light half")
     #expect(Catalog.roles(.dark, of: held, omarchy: [], accent: .blue) == Catalog.jaw.dark, "jawd hasn't served it")
     let unknown = Slots(dark: "nord", light: "redlamp:nowhere")
@@ -79,7 +79,14 @@ func servedThemes() throws -> [OmarchyTheme] {
     let purple = SystemAccent(dark: RGBA(0xBF5AF2), light: RGBA(0xAF52DE))
     let neutral = try #require(Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: purple))
     #expect(neutral.dark?.accent.hex == 0xBF5AF2 && neutral.light?.accent.hex == 0xAF52DE, "the system's purple reads as it is")
-    #expect(neutral.dark?.link == neutral.dark?.accent)
+    #expect(neutral.dark == RedlampRoles.neutral(dark: true, accent: purple).held(), "its halves are Neutral's mapping in the purple, held")
+    #expect(purple.orange == .orange && purple.green == .green && purple.red == .red,
+            "an accent given without the system's other colours takes macOS 27.0.1's")
+    #expect(SystemAccent.blue == SystemAccent(dark: RGBA(0x007AFF), light: RGBA(0x007AFF),
+                                              orange: SystemColour(dark: RGBA(0xFF9230), light: RGBA(0xFF8D28)),
+                                              green: SystemColour(dark: RGBA(0x30D158), light: RGBA(0x34C759)),
+                                              red: SystemColour(dark: RGBA(0xFF4245), light: RGBA(0xFF383C))),
+            "macOS 27.0.1's default accent, the same blue in both appearances, and its orange, green and red, as the build Mac draws them")
     #expect(neutral != Catalog.theme(id: "redlamp:neutral", omarchy: [], accent: .blue))
     #expect(Catalog.theme(id: "redlamp:nord", omarchy: [], accent: purple) == Catalog.theme(id: "redlamp:nord", omarchy: [], accent: .blue))
 }

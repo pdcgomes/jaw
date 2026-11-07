@@ -35,12 +35,13 @@ public enum Ticks {
         ctx.restoreGState()
     }
 
-    /// How many ticks a status has, and in which colour: one sent, two delivered, two in the link colour
-    /// read; nil for the states said in words or symbols.
-    public static func of(_ status: MessageStatus?, _ roles: Roles) -> (Int, RGBA)? {
+    /// How many ticks a status has, and in which colour: one sent and two delivered in the dim text's
+    /// colour on `base` (`Roles.faint(on:)`), two in the link colour read; nil for the states said in
+    /// words or symbols.
+    public static func of(_ status: MessageStatus?, _ roles: Roles, on base: Roles.Base = .surface) -> (Int, RGBA)? {
         switch status {
-        case .sent: (1, roles.tertiary)
-        case .delivered: (2, roles.tertiary)
+        case .sent: (1, roles.faint(on: base))
+        case .delivered: (2, roles.faint(on: base))
         case .read, .played: (2, roles.link)
         case .pending, .failed, nil: nil
         }
@@ -102,7 +103,7 @@ public final class AvatarView: NSView {
     }
 }
 
-/// A chat named in a chip, its picture beside its name in the accent: the box's "to whom".
+/// A chat named in a chip, its picture beside its name in the accent drawn as text: the box's "to whom".
 @MainActor
 public final class ChatChip: NSView {
     let avatar = AvatarView()
@@ -145,7 +146,7 @@ public final class ChatChip: NSView {
     public func show(_ chat: ChatRow, image: NSImage?, roles: Roles) {
         self.roles = roles
         name.stringValue = chat.name
-        name.textColor = roles.accent.nsColor
+        name.textColor = roles.accentText.nsColor
         avatar.show(chat.name, id: chat.id, image: image, roles: roles)
         toolTip = "Writing to \(chat.name)"
         setAccessibilityLabel("Writing to \(chat.name)")
@@ -159,6 +160,6 @@ public final class ChatChip: NSView {
     override public func updateLayer() {
         guard let roles, let layer else { return }
         layer.cornerRadius = Self.height / 2
-        layer.backgroundColor = roles.accent.opacity(roles.isDark ? 0.16 : 0.12).cgColor
+        layer.backgroundColor = roles.chipTint.cgColor
     }
 }

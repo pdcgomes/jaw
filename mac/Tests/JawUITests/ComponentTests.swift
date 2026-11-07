@@ -17,7 +17,7 @@ import Testing
     let roles = Catalog.jaw.dark
     #expect(Tone.secondary.color(roles) == roles.secondary)
     #expect(Tone.warn.color(roles) == roles.failed)
-    #expect(Tone.accent.color(roles) == roles.accent)
+    #expect(Tone.accent.color(roles) == roles.accentText, "text in the accent takes its held colour")
 }
 
 @Test func `a shortcut is shown as Apple's menus show it and given to a menu with its capital`() {

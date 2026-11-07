@@ -382,6 +382,12 @@ final class ChatCell: NSView {
         didSet { if isSelected != oldValue { needsDisplay = true } }
     }
 
+    /// The ground the row's words and marks are drawn on: the selection while it's selected, the
+    /// surface otherwise.
+    var place: Roles.Base {
+        isSelected ? .selection : .surface
+    }
+
     /// The menu of the chat on this row, from its list.
     var menuFor: ((ChatCell) -> NSMenu?)?
     var popUp = MenuPopUp()
@@ -432,17 +438,17 @@ final class ChatCell: NSView {
         let when = chat.last.map { Format.when($0.at, now: Format.now()) } ?? ""
         let timeAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: (chat.unread > 0 && !chat.muted ? roles.accent : roles.secondary).nsColor,
+            .foregroundColor: (chat.unread > 0 && !chat.muted ? roles.accentText : roles.secondary).nsColor,
         ]
         let time = NSAttributedString(string: when, attributes: timeAttrs)
         let tw = time.size().width
         time.draw(at: NSPoint(x: right - tw, y: 11))
         var nameRight = right - tw - 8
         if chat.pinned {
-            nameRight -= draw(symbol: "pin.fill", at: NSPoint(x: nameRight - 10, y: 12), size: 10, colour: roles.tertiary) + 4
+            nameRight -= draw(symbol: "pin.fill", at: NSPoint(x: nameRight - 10, y: 12), size: 10, colour: roles.faint(on: place)) + 4
         }
         if chat.muted {
-            nameRight -= draw(symbol: "bell.slash.fill", at: NSPoint(x: nameRight - 11, y: 12), size: 10, colour: roles.tertiary) + 4
+            nameRight -= draw(symbol: "bell.slash.fill", at: NSPoint(x: nameRight - 11, y: 12), size: 10, colour: roles.faint(on: place)) + 4
         }
         let bold = chat.unread > 0 || chat.markedUnread
         var name = chat.name
@@ -491,7 +497,7 @@ final class ChatCell: NSView {
     /// typing or the draft.
     func ticks(_ chat: ChatRow, _ roles: Roles) -> (Int, RGBA)? {
         guard typists.isEmpty, chat.draft?.isEmpty ?? true, let last = chat.last, last.mine else { return nil }
-        return Ticks.of(last.status, roles)
+        return Ticks.of(last.status, roles, on: place)
     }
 
     var truncating: NSParagraphStyle {
@@ -514,7 +520,7 @@ final class ChatCell: NSView {
             return out
         }
         if let draft = chat.draft, !draft.isEmpty {
-            out.append(NSAttributedString(string: "Draft: ", attributes: quiet.merging([.foregroundColor: roles.accent.nsColor]) { $1 }))
+            out.append(NSAttributedString(string: "Draft: ", attributes: quiet.merging([.foregroundColor: roles.accentText.nsColor]) { $1 }))
             out.append(NSAttributedString(string: draft.split(whereSeparator: \.isNewline).joined(separator: " "), attributes: quiet))
             return out
         }
@@ -528,7 +534,7 @@ final class ChatCell: NSView {
                 let room = Ticks.width(count, size: 12) + 4
                 out.append(NSAttributedString(string: " ", attributes: quiet.merging([.kern: room - 3.4]) { $1 }))
             } else if status == .pending {
-                out.append(NSAttributedString(string: "◷ ", attributes: quiet.merging([.foregroundColor: roles.tertiary.nsColor]) { $1 }))
+                out.append(NSAttributedString(string: "◷ ", attributes: quiet.merging([.foregroundColor: roles.faint(on: place).nsColor]) { $1 }))
             } else {
                 out.append(NSAttributedString(string: "! ", attributes: quiet.merging([.foregroundColor: roles.failed.nsColor]) { $1 }))
             }

@@ -30,7 +30,7 @@ import Testing
     #expect(preferences.style(dark: true).roles == Catalog.jaw.dark && preferences.style(dark: false).roles == Catalog.jaw.light)
     let nord = try #require(RedlampCatalog.families.first { $0.id == "nord" })
     preferences.slots = Slots(dark: "redlamp:nord", light: "redlamp:neutral")
-    #expect(preferences.style(dark: true).roles == RedlampRoles.roles(nord.dark, dark: true))
+    #expect(preferences.style(dark: true).roles == RedlampRoles.roles(nord.dark, dark: true).held())
     #expect(preferences.style(dark: false).roles.accent.hex == 0x007AFF, "Neutral in the system's blue")
     let purple = SystemAccent(dark: RGBA(0xBF5AF2), light: RGBA(0xAF52DE))
     preferences.accent = purple

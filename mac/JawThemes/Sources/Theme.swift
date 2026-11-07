@@ -29,7 +29,8 @@ public enum Slot: String, CaseIterable, Sendable, Hashable {
 
 /// A theme to choose: its ID, as a slot keeps it (`jaw`, `omarchy:<id>` or `redlamp:<id>`, since
 /// Omarchy's and Redlamp's share names such as `nord`), its name, its light half's where it has one of
-/// its own, its source, and its halves as the roles Jaw draws in, a dark one, a light one or both.
+/// its own, its source, and its halves as the roles Jaw draws in, a dark one, a light one or both, each
+/// held where JawUI draws it (`Roles.held()`), whichever source it comes from.
 public struct Theme: Sendable, Hashable, Identifiable {
     public var id: String
     public var name: String
@@ -44,8 +45,8 @@ public struct Theme: Sendable, Hashable, Identifiable {
         self.name = name
         self.lightName = lightName
         self.source = source
-        self.dark = dark
-        self.light = light
+        self.dark = dark?.held()
+        self.light = light?.held()
     }
 
     /// The half `slot` would take, where the theme has one.
@@ -81,8 +82,8 @@ public struct OmarchyTheme: Sendable, Hashable, Identifiable {
     }
 }
 
-/// The system's accent as it's drawn in a dark appearance and in a light one, which Neutral takes.
-public struct SystemAccent: Sendable, Hashable {
+/// One of the system's colours as AppKit draws it in a dark appearance and in a light one.
+public struct SystemColour: Sendable, Hashable {
     public var dark: RGBA
     public var light: RGBA
 
@@ -91,9 +92,36 @@ public struct SystemAccent: Sendable, Hashable {
         self.light = light
     }
 
-    /// macOS's blue, the accent until another is chosen in System Settings, which the tests and the
-    /// harness draw Neutral in, so their pictures don't depend on the Mac's.
-    public static let blue = SystemAccent(dark: RGBA(0x0A84FF), light: RGBA(0x007AFF))
+    /// macOS's orange, green and red as AppKit draws them on macOS 27.0.1, as the build Mac does, which
+    /// the tests and the harness draw Neutral in, so their pictures don't depend on the Mac's.
+    public static let orange = SystemColour(dark: RGBA(0xFF9230), light: RGBA(0xFF8D28))
+    public static let green = SystemColour(dark: RGBA(0x30D158), light: RGBA(0x34C759))
+    public static let red = SystemColour(dark: RGBA(0xFF4245), light: RGBA(0xFF383C))
+}
+
+/// The system's colours Neutral takes, as AppKit draws them in a dark appearance and in a light one: the
+/// accent chosen in System Settings, `dark` and `light`, and the orange, green and red its mentions,
+/// online and failed take.
+public struct SystemAccent: Sendable, Hashable {
+    public var dark: RGBA
+    public var light: RGBA
+    public var orange: SystemColour
+    public var green: SystemColour
+    public var red: SystemColour
+
+    public init(dark: RGBA, light: RGBA, orange: SystemColour = .orange, green: SystemColour = .green, red: SystemColour = .red) {
+        self.dark = dark
+        self.light = light
+        self.orange = orange
+        self.green = green
+        self.red = red
+    }
+
+    /// macOS's blue, the accent until another is chosen in System Settings, which AppKit resolves to
+    /// `007AFF` in both appearances on macOS 27.0.1, as the build Mac draws it, with macOS's orange,
+    /// green and red: what the tests and the harness draw Neutral in, so their pictures don't depend on
+    /// the Mac's.
+    public static let blue = SystemAccent(dark: RGBA(0x007AFF), light: RGBA(0x007AFF))
 }
 
 public extension Omarchy {
@@ -149,10 +177,10 @@ extension Catalog {
               dark: RedlampRoles.roles(family.dark, dark: true), light: RedlampRoles.roles(family.light, dark: false))
     }
 
-    /// Neutral, `redlamp:neutral`, in the system's accent.
+    /// Neutral, `redlamp:neutral`, in the system's colours.
     static func neutral(_ accent: SystemAccent) -> Theme {
-        Theme(id: "redlamp:neutral", name: "Neutral", source: .redlamp, dark: RedlampRoles.neutral(dark: true, accent: accent.dark),
-              light: RedlampRoles.neutral(dark: false, accent: accent.light))
+        Theme(id: "redlamp:neutral", name: "Neutral", source: .redlamp, dark: RedlampRoles.neutral(dark: true, accent: accent),
+              light: RedlampRoles.neutral(dark: false, accent: accent))
     }
 
     /// Redlamp's families as themes, mapped once, as they never change while the app runs.

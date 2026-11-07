@@ -18,8 +18,12 @@ public struct Roles: Sendable, Hashable {
     public var tertiary: RGBA
     /// Separators and borders at rest.
     public var separator: RGBA
-    /// Focus, selection, unread counts.
+    /// Focus, selection, unread counts: the accent's fills and outlines, as the theme wrote it.
     public var accent: RGBA
+    /// The accent where JawUI draws it as text or as a mark: an unread chat's time, Draft:, a mention of
+    /// someone else, Show more, You in a reply, the palette's and the library's marks, a card's action;
+    /// the accent, until `held()` moves it to read where it's drawn.
+    public var accentText: RGBA
     /// Links and read ticks: the accent in Jaw's and Redlamp's themes, the terminal's cyan in Omarchy's.
     public var link: RGBA
     /// Your bubbles.
@@ -59,8 +63,8 @@ public enum Appearance: String, Sendable, Hashable, CaseIterable {
 
 public enum Catalog {
     /// jaw's own, first and the default: ooze's Tokyo Night, the terminal's palette, with Tokyo Night
-    /// Day as its light half. Redlamp's families join it in Mac-M5.
-    public static let jaw = ThemeFamily(id: "jaw", name: "jaw", dark: tokyoNight, light: tokyoNightDay)
+    /// Day as its light half, both held as every theme is (`Roles.held()`). Redlamp's families join it in Mac-M5.
+    public static let jaw = ThemeFamily(id: "jaw", name: "jaw", dark: tokyoNight.held(), light: tokyoNightDay.held())
 
     public static let families = [jaw]
 
@@ -82,7 +86,7 @@ public enum Catalog {
             secondary: RGBA(0x737AA2),
             tertiary: RGBA(0x565F89),
             separator: RGBA(0x3B4261),
-            accent: blue, link: blue,
+            accent: blue, accentText: blue, link: blue,
             yours: blue.opacity(0.18).over(bg),
             mention: orange,
             online: green,
@@ -108,7 +112,7 @@ public enum Catalog {
             secondary: RGBA(0x6172B0).mixed(with: RGBA(0x1A1B26), 0.15),
             tertiary: RGBA(0x848CB5),
             separator: RGBA(0xA8AECB),
-            accent: blue, link: blue,
+            accent: blue, accentText: blue, link: blue,
             yours: blue.opacity(0.12).over(bg),
             mention: orange,
             online: green,

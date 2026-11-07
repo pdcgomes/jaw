@@ -91,7 +91,7 @@ public struct GlanceView: View {
 
     func line(_ m: MessageRow, in chat: ChatRow) -> some View {
         let who = m.mine ? "You" : (m.from?.name ?? chat.name)
-        let tint: RGBA = m.mine ? roles.accent : roles.sender(m.from?.colour ?? 0)
+        let tint: RGBA = m.mine ? roles.accentText : roles.sender(m.from?.colour ?? 0)
         let what = m.deleted ? "This message was deleted" : (m.plain.isEmpty ? (m.system ?? m.kind.rawValue) : m.plain)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(who).foregroundStyle(tint.color).frame(width: 90, alignment: .leading).lineLimit(1)

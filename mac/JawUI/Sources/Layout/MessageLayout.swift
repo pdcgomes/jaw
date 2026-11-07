@@ -45,8 +45,8 @@ extension MessageRow {
 }
 
 /// What a message's lines depend on beyond the message: whether its sender's name and its time
-/// show, the day above it, whether a long one is unfolded, and how far its files of yours on their
-/// way have got.
+/// show, the day above it, whether a long one is unfolded, how far its files of yours on their way
+/// have got, and whether it's selected in lines.
 public struct MessageContext: Sendable, Hashable {
     public var group: Bool
     /// The sender changed, or five minutes passed: a run starts here.
@@ -60,6 +60,9 @@ public struct MessageContext: Sendable, Hashable {
     public var newAbove: Int
     /// Its files on their way, by message: its own, or its album's items'.
     public var sending: [String: Sending] = [:]
+    /// The message is selected in lines, where it's drawn on the selection's band, so its foot and its
+    /// card draw their dim marks as on a selected row; in bubbles it keeps its bubble's ground.
+    public var selected = false
 
     public init(group: Bool, firstOfRun: Bool, showTime: Bool, day: String?, unfolded: Bool = false,
                 newAbove: Int = 0)
@@ -376,6 +379,12 @@ public enum MessageLayout {
             roles = style.roles
         }
 
+        /// The ground a message's words, foot and card are drawn on: your bubble or theirs in bubbles;
+        /// in lines the window's ground, or the band a selected message is drawn on.
+        var cardGround: Roles.Base {
+            style.look == .bubbles ? (m.mine ? .yours : .surface) : context.selected ? .band : .ground
+        }
+
         mutating func build() -> Laid {
             if let day = context.day { dayLine(day) }
             if context.newAbove > 0 { newRule(context.newAbove) }
@@ -491,8 +500,8 @@ public enum MessageLayout {
                 case .mention:
                     let mine = span.person.map(me.contains) ?? false
                     a[.ctFont] = fonts.bold
-                    a[.ctColour] = (mine ? roles.mention : roles.accent).cgColor
-                    if mine { a[.jawBackground] = roles.mention.opacity(0.16).cgColor }
+                    a[.ctColour] = (mine ? roles.mention : roles.accentText).cgColor
+                    if mine { a[.jawBackground] = roles.mentionTint.cgColor }
                 case .text, .list, .mark, .unknown: break
                 }
                 out.append(NSAttributedString(string: span.s, attributes: a))
@@ -583,11 +592,11 @@ public enum MessageLayout {
             return (made, size, last, folded)
         }
 
-        /// What's said for your message's state in text: pending and failed; ticks are drawn.
-        func stateMark() -> (String, RGBA)? {
+        /// What's said for your message's state in text, on `base`: pending and failed; ticks are drawn.
+        func stateMark(on base: Roles.Base) -> (String, RGBA)? {
             guard m.mine, let status = m.status else { return nil }
             switch status {
-            case .pending: return ("◷", roles.tertiary)
+            case .pending: return ("◷", roles.faint(on: base))
             case .failed: return ("!", roles.failed)
             case .sent, .delivered, .read, .played: return nil
             }
@@ -597,24 +606,24 @@ public enum MessageLayout {
             CTFontGetSize(fonts.time) + 1
         }
 
-        /// A foot line drawn at a point, with the ticks drawn in the room it leaves for them.
-        func footParts(_ foot: CTLine, at point: CGPoint) -> [Laid.Part] {
+        /// A foot line drawn at a point on `base`, with the ticks drawn in the room it leaves for them.
+        func footParts(_ foot: CTLine, at point: CGPoint, on base: Roles.Base = .ground) -> [Laid.Part] {
             var out: [Laid.Part] = [.line(foot, point)]
-            if m.mine, let (count, colour) = Ticks.of(m.status, roles) {
+            if m.mine, let (count, colour) = Ticks.of(m.status, roles, on: base) {
                 let w = Ticks.width(count, size: tickSize)
                 out.append(.ticks(count, CGPoint(x: point.x + width(of: foot) - w, y: point.y), colour.cgColor, tickSize))
             }
             return out
         }
 
-        /// The time and what's said around it: a star, Edited, your ticks.
-        func footer(time: Bool = true) -> CTLine {
+        /// The time and what's said around it on `base`: a star, Edited, your ticks.
+        func footer(time: Bool = true, on base: Roles.Base = .ground) -> CTLine {
             let out = NSMutableAttributedString()
             let quiet: [NSAttributedString.Key: Any] = [.ctFont: fonts.time, .ctColour: roles.secondary.cgColor]
             if m.starred { out.append(NSAttributedString(string: "★ ", attributes: quiet)) }
             if m.edited, !m.deleted { out.append(NSAttributedString(string: "Edited ", attributes: [.ctFont: fonts.smallItalic, .ctColour: roles.secondary.cgColor])) }
             if time { out.append(NSAttributedString(string: Format.clock(m.at), attributes: quiet)) }
-            if let (mark, colour) = stateMark() {
+            if let (mark, colour) = stateMark(on: base) {
                 out.append(NSAttributedString(string: " " + mark, attributes: [.ctFont: fonts.small, .ctColour: colour.cgColor]))
             } else if m.mine, let (count, _) = Ticks.of(m.status, roles) {
                 // Room for the ticks: an invisible x, kerned to their width, since trailing spaces
@@ -663,7 +672,7 @@ public enum MessageLayout {
 
         /// "Show more" under a folded message, at `top`; returns the height it takes.
         mutating func showMore(x: CGFloat, at top: CGFloat) -> CGFloat {
-            let label = line("Show more", fonts.small, roles.accent)
+            let label = line("Show more", fonts.small, roles.accentText)
             parts.append(.line(label, CGPoint(x: x, y: top + ascent(fonts.small))))
             regions.append((CGRect(x: x, y: top, width: width(of: label), height: lineHeight(fonts.small)), .showMore))
             return lineHeight(fonts.small) + 2
@@ -685,7 +694,7 @@ public enum MessageLayout {
             let said = words()
             let hasWords = said.length > 0
             let (frame, size, last, folded) = frame(said, most: most)
-            let foot = footer()
+            let foot = footer(on: cardGround)
             let footWidth = width(of: foot)
             inner = max(inner, hasWords ? size.width : 0)
             if let card { inner = max(inner, card.width) }
@@ -739,7 +748,7 @@ public enum MessageLayout {
                 cy += 6 + card.height + 2
             }
             let footY = footInline ? cy - 4 - CTFontGetDescent(fonts.body) : cy + ascent(fonts.time)
-            parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY)))
+            parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY), on: cardGround))
             y += h
             reactions(x: x + 6, alignRight: m.mine, right: x + bw - 6)
             failedLine(x: x + p, alignRight: m.mine, right: x + bw)
@@ -747,8 +756,8 @@ public enum MessageLayout {
         }
 
         mutating func quote(_ reply: Quote, _ rect: CGRect) {
-            parts.append(.fill(rect, roles.text.opacity(roles.isDark ? 0.06 : 0.05).cgColor, 8))
-            let colour = reply.from == "You" ? roles.accent : roles.sender(Self.colourIndex(reply.from))
+            parts.append(.fill(rect, roles.quoteWell.cgColor, 8))
+            let colour = reply.from == "You" ? roles.accentText : roles.sender(Self.colourIndex(reply.from))
             parts.append(.fill(CGRect(x: rect.minX, y: rect.minY, width: 3, height: rect.height), colour.cgColor, 1.5))
             let who = truncated(reply.from, fonts.name, colour, rect.width - 16)
             let what = truncated(reply.summary, fonts.small, roles.secondary, rect.width - 16)
@@ -786,7 +795,7 @@ public enum MessageLayout {
         /// when the minute or the sender changes, your ticks before it.
         mutating func lines() -> Laid {
             let m = metrics.margin
-            let foot = footer(time: context.showTime || self.m.edited || self.m.mine)
+            let foot = footer(time: context.showTime || self.m.edited || self.m.mine, on: cardGround)
             let footWidth = width(of: foot)
             let x = self.m.mine ? floor(width / 3) : m
             let most = max(width - x - m - footWidth - 16, 80)
@@ -803,7 +812,7 @@ public enum MessageLayout {
                 y += lineHeight(fonts.small)
             }
             if let reply = self.m.reply {
-                let colour = reply.from == "You" ? roles.accent : roles.sender(Self.colourIndex(reply.from))
+                let colour = reply.from == "You" ? roles.accentText : roles.sender(Self.colourIndex(reply.from))
                 parts.append(.fill(CGRect(x: x, y: y + 2, width: 2, height: lineHeight(fonts.small)), colour.cgColor, 1))
                 let who = line(reply.from, fonts.name, colour)
                 let ww = width(of: who) + 6
@@ -827,7 +836,7 @@ public enum MessageLayout {
                 text = (frame, textRect)
                 y += size.height
             }
-            parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: footY)))
+            parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: footY), on: cardGround))
             if folded { y += showMore(x: x, at: y) }
             if let card, cardUnderText {
                 drawCard(CGRect(x: x, y: y + 4, width: card.width, height: card.height))

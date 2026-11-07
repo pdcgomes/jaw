@@ -73,8 +73,8 @@ public final class Preferences {
         }
     }
 
-    /// The system's accent in each appearance, which Neutral draws in, read again by
-    /// `systemColoursChanged()`, and not kept, as it's the system's.
+    /// The system's colours in each appearance, its accent, orange, green and red, which Neutral draws
+    /// in, read again by `systemColoursChanged()`, and not kept, as they're the system's.
     public var accent: SystemAccent {
         didSet {
             guard accent != oldValue else { return }
@@ -183,7 +183,7 @@ public final class Preferences {
         return themes
     }
 
-    /// Reads the system's accent again, as the app does when AppKit says the system's colours changed.
+    /// Reads the system's accent, orange, green and red again, as the app does when AppKit says the system's colours changed.
     public func systemColoursChanged() {
         accent = .current()
     }
@@ -209,13 +209,19 @@ public extension RGBA {
 }
 
 public extension SystemAccent {
-    /// The system's accent as AppKit draws it now, in a dark appearance and in a light one.
+    /// The system's accent, orange, green and red as AppKit draws them now, in a dark appearance and in
+    /// a light one; where AppKit has no appearance of the name, the fixed colours of the one asked for.
     @MainActor static func current() -> SystemAccent {
-        func drawn(_ name: NSAppearance.Name) -> RGBA {
-            var colour = SystemAccent.blue.dark
-            NSAppearance(named: name)?.performAsCurrentDrawingAppearance { colour = RGBA(NSColor.controlAccentColor) }
-            return colour
+        func drawn(_ colour: NSColor, otherwise fixed: SystemColour) -> SystemColour {
+            func half(_ name: NSAppearance.Name, _ otherwise: RGBA) -> RGBA {
+                var out = otherwise
+                NSAppearance(named: name)?.performAsCurrentDrawingAppearance { out = RGBA(colour) }
+                return out
+            }
+            return SystemColour(dark: half(.darkAqua, fixed.dark), light: half(.aqua, fixed.light))
         }
-        return SystemAccent(dark: drawn(.darkAqua), light: drawn(.aqua))
+        let accent = drawn(.controlAccentColor, otherwise: SystemColour(dark: blue.dark, light: blue.light))
+        return SystemAccent(dark: accent.dark, light: accent.light, orange: drawn(.systemOrange, otherwise: .orange),
+                            green: drawn(.systemGreen, otherwise: .green), red: drawn(.systemRed, otherwise: .red))
     }
 }

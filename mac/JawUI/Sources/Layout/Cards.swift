@@ -269,7 +269,7 @@ extension MessageLayout.Builder {
     // MARK: The pieces
 
     var well: RGBA {
-        roles.text.opacity(roles.isDark ? 0.07 : 0.06)
+        roles.well
     }
 
     /// A part under the pictures, or over them while `drawingOver` is set.
@@ -462,7 +462,7 @@ extension MessageLayout.Builder {
 
     /// Why, cut short at its end to leave room, then what can be done, always whole, in the accent.
     func whyAndAct(_ words: (why: String?, act: String?), colour: RGBA, most: CGFloat) -> CTLine {
-        let act = words.act.map { NSAttributedString(string: $0, attributes: [.ctFont: fonts.small, .ctColour: roles.accent.cgColor]) }
+        let act = words.act.map { NSAttributedString(string: $0, attributes: [.ctFont: fonts.small, .ctColour: roles.accentText.cgColor]) }
         let dot = NSAttributedString(string: " · ", attributes: [.ctFont: fonts.small, .ctColour: roles.secondary.cgColor])
         let room = most - (act.map { width(of: CTLineCreateWithAttributedString($0)) + width(of: CTLineCreateWithAttributedString(dot)) } ?? 0)
         let why = words.why.map { Self.fitted($0, room) { width(of: line($0, fonts.small, colour)) } } ?? ""
@@ -535,13 +535,13 @@ extension MessageLayout.Builder {
 
     mutating func file(_ r: CGRect) {
         let icon = CGRect(x: r.minX, y: r.minY + 2, width: 32, height: 40)
-        parts.append(.fill(icon, roles.accent.opacity(0.15).cgColor, 6))
+        parts.append(.fill(icon, roles.accentTint.cgColor, 6))
         let mime = m.media?.mime ?? ""
         let name = m.media?.name ?? "Document"
         let ext = (name as NSString).pathExtension.uppercased()
         let symbolName = mime.contains("pdf") ? "doc.richtext" : mime.contains("zip") ? "doc.zipper" : mime.hasPrefix("image") ? "photo"
             : mime.hasPrefix("audio") ? "music.note" : mime.hasPrefix("video") ? "film" : "doc.text"
-        symbol(symbolName, 15, roles.accent, centredIn: icon)
+        symbol(symbolName, 15, roles.accentText, centredIn: icon)
         let x = icon.maxX + 10
         // Yours from the outbox is drawn as it goes, whatever its state says before its copy is made.
         let going = sending(item: nil)
@@ -560,25 +560,25 @@ extension MessageLayout.Builder {
             text(detail.isEmpty ? "a file" : detail, fonts.small, roles.secondary, x: x, top: second, most: right - x)
         }
         if let going {
-            parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))
+            parts.append(.fill(action, roles.accentTint.cgColor, 14))
             let centre = CGPoint(x: action.midX, y: action.midY)
             parts.append(.ring(centre, 11, 1, roles.accent.opacity(0.25).cgColor, 2.5))
-            parts.append(.ring(centre, 11, max(CGFloat(going.percent) / 100, 0.02), roles.accent.cgColor, 2.5))
-            symbol("xmark", 9, roles.accent, centredIn: action)
+            parts.append(.ring(centre, 11, max(CGFloat(going.percent) / 100, 0.02), roles.accentText.cgColor, 2.5))
+            symbol("xmark", 9, roles.accentText, centredIn: action)
             regions.append((action, .stop(item: nil)))
         } else if state != .local {
-            parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))
+            parts.append(.fill(action, roles.accentTint.cgColor, 14))
             switch state {
             case .downloading:
                 let centre = CGPoint(x: action.midX, y: action.midY)
                 parts.append(.ring(centre, 11, 1, roles.accent.opacity(0.25).cgColor, 2.5))
-                parts.append(.ring(centre, 11, max(m.media?.progress ?? 0, 0.02), roles.accent.cgColor, 2.5))
-                symbol("xmark", 9, roles.accent, centredIn: action)
+                parts.append(.ring(centre, 11, max(m.media?.progress ?? 0, 0.02), roles.accentText.cgColor, 2.5))
+                symbol("xmark", 9, roles.accentText, centredIn: action)
                 regions.append((action, .stop(item: nil)))
             case .remote where m.media?.error == nil:
-                symbol("arrow.down", 11, roles.accent, centredIn: action)
+                symbol("arrow.down", 11, roles.accentText, centredIn: action)
             default:
-                symbol(state == .waitingForPhone ? "iphone" : state == .gone ? "exclamationmark" : "arrow.clockwise", 11, roles.accent, centredIn: action)
+                symbol(state == .waitingForPhone ? "iphone" : state == .gone ? "exclamationmark" : "arrow.clockwise", 11, roles.accentText, centredIn: action)
             }
         }
         regions.append((r, .media(item: nil)))
@@ -586,8 +586,8 @@ extension MessageLayout.Builder {
 
     mutating func place(_ r: CGRect) {
         let circle = CGRect(x: r.minX, y: r.midY - 18, width: 36, height: 36)
-        parts.append(.fill(circle, roles.accent.opacity(0.15).cgColor, 18))
-        symbol(m.kind == .liveLocation ? "location.fill" : "mappin.and.ellipse", 15, roles.accent, centredIn: circle)
+        parts.append(.fill(circle, roles.accentTint.cgColor, 18))
+        symbol(m.kind == .liveLocation ? "location.fill" : "mappin.and.ellipse", 15, roles.accentText, centredIn: circle)
         let x = circle.maxX + 10
         let l = m.location
         let coords = l.flatMap { l in l.lat.flatMap { lat in l.lon.map { String(format: "%.4f, %.4f", lat, $0) } } }
@@ -622,7 +622,7 @@ extension MessageLayout.Builder {
                 let onAccent = roles.isDark ? roles.ground : RGBA(0xFFFFFF)
                 symbol(several ? "checkmark.square.fill" : "checkmark.circle.fill", 14, onAccent, on: roles.accent, centredIn: tick)
             } else {
-                symbol(several ? "square" : "circle", 14, roles.tertiary, centredIn: tick)
+                symbol(several ? "square" : "circle", 14, roles.faint(on: cardGround), centredIn: tick)
             }
             let count = line(Format.num(option.votes), fonts.time, roles.secondary)
             let cw = width(of: count)
@@ -637,7 +637,7 @@ extension MessageLayout.Builder {
             }
             top += optionHeight
         }
-        text(Self.pollVoted(poll), fonts.small, roles.tertiary, x: r.minX, top: top, most: r.width)
+        text(Self.pollVoted(poll), fonts.small, roles.faint(on: cardGround), x: r.minX, top: top, most: r.width)
     }
 
     /// An album's tiles, each filled and cropped from the centre, a video's with ▶, the fourth saying
@@ -672,10 +672,9 @@ extension MessageLayout.Builder {
         guard let link = m.link else { return }
         parts.append(.fill(r, well.cgColor, Radius.control))
         if let path = link.preview {
-            // Its well until the image queue has it, and where it can't be read: jawd keeps it as the
-            // JPEG it came as, so nothing else is decoded.
+            // Its link symbol, on the card's own well, until the image queue has it, and where it can't
+            // be read: jawd keeps it as the JPEG it came as, so nothing else is decoded.
             let thumb = CGRect(x: r.minX + 6, y: (r.midY - Self.thumbnail / 2).rounded(), width: Self.thumbnail, height: Self.thumbnail)
-            parts.append(.fill(thumb, well.cgColor, Radius.small))
             symbol("link", 18, roles.secondary, centredIn: thumb)
             slots.append(PictureSlot(rect: thumb, radius: Radius.small, source: PictureSource(small: path, jpeg: true), message: m.id))
         } else {
@@ -691,7 +690,7 @@ extension MessageLayout.Builder {
             parts.append(.line(line, CGPoint(x: x, y: top + ascent(fonts.small))))
             top += lineHeight(fonts.small)
         }
-        text(link.host, fonts.small, roles.tertiary, x: x, top: top, most: most)
+        text(link.host, fonts.small, roles.secondary, x: x, top: top, most: most)
         regions.append((r, .open(link.url)))
     }
 }

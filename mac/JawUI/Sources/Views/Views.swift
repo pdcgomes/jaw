@@ -206,7 +206,7 @@ public struct StatusLine: View {
     public var body: some View {
         HStack(spacing: 10) {
             if let state {
-                Text(state).foregroundStyle((warn ? roles.mention : roles.accent).color)
+                Text(state).foregroundStyle((warn ? roles.mention : roles.accentText).color)
             }
             let parts = Self.chatParts(who: who, typing: typing, chat: chat, roles: roles)
             if !parts.isEmpty {

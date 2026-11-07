@@ -70,7 +70,7 @@ let terminalMoves: [(moved: [String], themes: [String])] = [
     (["selection raised"], ["kanagawa", "tokyo-night", "vantablack", "white"]),
 ]
 
-@Test func `each theme moves the greys theme.rs moves, and no others`() throws {
+@Test func `each theme moves the greys theme.rs moves, and no others, each grey and colour it moves landing within 0.05 of its target`() throws {
     for theme in try omarchyFiles() {
         let c = theme.colours.compactMapValues(Omarchy.hex)
         let t = try #require(Omarchy.terminal(c))
@@ -84,6 +84,20 @@ let terminalMoves: [(moved: [String], themes: [String])] = [
         }
         let listed = terminalMoves.filter { $0.themes.contains(theme.id) }.flatMap { $0.moved }
         #expect(moved.sorted() == listed.sorted(), "\(theme.id)")
+        let picked = Contrast.fit(c["selection"]!, on: t.bg, toward: t.fg, low: 1.15, target: 1.25)
+        var lands: [(String, UInt32, UInt32, UInt32, Double)] = [
+            ("surface", c["lighter_background"]!, t.surface, t.bg, 1.1), ("dim text", c["dark_foreground"]!, t.comment, t.bg, 3),
+            ("borders", c["muted"]!, t.gutter, t.bg, 1.8), ("selection", c["selection"]!, picked, t.bg, 1.25),
+            ("selection on the surface", picked, t.selection, t.surface, 1.15), ("link", c["cyan"]!, t.link, t.bg, 3),
+            ("mention", c["orange"]!, t.mention, t.bg, 3), ("online", c["green"]!, t.online, t.bg, 3),
+            ("notice", c["yellow"]!, t.notice, t.bg, 3),
+        ]
+        for (was, now) in zip(["red", "yellow", "blue", "magenta", "cyan", "green", "orange", "bright_cyan"].map { c[$0]! }, t.senders) {
+            lands.append(("a sender", was, now, t.bg, 3))
+        }
+        for (what, was, now, ground, target) in lands where now != was {
+            #expect(abs(Contrast.ratio(now, ground) - target) <= 0.05, "\(theme.id): \(what) lands at \(Contrast.ratio(now, ground))")
+        }
     }
 }
 
@@ -101,7 +115,7 @@ let surfaceMoves: [String: [String]] = [
     "solitude": ["failed", "senders 1"],
 ]
 
-@Test func `the Mac holds the terminal's colours at 3:1 on its surface too, which moves nine themes' and no others'`() throws {
+@Test func `the Mac holds the terminal's colours at 3:1 on its surface too, which moves nine themes' and no others', each to within 0.05 of 3:1 there`() throws {
     for theme in try omarchyFiles() {
         let c = theme.colours.compactMapValues(Omarchy.hex)
         let t = try #require(Omarchy.terminal(c))
@@ -112,11 +126,16 @@ let surfaceMoves: [String: [String]] = [
                                  ("failed", red, r.failed)] where now.hex != was
         {
             moved.append(what)
+            #expect(abs(Contrast.ratio(now.hex, t.surface) - 3) <= 0.05, "\(theme.id): \(what) lands at \(Contrast.ratio(now.hex, t.surface))")
         }
         let senders = zip(t.senders, r.senders).count { $0.0 != $0.1.hex }
         if senders > 0 { moved.append("senders \(senders)") }
+        for (was, now) in zip(t.senders, r.senders) where now.hex != was {
+            #expect(abs(Contrast.ratio(now.hex, t.surface) - 3) <= 0.05, "\(theme.id): a sender lands at \(Contrast.ratio(now.hex, t.surface))")
+        }
         #expect(moved.sorted() == (surfaceMoves[theme.id] ?? []).sorted(), "\(theme.id)")
         #expect(r.accent.hex == t.accent && r.ground.hex == t.bg && r.tertiary.hex == t.comment, "\(theme.id): the rest as the terminal has it")
+        #expect(r.accentText == r.accent, "\(theme.id): the accent drawn as text, as written until the hold")
     }
 }
 

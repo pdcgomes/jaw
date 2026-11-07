@@ -183,7 +183,7 @@ struct CardRow: View {
                 Text(name).textStyle(.body).fontWeight(.semibold).tone(.primary, roles).lineLimit(1)
                 let numbers = CardAction.numbers(card)
                 if numbers.isEmpty {
-                    Text("No number").textStyle(.callout).tone(.tertiary, roles)
+                    Text("No number").textStyle(.callout).foregroundStyle(roles.faint(on: selected ? .selection : .surface).color)
                 }
                 ForEach(numbers, id: \.dialled) { phone in
                     Text(CardAction.label(phone)).textStyle(.callout).tone(.secondary, roles).lineLimit(1)

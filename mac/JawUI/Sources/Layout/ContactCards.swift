@@ -126,7 +126,7 @@ extension MessageLayout.Builder {
         if let action = ContactWords.action(contact) {
             let rule = r.minY + cardTop
             parts.append(.fill(CGRect(x: r.minX, y: rule, width: r.width, height: Stroke.hairline), roles.separator.cgColor, 0))
-            let label = line(action, fonts.body, roles.accent)
+            let label = line(action, fonts.body, roles.accentText)
             let w = width(of: label)
             parts.append(.line(label, CGPoint(x: (r.midX - w / 2).rounded(), y: rule + Stroke.hairline + Space.l / 2 + ascent(fonts.body))))
         }

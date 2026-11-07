@@ -511,10 +511,10 @@ public struct PaletteView: View {
         let shown = FindKind.allCases.compactMap { k in model.counts[k].map { (k, $0) } }.filter { $0.1 > 0 }
         if model.mode == .find, !shown.isEmpty {
             HStack(spacing: 12) {
-                Text("all").foregroundStyle((model.kind == nil ? roles.accent : roles.secondary).color)
+                Text("all").foregroundStyle((model.kind == nil ? roles.accentText : roles.secondary).color)
                 ForEach(shown, id: \.0) { kind, n in
                     Text("\(Self.plural(kind)) \(n >= 1000 ? "1,000+" : Format.num(n))")
-                        .foregroundStyle((model.kind == kind ? roles.accent : roles.secondary).color)
+                        .foregroundStyle((model.kind == kind ? roles.accentText : roles.secondary).color)
                 }
                 Spacer()
                 Text("Tab narrows").foregroundStyle(roles.tertiary.color)
@@ -569,15 +569,15 @@ public struct PaletteView: View {
 
     func row(_ item: PaletteModel.Item, selected: Bool) -> some View {
         HStack(spacing: 8) {
-            if case .action = item.pick { Image(systemName: "chevron.right").textStyle(.micro).foregroundStyle(roles.tertiary.color) }
+            if case .action = item.pick { Image(systemName: "chevron.right").textStyle(.micro).foregroundStyle(roles.faint(on: selected ? .selection : .surface).color) }
             if model.picked.contains(where: { "picked\($0.id)" == item.id }) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(roles.accent.color)
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(roles.accentText.color)
             }
             Self.marked(item.title, roles).lineLimit(1)
             Spacer(minLength: 8)
             Text(item.detail).textStyle(.caption).foregroundStyle(roles.secondary.color).lineLimit(1)
             if let key = item.key {
-                Text(key).textStyle(.key).foregroundStyle(roles.accent.color)
+                Text(key).textStyle(.key).foregroundStyle(roles.accentText.color)
             }
         }
         .padding(.horizontal, 14)
@@ -590,7 +590,7 @@ public struct PaletteView: View {
         var out = AttributedString()
         for span in spans {
             var part = AttributedString(span.s)
-            part.foregroundColor = (span.t == .mark ? roles.accent : roles.text).color
+            part.foregroundColor = (span.t == .mark ? roles.accentText : roles.text).color
             if span.t == .mark { part.font = .system(size: 13, weight: .bold) }
             out += part
         }

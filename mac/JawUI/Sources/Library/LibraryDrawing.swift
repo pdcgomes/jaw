@@ -148,7 +148,7 @@ enum LibraryDrawing {
     }
 
     static func well(_ c: Context) -> RGBA {
-        c.roles.text.opacity(c.roles.isDark ? 0.07 : 0.06)
+        c.roles.well
     }
 
     /// A photo's or a video's tile: its well, its picture, filled from the centre, from jawd's
@@ -161,7 +161,7 @@ enum LibraryDrawing {
         d.under.append(.fill(rect, well(c).cgColor, radius))
         let source = PictureSource(item.media)
         if source.isEmpty {
-            symbol(item.kind == .video ? "play.rectangle" : "photo", 20, r.tertiary, centredIn: rect, into: &d.under)
+            symbol(item.kind == .video ? "play.rectangle" : "photo", 20, r.secondary, centredIn: rect, into: &d.under)
         } else {
             d.slot = PictureSlot(rect: rect, radius: radius, fit: .fill, source: source, message: item.id)
         }
@@ -223,7 +223,8 @@ enum LibraryDrawing {
     }
 
     /// A voice message's, a file's or a link's row: on a card in bubbles, between hairlines in lines,
-    /// with the kind's mark at its left, its words, and who shared it, where and when.
+    /// with the kind's mark at its left, a file's and a link's on their tint, or on the selection itself
+    /// while the row's selected, its words, and who shared it, where and when.
     static func row(_ item: LibraryRow, size: CGSize, selected: Bool, _ c: Context) -> LibraryDrawn {
         var d = LibraryDrawn()
         let r = c.roles
@@ -239,20 +240,20 @@ enum LibraryDrawing {
         let x = icon.maxX + Space.m + 2, right = size.width - Space.m - 2
         switch item.kind {
         case .voice: voice(item, icon: icon, x: x, right: right, size: size, c, into: &d)
-        case .file: file(item, icon: icon, x: x, right: right, size: size, c, into: &d)
-        case .link: link(item, icon: icon, x: x, right: right, size: size, c, into: &d)
+        case .file: file(item, icon: icon, x: x, right: right, size: size, selected: selected, c, into: &d)
+        case .link: link(item, icon: icon, x: x, right: right, size: size, selected: selected, c, into: &d)
         case .photo, .video, .other: break
         }
         return d
     }
 
     /// Two lines: a title, with when at its right, over details.
-    static func twoLines(_ title: String, _ details: CTLine, x: CGFloat, right: CGFloat, size: CGSize, _ item: LibraryRow, _ c: Context,
-                         into d: inout LibraryDrawn)
+    static func twoLines(_ title: String, _ details: CTLine, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ item: LibraryRow,
+                         _ c: Context, into d: inout LibraryDrawn)
     {
         let r = c.roles
         let name = font(.body), small = font(.caption)
-        let when = line(Self.when(item, c), small, r.tertiary)
+        let when = line(Self.when(item, c), small, r.faint(on: selected ? .selection : c.style.look == .bubbles ? .surface : .ground))
         let top = baseline(name, mid: size.height / 2 - 8), second = baseline(small, mid: size.height / 2 + 9)
         d.under.append(.line(when, CGPoint(x: right - width(when), y: top)))
         d.under.append(.line(fit(line(title, name, r.text), right - x - width(when) - Space.m, name, r.text), CGPoint(x: x, y: top)))
@@ -268,20 +269,20 @@ enum LibraryDrawing {
         for span in item.caption {
             let mark = span.t == .mark
             out.append(NSAttributedString(string: span.s, attributes: [.ctFont: mark ? bold : small,
-                                                                       .ctColour: (mark ? c.roles.accent : c.roles.secondary).cgColor]))
+                                                                       .ctColour: (mark ? c.roles.accentText : c.roles.secondary).cgColor]))
         }
         out.append(NSAttributedString(string: " · " + tail, attributes: [.ctFont: small, .ctColour: c.roles.secondary.cgColor]))
         return CTLineCreateWithAttributedString(out)
     }
 
-    static func file(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, _ c: Context, into d: inout LibraryDrawn) {
+    static func file(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ c: Context, into d: inout LibraryDrawn) {
         let r = c.roles
         let f = item.file
-        d.under.append(.fill(icon, r.accent.opacity(0.15).cgColor, Radius.small + 2))
-        symbol(Self.fileSymbol(f), 13, r.accent, centredIn: icon, into: &d.under)
+        if !selected { d.under.append(.fill(icon, r.accentTint.cgColor, Radius.small + 2)) }
+        symbol(Self.fileSymbol(f), 13, r.accentText, centredIn: icon, into: &d.under)
         let said = [Self.coming(f), f?.type, f?.bytes.map(Self.size), f?.pages.map(Self.pages), who(item, c)].compactMap(\.self).filter { !$0.isEmpty }
         let details = marked(item, then: who(item, c), c) ?? line(said.joined(separator: " · "), font(.caption), r.secondary)
-        twoLines(f?.name.isEmpty == false ? f!.name : "a file", details, x: x, right: right, size: size, item, c, into: &d)
+        twoLines(f?.name.isEmpty == false ? f!.name : "a file", details, x: x, right: right, size: size, selected: selected, item, c, into: &d)
     }
 
     /// What a file not here says first: that it's coming, or why it can't, once jawd says how its copy
@@ -308,10 +309,10 @@ enum LibraryDrawing {
         }
     }
 
-    static func link(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, _ c: Context, into d: inout LibraryDrawn) {
+    static func link(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, selected: Bool, _ c: Context, into d: inout LibraryDrawn) {
         let r = c.roles
         let l = item.link
-        d.under.append(.fill(icon, well(c).cgColor, Radius.small + 2))
+        if !selected { d.under.append(.fill(icon, well(c).cgColor, Radius.small + 2)) }
         symbol("link", 13, r.link, centredIn: icon, into: &d.under)
         if let preview = l?.preview {
             d.slot = PictureSlot(rect: icon, radius: Radius.small + 2, fit: .fill, source: PictureSource(small: preview, jpeg: true), message: item.id)
@@ -327,7 +328,7 @@ enum LibraryDrawing {
             details = CTLineCreateWithAttributedString(out)
         }
         let title = l?.title.flatMap { $0.isEmpty ? nil : $0 } ?? l?.url ?? ""
-        twoLines(title, details, x: x, right: right, size: size, item, c, into: &d)
+        twoLines(title, details, x: x, right: right, size: size, selected: selected, item, c, into: &d)
     }
 
     /// One line: ▶ in the accent, the waveform's bars, the length, then who, where and when at the

@@ -144,7 +144,7 @@ public struct PanesPane: View {
 }
 
 extension RGBA {
-    /// From a colour picked, in sRGB.
+    /// From a colour AppKit gives, a colour picked or one of the system's, in sRGB.
     init(_ colour: NSColor) {
         let c = colour.usingColorSpace(.sRGB) ?? colour
         self.init(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))

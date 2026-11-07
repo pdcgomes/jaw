@@ -11,7 +11,7 @@ public enum Tone: Sendable {
         case .primary: roles.text
         case .secondary: roles.secondary
         case .tertiary: roles.tertiary
-        case .accent: roles.accent
+        case .accent: roles.accentText
         case .warn: roles.failed
         }
     }

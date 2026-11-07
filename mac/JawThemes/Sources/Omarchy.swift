@@ -65,7 +65,7 @@ public enum Omarchy {
         return Roles(
             isDark: dark, ground: RGBA(t.bg), surface: RGBA(t.surface), selection: RGBA(t.selection), text: RGBA(t.fg),
             secondary: RGBA(t.muted), tertiary: RGBA(t.comment), separator: RGBA(t.gutter), accent: RGBA(t.accent),
-            link: RGBA(surfaced(t.link)), yours: RGBA(t.accent).opacity(dark ? 0.18 : 0.12).over(RGBA(t.bg)),
+            accentText: RGBA(t.accent), link: RGBA(surfaced(t.link)), yours: RGBA(t.accent).opacity(dark ? 0.18 : 0.12).over(RGBA(t.bg)),
             mention: RGBA(surfaced(t.mention)), online: RGBA(online),
             selectedOnline: RGBA(Contrast.fit(online, on: t.selection, toward: t.fg, low: 4.5, target: 4.5)),
             failed: RGBA(surfaced(Contrast.fit(red, on: t.bg, toward: t.fg, low: 3, target: 3))),
