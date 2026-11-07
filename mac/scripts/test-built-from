@@ -140,7 +140,7 @@ git tag v0.1.0
 says "at a release's tag on origin/main" release v0.1.0
 copy annotated
 git tag -a v0.1.0 -m 'jaw 0.1.0'
-says "at a release's annotated tag on origin/main, as scripts/release.sh has it made" release v0.1.0
+says "at a release's annotated tag on origin/main, as mise run release has it made" release v0.1.0
 git worktree add -q -b other "$scratch/annotated-linked"
 says "a linked worktree at a release's tag on origin/main" release v0.1.0 "$scratch/annotated-linked"
 git clone -q --depth 1 "file://$scratch/annotated" "$scratch/annotated-shallow"

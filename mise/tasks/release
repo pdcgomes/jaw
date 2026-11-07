@@ -1,20 +1,21 @@
-#!/bin/sh
+#!/usr/bin/env bash
+#MISE description="A release from a clean tree at a tag like v0.1.0: its tarball, sha256 and Homebrew formula in target/dist/, with the commands that publish them, printed for you to run"
 # Makes jaw's release from a clean tree at a tag like v0.1.0: its source tarball, the tarball's
 # sha256, and the Homebrew formula with both filled in, all in target/dist/, for the release notes
 # in docs/releases/. It pushes nothing and makes no repository or release: it prints the commands
 # that do, for you to run.
 #
-#     scripts/release.sh
+#     mise run release
 #
 # JAW_URL is where Homebrew will download the tarball, the GitHub release's by default, and JAW_TAP
 # the tap's repository, pdcgomes/homebrew-jaw by default.
-set -eu
+set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 
 fail() {
-	echo "release.sh: $*" >&2
+	echo "release: $*" >&2
 	exit 1
 }
 

@@ -1,4 +1,4 @@
-# jaw's Homebrew formula, for Formula/jaw.rb in its tap. scripts/release.sh fills in url and sha256
+# jaw's Homebrew formula, for Formula/jaw.rb in its tap. mise run release fills in url and sha256
 # for a tagged release and prints the result.
 class Jaw < Formula
   desc "WhatsApp in a terminal, fast, from the keyboard"
@@ -21,7 +21,8 @@ class Jaw < Formula
   end
 
   def install
-    system "make", "install", "PREFIX=#{prefix}"
+    ENV["PREFIX"] = prefix.to_s
+    system "mise/tasks/install"
   end
 
   def caveats
