@@ -119,7 +119,9 @@ public enum LinkStep: Decodable, Sendable, Hashable {
     case qr(code: String, expires: Int64)
     case code(String)
     case done(phone: String)
-    case failed(reason: String)
+    /// `belongsTo` when the phone linked another account than the one whose messages this folder
+    /// keeps, which alone links here: that account's number.
+    case failed(reason: String, belongsTo: String?)
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -127,12 +129,14 @@ public enum LinkStep: Decodable, Sendable, Hashable {
         case "qr": self = try .qr(code: c.decode(String.self, forKey: .code), expires: c.decode(Int64.self, forKey: .expires))
         case "code": self = try .code(c.decode(String.self, forKey: .code))
         case "done": self = try .done(phone: c.decodeIfPresent(String.self, forKey: .phone) ?? "")
-        default: self = try .failed(reason: c.decodeIfPresent(String.self, forKey: .reason) ?? "linking failed")
+        default: self = try .failed(reason: c.decodeIfPresent(String.self, forKey: .reason) ?? "linking failed",
+                                    belongsTo: c.decodeIfPresent(String.self, forKey: .belongsTo))
         }
     }
 
     enum Keys: String, CodingKey {
         case state, code, expires, phone, reason
+        case belongsTo = "belongs_to"
     }
 }
 

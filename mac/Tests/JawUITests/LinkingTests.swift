@@ -1,4 +1,5 @@
 import AppKit
+import JawKit
 @testable import JawUI
 import Testing
 
@@ -50,6 +51,17 @@ import Testing
     #expect(view.isAccessibilityElement())
     #expect(view.accessibilityRole() == .image)
     #expect(view.accessibilityLabel() == "The code to scan with your phone")
+}
+
+@MainActor @Test func `another number refused says which number the folder belongs to and what to do, in Jaw's words, and another failure says jawd's`() throws {
+    let push = #"{"state":"failed","reason":"the phone linked +351919999999","belongs_to":"+351910000001"}"#
+    let refused = try JSONDecoder().decode(LinkStep.self, from: Data(push.utf8))
+    #expect(refused == .failed(reason: "the phone linked +351919999999", belongsTo: "+351910000001"))
+    #expect(LinkingView.failed(refused) == "This folder belongs to +351910000001, whose messages Jaw keeps in it, so only +351910000001 links here. "
+        + "Link it, or open Jaw on a folder of its own for the other account, with --home or JAW_HOME.")
+    let unfinished = try JSONDecoder().decode(LinkStep.self, from: Data(#"{"state":"failed","reason":"WhatsApp didn't finish linking jaw; link again"}"#.utf8))
+    #expect(LinkingView.failed(unfinished) == "Linking failed: WhatsApp didn't finish linking jaw; link again")
+    #expect(LinkingView.failed(.done(phone: "+351910000001")) == nil && LinkingView.failed(nil) == nil)
 }
 
 @MainActor @Test func `Log Out… asks first, as jaw unlink does: only the phone can link Jaw again, and jawd keeps the messages`() {

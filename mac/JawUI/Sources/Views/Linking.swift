@@ -51,8 +51,8 @@ public struct LinkingView: View {
                             let left = max(0, Int((Double(expires) / 1000 - now.timeIntervalSince1970).rounded()))
                             Text("It changes in \(left) s.").textStyle(.caption).foregroundStyle(roles.tertiary.color)
                         }
-                        if case let .failed(reason) = step {
-                            Text("Linking failed: \(reason)").foregroundStyle(roles.failed.color)
+                        if let failed = Self.failed(step) {
+                            Text(failed).foregroundStyle(roles.failed.color).fixedSize(horizontal: false, vertical: true)
                             Button("Try Again") { begin(byPhone ? phone : nil) }
                         }
                         Button(byPhone ? "Use a QR Code Instead" : "Use a Phone Number Instead") {
@@ -84,6 +84,16 @@ public struct LinkingView: View {
     func begin(_ phone: String?) {
         asked = true
         start(phone)
+    }
+
+    /// What the screen says of a link that failed, nil while none has: Jaw's words when the phone
+    /// linked another account than the one whose messages this folder keeps, which alone links here
+    /// (`belongs_to`), and jawd's otherwise.
+    static func failed(_ step: LinkStep?) -> String? {
+        guard case let .failed(reason, belongsTo) = step else { return nil }
+        guard let number = belongsTo else { return "Linking failed: \(reason)" }
+        return "This folder belongs to \(number), whose messages Jaw keeps in it, so only \(number) links here. "
+            + "Link it, or open Jaw on a folder of its own for the other account, with --home or JAW_HOME."
     }
 
     var instructions: String {
