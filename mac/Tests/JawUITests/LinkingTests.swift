@@ -51,3 +51,12 @@ import Testing
     #expect(view.accessibilityRole() == .image)
     #expect(view.accessibilityLabel() == "The code to scan with your phone")
 }
+
+@MainActor @Test func `Log Out… asks first, as jaw unlink does: only the phone can link Jaw again, and jawd keeps the messages`() {
+    let alert = Prompts.logOut("+351 912 000 000")
+    #expect(alert.messageText == "Log Out of WhatsApp?")
+    #expect(alert.informativeText
+        == "Jaw stops being one of +351 912 000 000's linked devices, and only the phone can link it again. jawd keeps your messages.")
+    #expect(alert.buttons.map(\.title) == ["Log Out", "Cancel"] && alert.buttons.first?.hasDestructiveAction == true)
+    #expect(Prompts.logOut(nil).informativeText.hasPrefix("Jaw stops being one of your linked devices"))
+}

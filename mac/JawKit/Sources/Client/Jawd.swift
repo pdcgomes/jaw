@@ -249,6 +249,12 @@ public final class Jawd {
         ask("link.cancel", NoParams(), .quiet)
     }
 
+    /// Logs the account out of WhatsApp; once jawd has forgotten it, its `connection` push says so,
+    /// logged out from jaw, and the window shows linking again.
+    public func linkLogout() {
+        ask("link.logout", NoParams(), .did("logging out"))
+    }
+
     /// jawd's status: shown, as the Help menu asks for it, or read for what the app needs to know of
     /// it, what jawd is missing, as `.statusRead`.
     public func status(shown: Bool = true) {

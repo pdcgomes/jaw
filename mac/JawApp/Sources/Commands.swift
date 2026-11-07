@@ -271,6 +271,8 @@ extension AppModel {
             { [weak self] in self?.jawd.status() })
         add(Command("link", "Link a Device…", phrase: "Link a device", detail: "this Mac, by QR code", place: .help, group: 1,
                     enabled: { [weak self] in !(self?.linked ?? true) }) { [weak self] in self?.window?.refresh() })
+        add(Command("logout", "Log Out…", phrase: "Log out of WhatsApp", detail: "unlink Jaw, after asking; jawd keeps your messages",
+                    place: .help, group: 1, enabled: { [weak self] in self?.linked ?? false }) { [weak self] in self?.window?.askLogOut() })
         return all
     }
 

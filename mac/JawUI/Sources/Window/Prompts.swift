@@ -30,6 +30,18 @@ public enum Prompts {
         return alert
     }
 
+    /// Log Out…'s question, as `jaw unlink` asks it: only the phone can link Jaw again, and jawd keeps
+    /// the messages, as `link.logout` does. `phone` is the account's number, when jawd said it.
+    public static func logOut(_ phone: String?) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Log Out of WhatsApp?"
+        let whose = phone.map { "one of \($0)'s" } ?? "one of your"
+        alert.informativeText = "Jaw stops being \(whose) linked devices, and only the phone can link it again. jawd keeps your messages."
+        alert.addButton(withTitle: "Log Out").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        return alert
+    }
+
     /// Delete…'s question for a folder of yours: its chats stay wherever else they're filed, and its
     /// subfolders take its place, as jawd's `folder.delete` does.
     public static func deleteFolder(_ name: String) -> NSAlert {

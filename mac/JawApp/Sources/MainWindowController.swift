@@ -117,7 +117,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                          open: { [weak model] c in model?.open(c, opened: true) },
                          glance: { [weak self] in self?.showGlance() },
                          linkStart: { [weak model] phone in model?.jawd.linkStart(phone: phone) },
-                         linkCancel: { [weak model] in model?.jawd.linkCancel() },
+                         // The linking screen goes once linking is done too, when there's nothing to cancel.
+                         linkCancel: { [weak model] in if model?.linked == false { model?.jawd.linkCancel() } },
                      ))
         model.chatMenuFoldersChanged()
     }
@@ -422,6 +423,16 @@ extension MainWindowController {
         guard let window, let name = model.book.current else { return }
         Prompts.deleteLayout(name).beginSheetModal(for: window) { [weak model] response in
             if response == .alertFirstButtonReturn { model?.deleteLayout(name) }
+        }
+    }
+
+    /// Log Out…: asks first, then has jawd log the account out; the linking screen follows once jawd
+    /// says it has.
+    func askLogOut() {
+        guard let window, model.linked else { return }
+        Prompts.logOut(model.welcome?.account.me?.phone).beginSheetModal(for: window) { [weak model] response in
+            guard response == .alertFirstButtonReturn else { return }
+            model?.jawd.linkLogout()
         }
     }
 
