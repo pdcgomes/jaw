@@ -339,7 +339,7 @@ async fn one_not_in_the_cache_is_downloaded_first_then_played() {
         .await
         .unwrap();
     assert!(asked, "its file is asked for, ahead of what downloads by itself");
-    assert_eq!(rig.voice.status().state.as_deref(), Some("waiting"));
+    status_when(&rig, "it waits for its file", |s| s.state.as_deref() == Some("waiting")).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(pushes.try_recv().is_err(), "nothing plays before its file is in");
     rig.world.gate_downloads(false);
@@ -681,7 +681,8 @@ async fn a_recording_with_nothing_in_it_is_refused_and_leaves_nothing() {
     rig.call("voice.record", json!({ "chat": ANA })).await.unwrap();
     let e = rig.call("voice.stop", json!({})).await.unwrap_err();
     assert_eq!(e.code, code::NOT_ALLOWED, "{e:?}");
-    assert!(rig.recordings().is_empty() && rig.voice.status().recording.is_none());
+    assert!(rig.recordings().is_empty(), "nothing left: {:?}", rig.recordings());
+    status_when(&rig, "nothing records", |s| s.recording.is_none()).await;
     let waited = tokio::time::timeout(PATIENCE, async {
         while rig.said().last() != Some(&(ANA.to_string(), PAUSED_SAID)) {
             tokio::time::sleep(Duration::from_millis(20)).await;

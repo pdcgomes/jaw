@@ -1363,13 +1363,13 @@ async fn a_start_removes_partial_files_and_files_no_row_names_and_takes_up_what_
     assert_eq!(rig.media.status().partial_removed, 1);
     let row = rig.until(ANA, "3EB0LEFT", "downloaded", previewed).await;
     assert!(rig.file(&row["media"]["path"]).exists());
-    for _ in 0..100 {
-        if !rig.home.path().join(&stray).exists() {
-            break;
+    // The sweep counts what it removed once it has been through the previews too, after the stray.
+    let swept = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.home.path().join(&stray).exists() || rig.media.status().orphans_removed == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(!rig.home.path().join(&stray).exists(), "a file no row names is swept");
+    });
+    assert!(swept.await.is_ok(), "a file no row names is swept: {:?}", rig.media.status());
     assert_eq!(rig.media.status().orphans_removed, 1);
 }
 
