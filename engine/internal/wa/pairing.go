@@ -35,8 +35,8 @@ type pairing struct {
 	linked *enginepb.Linked
 	since  time.Time
 	timer  *time.Timer
-	// linkFinishing, but in the tests.
-	finishing time.Duration
+	// linkFinishing and linkLongest, but in the tests.
+	finishing, longest time.Duration
 }
 
 func (p *pairing) wait() time.Duration {
@@ -44,6 +44,13 @@ func (p *pairing) wait() time.Duration {
 		return p.finishing
 	}
 	return linkFinishing
+}
+
+func (p *pairing) most() time.Duration {
+	if p.longest > 0 {
+		return p.longest
+	}
+	return linkLongest
 }
 
 // end forgets the link that was finishing, with p locked.
@@ -130,7 +137,7 @@ func (e *Engine) unfinished(client *whatsmeow.Client) {
 		p.Unlock()
 		return
 	}
-	if connected && time.Since(p.since) < linkLongest {
+	if connected && time.Since(p.since) < p.most() {
 		p.timer = time.AfterFunc(p.wait(), func() { e.unfinished(client) })
 		p.Unlock()
 		return

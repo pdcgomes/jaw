@@ -192,6 +192,81 @@ func TestALinkWhatsAppRefusesAfterThePhonePairedLeavesNoDeviceAndSaysWhy(t *test
 	}
 }
 
+// saidUntilPong is what the engine says to jawd until it answers a ping, sent now as command id.
+func saidUntilPong(t *testing.T, jawd *link.Link, id uint64) []*enginepb.Event {
+	t.Helper()
+	command(t, jawd, id, &enginepb.Command{Kind: &enginepb.Command_Ping{Ping: &enginepb.Ping{}}})
+	var said []*enginepb.Event
+	for {
+		frame := recv(t, jawd)
+		if frame.Id == id && frame.GetReply().GetPong() != nil {
+			return said
+		}
+		said = append(said, frame.GetEvent())
+	}
+}
+
+// namesTheAccount says whether event says the link done or names an account, as nothing may for a
+// link that failed.
+func namesTheAccount(event *enginepb.Event) bool {
+	c := event.GetConnection()
+	return event.GetLink().GetDone() != nil || c.GetJid() != "" || c.GetState() == enginepb.Connection_CONNECTED
+}
+
+func TestAConnectedTheClientWasDispatchingAsItsHalfMadeDeviceWasClearedSaysNothing(t *testing.T) {
+	e, jawd, closeLink := unlinkedEngine(t, &fakeReach{})
+	defer closeLink()
+	client := e.cli()
+	pairedByThePhone(t, e, client)
+	go e.handleFrom(client, &events.ConnectFailure{Reason: events.ConnectFailureClientUnknown, Message: "unknown"})
+	if failed := recv(t, jawd).GetEvent().GetLink().GetFailed(); failed == "" {
+		t.Fatal("no link failed")
+	}
+	if said := recv(t, jawd).GetEvent(); said.GetConnection().GetState() != enginepb.Connection_CONNECT_FAILED || namesTheAccount(said) {
+		t.Fatalf("the refusal said %v", said)
+	}
+	renewed(t, e, client)
+	// handleFrom took it as the running client's before the clearing retired it.
+	if !returnsAlone(func() { e.say(client, &events.Connected{}) }) {
+		t.Fatal("the Connected went to jawd")
+	}
+	if said := saidUntilPong(t, jawd, 9); len(said) != 0 {
+		t.Fatalf("after the clearing the engine said %v", said)
+	}
+}
+
+func TestAConnectedAsTheClearingRetiresTheClientSaysNothing(t *testing.T) {
+	e, jawd, closeLink := unlinkedEngine(t, &fakeReach{})
+	defer closeLink()
+	client := e.cli()
+	pairedByThePhone(t, e, client)
+	// The Connected comes once the link has ended and as its client is retired.
+	var once sync.Once
+	e.retiring = func() {
+		once.Do(func() {
+			connected := make(chan struct{})
+			go func() {
+				e.say(client, &events.Connected{})
+				close(connected)
+			}()
+			select {
+			case <-connected:
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+	go e.handleFrom(client, &events.ConnectFailure{Reason: events.ConnectFailureClientUnknown, Message: "unknown"})
+	var said []*enginepb.Event
+	for len(said) == 0 || said[len(said)-1].GetConnection().GetState() != enginepb.Connection_CONNECT_FAILED {
+		said = append(said, recv(t, jawd).GetEvent())
+	}
+	said = append(said, saidUntilPong(t, jawd, 9)...)
+	if len(said) != 2 || said[0].GetLink().GetFailed() == "" || namesTheAccount(said[1]) {
+		t.Fatalf("a Connected as the client was retired: the engine said %v", said)
+	}
+	renewed(t, e, client)
+}
+
 func TestALinkWhoseClientIsntConnectedAMinuteAfterThePhonePairedIsCleared(t *testing.T) {
 	fake := &fakeReach{}
 	e, jawd, closeLink := unlinkedEngine(t, fake)
@@ -224,6 +299,26 @@ func TestALinkWhoseClientIsntConnectedAMinuteAfterThePhonePairedIsCleared(t *tes
 	}
 	if said := recv(t, jawd).GetEvent().GetConnection(); said.GetState() != enginepb.Connection_CONNECTED {
 		t.Fatalf("then the connection said %v", said)
+	}
+}
+
+func TestALinkConnectedButNeverFinishedIsClearedOnceItsLongestHasPassed(t *testing.T) {
+	fake := &fakeReach{isConnected: true}
+	e, jawd, closeLink := unlinkedEngine(t, fake)
+	defer closeLink()
+	e.pairing.finishing, e.pairing.longest = 20*time.Millisecond, 300*time.Millisecond
+	client := e.cli()
+	paired := time.Now()
+	pairedByThePhone(t, e, client)
+	failed := recv(t, jawd).GetEvent().GetLink()
+	if failed.GetFailed() != "WhatsApp didn't finish linking jaw; link again" {
+		t.Fatalf("a link connected for its longest said %v", failed)
+	}
+	if took := time.Since(paired); took < 300*time.Millisecond {
+		t.Fatalf("a link still connected was cleared after %v, before its longest", took)
+	}
+	if fresh := renewed(t, e, client); fresh.Store.ID != nil || devicesIn(t, e) != 0 || e.half(client) {
+		t.Fatalf("after its longest: the fresh device %v, %d in session.db", fresh.Store.ID, devicesIn(t, e))
 	}
 }
 

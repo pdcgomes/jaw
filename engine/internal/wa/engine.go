@@ -45,7 +45,10 @@ type Engine struct {
 	// The link the phone has paired, while it's finishing (pairing.go).
 	pairing pairing
 	reach   reach
-	media   media
+	// What a test does as a client is about to be retired: a clearing retires its client under the
+	// pairing's lock (abandon), and a test holds it there.
+	retiring func()
+	media    media
 	// What downloads and uploads files instead of the client, in the tests.
 	mediaDownloader mediaDownloader
 	mediaUploader   mediaUploader
@@ -264,6 +267,9 @@ func (e *Engine) loggedOut(client *whatsmeow.Client, reason events.ConnectFailur
 // device in session.db, so a late word from a client replaced before mustn't reach it, or it
 // would delete the device linked since.
 func (e *Engine) retire(client *whatsmeow.Client) bool {
+	if e.retiring != nil {
+		e.retiring()
+	}
 	return client == e.cli() && e.retired.Swap(client) != client
 }
 
