@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#MISE description="Take out what mise run install put in, with the same PREFIX (sudo only for folders you can't write)"
+set -euo pipefail
+destdir="${DESTDIR:-}"
+prefix="${PREFIX:-/usr/local}"
+bindir="$destdir${BINDIR:-$prefix/bin}"
+libexecdir="$destdir${LIBEXECDIR:-$prefix/libexec/jaw}"
+as_needed() {
+    folder="$1"
+    shift
+    if [ -w "$folder" ]; then "$@"; else sudo "$@"; fi
+}
+if [ -d "$bindir" ]; then
+    as_needed "$bindir" rm -f "$bindir/jaw" "$bindir/jawd"
+fi
+if [ -d "$libexecdir" ]; then
+    as_needed "$libexecdir" rm -f "$libexecdir/jaw-engine"
+    if [ -z "$(ls -A "$libexecdir")" ]; then
+        as_needed "$(dirname "$libexecdir")" rmdir "$libexecdir"
+    fi
+fi
+echo "==> jaw and jawd out of $bindir, jaw-engine out of $libexecdir"

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#MISE description="jaw, jawd and jaw-engine built for release and installed: jaw and jawd in PREFIX/bin, jaw-engine in PREFIX/libexec/jaw (PREFIX is /usr/local unless set; sudo only for folders you can't write)"
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/../.."
+destdir="${DESTDIR:-}"
+prefix="${PREFIX:-/usr/local}"
+bindir="$destdir${BINDIR:-$prefix/bin}"
+libexecdir="$destdir${LIBEXECDIR:-$prefix/libexec/jaw}"
+# As root, as with sudo, it builds nothing: cargo and go would start again in root's caches, without
+# the crates and modules you've downloaded.
+if [ "$(id -u)" != 0 ]; then
+    "${CARGO:-cargo}" build --release --locked -p jaw -p jawd
+    "$here/engine"
+fi
+for built in target/release/jaw target/release/jawd target/engine/jaw-engine; do
+    [ -x "$built" ] || { echo "install: nothing to install yet; run mise run install as yourself" >&2; exit 1; }
+done
+copy() {
+    folder="$1"
+    shift
+    if mkdir -p "$folder" 2>/dev/null && [ -w "$folder" ]; then
+        install -m 755 "$@" "$folder"
+    else
+        sudo mkdir -p "$folder"
+        sudo install -m 755 "$@" "$folder"
+    fi
+}
+copy "$bindir" target/release/jaw target/release/jawd
+copy "$libexecdir" target/engine/jaw-engine
+echo "==> jaw and jawd in $bindir, jaw-engine in $libexecdir"
