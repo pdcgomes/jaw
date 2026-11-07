@@ -38,11 +38,11 @@ final class SettingsWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Shows the window, or brings it to the front, on `pane` when one's asked for; the first time,
-    /// centred over `main`.
+    /// Shows the window, or brings it to the front, on `pane` when one's asked for; opening, its gallery
+    /// chooses for the slot in use; the first time, centred over `main`.
     func show(_ pane: SettingsPane?, over main: NSWindow?) {
-        preferences.choosing = nil
         guard let window else { return }
+        if !window.isVisible { preferences.choosing = nil }
         if let pane { tabs.show(pane) }
         if !placed, let main {
             let size = window.frame.size

@@ -30,4 +30,11 @@ public enum SettingsPane: String, CaseIterable, Sendable {
         case .panes: NSSize(width: 500, height: 220)
         }
     }
+
+    /// How far the system's grouped forms, Messages' and Panes', set their sections in from the pane's
+    /// edges, which Appearance's open sections take so the three line up as the tabs change.
+    public static let margin: CGFloat = 20
+    /// How far a grouped form sets a section's words in from its box's edge: its rows' labels, its
+    /// header and its footer.
+    public static let indent: CGFloat = 10
 }

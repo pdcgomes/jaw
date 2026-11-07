@@ -3,9 +3,9 @@ import JawThemes
 import SwiftUI
 
 /// A theme's half as a small chat, drawn from its roles as the chat list and a conversation draw them:
-/// on the ground, an unread chat's row on the surface, a separator, their bubble on the surface with a
-/// mention of you, and yours. 104 points tall and as wide as it's given, 144 in the design; a slot's
-/// tile draws it at half size.
+/// on the ground, an unread chat's row on the surface with a separator under it, their bubble on the
+/// surface with a mention of you, and yours, all of it inside the card's edge by `Space.s` or more.
+/// 104 points tall and as wide as it's given, 144 in the design; a slot's tile draws it at half size.
 public struct ThemeChat: View {
     public static let size = CGSize(width: 144, height: 104)
     let roles: Roles
@@ -16,8 +16,10 @@ public struct ThemeChat: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: Space.xxs) {
-            row
-            Rectangle().fill(roles.separator.color).frame(height: Stroke.hairline)
+            VStack(spacing: 0) {
+                row
+                Rectangle().fill(roles.separator.color).frame(height: Stroke.hairline)
+            }
             theirs
             yours.frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -53,7 +55,8 @@ public struct ThemeChat: View {
         }
         .textStyle(.micro)
         .lineLimit(1)
-        .padding(Space.xs)
+        .padding(.horizontal, Space.xs)
+        .padding(.vertical, Space.xxs)
         .background(RoundedRectangle(cornerRadius: Radius.small).fill(roles.surface.color))
     }
 
@@ -87,9 +90,10 @@ public struct ThemeChat: View {
 }
 
 /// A card in the gallery: the half the slot chosen for would take, as a small chat, that half's name
-/// under it in the system's label colour, a tick and the system's accent around it when it's that
-/// slot's theme, and a ring under the pointer. VoiceOver reads it as its label: the half's name, its
-/// section and the slots it fills.
+/// under it in the system's label colour, with a tick before it in the system's accent and the accent
+/// around the card when it's that slot's theme, as the wireframes draw it, so nothing covers the chat,
+/// and a ring under the pointer. VoiceOver reads it as its label: the half's name, its section and the
+/// slots it fills.
 public struct ThemeCard: View {
     let theme: Theme
     let slot: Slot
@@ -116,14 +120,13 @@ public struct ThemeCard: View {
                     RoundedRectangle(cornerRadius: Radius.control)
                         .strokeBorder(ring, lineWidth: ticked || hovered || pointer ? Stroke.focus : Stroke.hairline)
                 }
-                .overlay(alignment: .topTrailing) {
-                    if ticked {
-                        Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, Color.accentColor)
-                            .padding(Space.xs)
-                    }
+            HStack(alignment: .firstTextBaseline, spacing: Space.xxs) {
+                if ticked {
+                    Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Color.accentColor)
                 }
-            Text(theme.name(slot)).font(.callout).lineLimit(1)
+                Text(theme.name(slot)).lineLimit(1)
+            }
+            .font(.callout)
         }
         .contentShape(Rectangle())
         .onHover { pointer = $0 }
@@ -209,7 +212,8 @@ public struct GallerySection: View {
 
 /// A section as the system's grouped forms draw one, but open rather than boxed, as the wireframes
 /// draw the slots and the gallery: its header, a heading VoiceOver moves by, what it holds, and its
-/// footer.
+/// footer, the header and footer set in from what it holds as a grouped form's are from its box, so
+/// they line up with Messages' and Panes'.
 public struct SettingsSection<Content: View>: View {
     let title: String
     let footer: String?
@@ -224,9 +228,11 @@ public struct SettingsSection<Content: View>: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: Space.s) {
             Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, SettingsPane.indent)
             content
             if let footer {
                 Text(footer).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, SettingsPane.indent)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -235,8 +241,9 @@ public struct SettingsSection<Content: View>: View {
 
 /// A slot's tile: what it draws, as a card at half size, with the slot's name, its theme's name and
 /// source, and whether it's in use or when it would be; outlined in the system's accent while the
-/// gallery chooses for it. It fills the height it's given, so two side by side in a row as tall as
-/// the taller of them match, whichever says more.
+/// gallery chooses for it, which VoiceOver hears as its value. It fills the height it's given, from
+/// its top, so two side by side in a row as tall as the taller of them match, their names level,
+/// whichever says more.
 public struct SlotTileView: View {
     let tile: SlotTile
     let roles: Roles
@@ -249,14 +256,14 @@ public struct SlotTileView: View {
     }
 
     public var body: some View {
-        HStack(spacing: Space.m) {
+        HStack(alignment: .top, spacing: Space.m) {
             ThemeChat(roles)
                 .frame(width: ThemeChat.size.width, height: ThemeChat.size.height)
                 .scaleEffect(0.5)
                 .frame(width: ThemeChat.size.width / 2, height: ThemeChat.size.height / 2)
             VStack(alignment: .leading, spacing: Space.xxs) {
                 Text(tile.slot.title).font(.headline)
-                Text(tile.name).font(.callout).lineLimit(2)
+                Text(tile.name).font(.callout)
                 if let note = tile.note {
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
@@ -264,13 +271,14 @@ public struct SlotTileView: View {
             Spacer(minLength: 0)
         }
         .padding(Space.xs)
-        .frame(maxWidth: .infinity, minHeight: 64, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 64, maxHeight: .infinity, alignment: .topLeading)
         .overlay {
             RoundedRectangle(cornerRadius: Radius.control)
                 .strokeBorder(outlined ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: outlined ? Stroke.focus : Stroke.hairline)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .accessibilityValue(outlined ? "The gallery shows its themes" : "")
         .accessibilityAddTraits(outlined ? [.isButton, .isSelected] : .isButton)
     }
 }

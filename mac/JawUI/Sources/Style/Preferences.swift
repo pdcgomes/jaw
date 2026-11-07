@@ -65,11 +65,13 @@ public final class Preferences {
     public var textSize: CGFloat { didSet { save() } }
     public var font: MessageFont { didSet { save() } }
     public var appearance: Appearance { didSet { save() } }
-    /// The theme in each slot, by ID, kept as `themeDark` and `themeLight`.
+    /// The theme in each slot, by ID, kept as `themeDark` and `themeLight`. Any change but the
+    /// gallery's arrows' own ends their run (`arrowsFrom`).
     public var slots: Slots {
         didSet {
             made = [:]
             listed = nil
+            arrowsFrom = nil
             remember()
             save()
         }
@@ -106,8 +108,19 @@ public final class Preferences {
     public var omarchyState: OmarchyState = .connecting
 
     /// The slot the gallery chooses for, nil for the one in use; Settings sets it back each time it
-    /// opens, and it isn't kept.
-    public var choosing: Slot? = nil
+    /// opens, and it isn't kept. Setting it ends the arrows' run.
+    public var choosing: Slot? = nil {
+        didSet { arrowsFrom = nil }
+    }
+
+    /// The slots as they were at the first arrow of a run through the gallery, which each arrow previews
+    /// from (`preview(_:for:)`), nil between runs; any other change of the slots ends a run, as does a
+    /// click in the pane, choosing for another slot and Settings opening. Not kept.
+    public var arrowsFrom: Slots? = nil {
+        didSet {
+            if arrowsFrom != oldValue { listed = nil }
+        }
+    }
 
     /// How much panes without the keys are dimmed, 0 to 0.6.
     public var paneDim: Double { didSet { save() } }
@@ -200,13 +213,24 @@ public final class Preferences {
     }
 
     /// Every theme there is to choose, in the gallery's order: Omarchy's as jawd serves them, or until
-    /// it has, the slots' own from their copies.
+    /// it has, the slots' own from their copies, and while the arrows run, those of the slots they
+    /// started from, so they can come back to them.
     public var themes: [Theme] {
-        let slots = self.slots, accent = self.accent, served = self.served
+        let slots = self.slots, accent = self.accent, served = self.served, start = self.arrowsFrom
         if let listed { return listed }
-        let themes = Catalog.themes(omarchy: served ?? remembered(slots), accent: accent)
+        let themes = Catalog.themes(omarchy: served ?? remembered(slots, or: start), accent: accent)
         listed = themes
         return themes
+    }
+
+    /// Fills the slots as the gallery's arrows reach `theme`, in `slot`, previewing it from the slots
+    /// they started from, as the terminal previews a theme as it moves through its list: those slots as
+    /// they were where it's the theme they started on, or as a click there would fill them, so the other
+    /// slot takes a theme with both halves only while the arrows rest on it, and → ← loses nothing.
+    public func preview(_ theme: Theme, for slot: Slot) {
+        let start = arrowsFrom ?? slots
+        slots = theme.id == start[slot] ? start : start.choosing(theme, for: slot)
+        arrowsFrom = start
     }
 
     /// The line the Omarchy section shows in place of jawd's themes, or nil once they're in.
@@ -214,13 +238,14 @@ public final class Preferences {
         served == nil ? omarchyState.line : nil
     }
 
-    /// The slots' Omarchy themes as jawd last served them, from the copies kept beside the slots; a copy
-    /// of a theme other than its slot's is passed over.
-    func remembered(_ slots: Slots) -> [OmarchyTheme] {
+    /// The slots' Omarchy themes as jawd last served them, from the copies kept beside the slots, or
+    /// beside `start`'s, the slots the arrows started from; a copy of a theme neither holds in its slot
+    /// is passed over.
+    func remembered(_ slots: Slots, or start: Slots? = nil) -> [OmarchyTheme] {
         Slot.allCases.compactMap { slot in
             guard var colours = defaults.dictionary(forKey: Self.copy(slot)) as? [String: String],
                   let id = colours.removeValue(forKey: "id"), let name = colours.removeValue(forKey: "name"),
-                  slots[slot] == "omarchy:" + id
+                  slots[slot] == "omarchy:" + id || start?[slot] == "omarchy:" + id
             else { return nil }
             return OmarchyTheme(id: id, name: name, dark: slot.isDark, colours: colours)
         }

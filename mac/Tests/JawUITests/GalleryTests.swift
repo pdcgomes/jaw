@@ -6,8 +6,9 @@ import Testing
 
 /// The Appearance pane's gallery and slots: a slot's half of every theme that has one, in Jaw's,
 /// Omarchy's and Redlamp's sections; the Omarchy section while jawd's themes aren't in; where the
-/// arrows go, and the arrows pressed in a window, choosing and scrolling with no click first, and a
-/// click anywhere in the pane giving the gallery the keys back; what each slot's tile says; what
+/// arrows go, and the arrows pressed in a window, choosing and scrolling with no click first, each
+/// card previewed from the slots they started from, so nothing the owner had is lost, and a click
+/// anywhere in the pane ending their run and giving the gallery the keys back; what each slot's tile says; what
 /// VoiceOver reads a card as; and every card for each slot compared with a reference picture, so a
 /// change to any mapping shows.
 
@@ -72,9 +73,9 @@ func allOmarchy() throws -> [OmarchyTheme] {
     #expect(gallery.moving(from: "omarchy:catppuccin-latte", .right) == nil, "a light theme isn't in the dark gallery")
 }
 
-@MainActor @Test(.timeLimit(.minutes(1))) func `the arrows choose card after card with no click and no keyboard navigation, and the gallery scrolls to each`() async throws {
-    let preferences = try scratchPreferences("gallery-keys")
-    preferences.served = try allOmarchy()
+/// The Appearance pane in a window of its own, offscreen and dark, as Settings shows it.
+@MainActor
+func appearanceWindow(_ preferences: Preferences) -> (NSWindow, NSHostingView<AppearancePane>) {
     let host = NSHostingView(rootView: AppearancePane(preferences: preferences))
     let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: -30000, y: -30000), size: SettingsPane.appearance.size),
                           styleMask: [.borderless], backing: .buffered, defer: false)
@@ -82,53 +83,78 @@ func allOmarchy() throws -> [OmarchyTheme] {
     window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = host
     window.orderFront(nil)
+    return (window, host)
+}
+
+/// An arrow pressed in `window` as the keyboard sends one, with its function key's character, which
+/// AppKit reads as it offers a key no view takes to the menus.
+@MainActor
+func press(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags = [], in window: NSWindow) async throws {
+    let functionKeys = [123: NSLeftArrowFunctionKey, 124: NSRightArrowFunctionKey, 125: NSDownArrowFunctionKey, 126: NSUpArrowFunctionKey]
+    let typed = try #require(functionKeys[Int(keyCode)].flatMap { UnicodeScalar($0) }.map { String($0) })
+    let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers.union([.numericPad, .function]),
+                                            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: typed,
+                                            charactersIgnoringModifiers: typed, isARepeat: false, keyCode: keyCode))
+    window.sendEvent(key)
+    try await Task.sleep(for: .milliseconds(100))
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `the arrows choose card after card with no click and no keyboard navigation, previewing each from where they started, and the gallery scrolls to each`() async throws {
+    let preferences = try scratchPreferences("gallery-keys")
+    preferences.served = try allOmarchy()
+    let (window, host) = appearanceWindow(preferences)
     defer { window.close() }
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "the gallery holds the window's keys as the pane opens")
-    /// An arrow pressed as the keyboard sends one, with its function key's character, which AppKit
-    /// reads as it offers a key no view takes to the menus.
-    func press(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags = []) async throws {
-        let functionKeys = [123: NSLeftArrowFunctionKey, 124: NSRightArrowFunctionKey, 125: NSDownArrowFunctionKey, 126: NSUpArrowFunctionKey]
-        let typed = try #require(functionKeys[Int(keyCode)].flatMap { UnicodeScalar($0) }.map { String($0) })
-        let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers.union([.numericPad, .function]),
-                                                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: typed,
-                                                charactersIgnoringModifiers: typed, isARepeat: false, keyCode: keyCode))
-        window.sendEvent(key)
-        try await Task.sleep(for: .milliseconds(100))
-    }
     let (left, right, down, up): (UInt16, UInt16, UInt16, UInt16) = (123, 124, 125, 126)
-    try await press(right)
-    try await press(right)
-    try await press(down)
+    try await press(right, in: window)
+    try await press(right, in: window)
+    try await press(down, in: window)
     #expect(preferences.slots == Slots(dark: "omarchy:hackerman", light: "jaw"), "→ → ↓ from Jaw's: Catppuccin, Ethereal, then Hackerman under it")
-    try await press(right, .command)
-    #expect(preferences.slots.dark == "omarchy:hackerman", "⌘→ isn't the gallery's, and goes on up the responder chain")
+    try await press(right, .command, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:hackerman", light: "jaw"), "⌘→ isn't the gallery's, and goes on up the responder chain")
     func scrolls(_ view: NSView) -> NSScrollView? {
         view as? NSScrollView ?? view.subviews.lazy.compactMap { scrolls($0) }.first
     }
     let scroll = try #require(scrolls(host), "the pane scrolls")
     let top = scroll.documentVisibleRect.minY
     for _ in 0 ..< 7 {
-        try await press(down)
+        try await press(down, in: window)
     }
-    #expect(preferences.slots.dark == "redlamp:nord", "down Hackerman's column, then into Redlamp's")
+    #expect(preferences.slots == Slots(dark: "redlamp:nord", light: "redlamp:nord"),
+            "down Hackerman's column, then into Redlamp's, Nord filling both slots while the arrows rest on it")
     #expect(abs(scroll.documentVisibleRect.minY - top) > 400, "scrolled to the card chosen, far below the pane's first rows")
     for _ in 0 ..< 7 {
-        try await press(up)
+        try await press(up, in: window)
     }
-    try await press(left)
-    #expect(preferences.slots.dark == "omarchy:gruvbox", "back up the same way, then ← to the card before Hackerman")
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:gruvbox", light: "jaw"),
+            "back up the same way, then ← to the card before Hackerman, the light slot Jaw's again, as where the arrows started")
+
+    preferences.slots = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "← onto Jaw's fills both slots while the arrows rest on it")
+    try await press(right, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:catppuccin", light: "omarchy:white"), "and → back gives both back as they were, White kept")
+
+    preferences.slots = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
+    let next = Preferences(defaults: preferences.defaults, accent: .blue)
+    let (later, _) = appearanceWindow(next)
+    defer { later.close() }
+    #expect(await eventually { later.firstResponder is ArrowCatcher })
+    try await press(right, in: later)
+    #expect(next.served == nil && next.slots == Slots(dark: "redlamp:neutral", light: "redlamp:neutral"),
+            "while jawd's themes aren't in, → from Catppuccin, from its copy, onto Neutral")
+    #expect(Gallery(next.themes, for: .dark, omarchyLine: nil).sections[1].themes.map(\.id) == ["omarchy:catppuccin"],
+            "Catppuccin's card stays, from its copy, while the arrows run")
+    try await press(left, in: later)
+    #expect(next.slots == Slots(dark: "omarchy:catppuccin", light: "omarchy:white"),
+            "and ← back gives both back as they were, though jawd isn't there to serve them")
 }
 
-@MainActor @Test(.timeLimit(.minutes(1))) func `a click anywhere in the pane gives the gallery the keys back, a card's still choosing it and a radio button's the appearance`() async throws {
+@MainActor @Test(.timeLimit(.minutes(1))) func `a click anywhere in the pane gives the gallery the keys back, a card's still choosing it and ending the arrows' run, and a radio button's setting the appearance`() async throws {
     let preferences = try scratchPreferences("gallery-clicks")
     preferences.served = try allOmarchy()
-    let host = NSHostingView(rootView: AppearancePane(preferences: preferences))
-    let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: -30000, y: -30000), size: SettingsPane.appearance.size),
-                          styleMask: [.borderless], backing: .buffered, defer: false)
-    window.isReleasedWhenClosed = false
-    window.appearance = NSAppearance(named: .darkAqua)
-    window.contentView = host
-    window.orderFront(nil)
+    let (window, host) = appearanceWindow(preferences)
     defer { window.close() }
     #expect(await eventually { window.firstResponder is ArrowCatcher })
     /// A click at `point`, in the window, through its own event handling, as the bench's `click:` makes one.
@@ -157,10 +183,17 @@ func allOmarchy() throws -> [OmarchyTheme] {
         try #require(maxX >= minX, "\(id)'s card is in sight")
         return NSPoint(x: CGFloat(minX + maxX) / 4, y: host.bounds.height - CGFloat(minY + maxY) / 4)
     }
+    let left: UInt16 = 123
+    preferences.slots = Slots(dark: "omarchy:catppuccin", light: "omarchy:white")
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "jaw", light: "jaw"), "the arrows rest on Jaw's card")
     window.makeFirstResponder(nil)
-    try await click(try card("omarchy:catppuccin"))
-    #expect(preferences.slots.dark == "omarchy:catppuccin", "a card's click chooses it, as it did")
+    try await click(try card("omarchy:ethereal"))
+    #expect(preferences.slots == Slots(dark: "omarchy:ethereal", light: "jaw"), "a card's click chooses it as a click does, from the slots as they are")
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "and gives the gallery the keys")
+    try await press(left, in: window)
+    #expect(preferences.slots == Slots(dark: "omarchy:catppuccin", light: "jaw"),
+            "and ends the arrows' run, so they go on from what it chose, not from where the run began")
     window.makeFirstResponder(nil)
     try await click(NSPoint(x: Space.xs, y: host.bounds.height - Space.xs))
     #expect(await eventually { window.firstResponder is ArrowCatcher }, "a click on the pane's ground gives them back too")

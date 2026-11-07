@@ -5,8 +5,9 @@ import SwiftUI
 /// Settings › Appearance: dark, light or the system's; the slots, Dark and Light, each a tile of what it
 /// draws; and the gallery that fills the outlined one, Jaw's, Omarchy's and Redlamp's themes each a
 /// card. It scrolls as a whole, as a grouped form does, the slots and the gallery open under their
-/// headers as the wireframes draw them, so an arrow's card can be scrolled to; the arrows move through
-/// the cards from the moment it opens, choosing each as they reach it.
+/// headers as the wireframes draw them, so an arrow's card can be scrolled to, set in as Messages' and
+/// Panes' grouped forms are; the arrows move through the cards from the moment it opens, previewing
+/// each as they reach it.
 public struct AppearancePane: View {
     @Bindable var preferences: Preferences
     @Environment(\.colorScheme) private var scheme
@@ -29,15 +30,20 @@ public struct AppearancePane: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Space.xl) {
                     GroupBox {
-                        Picker("Appearance", selection: $preferences.appearance) {
-                            Text("The system's").tag(Appearance.system)
-                            Text("Dark").tag(Appearance.dark)
-                            Text("Light").tag(Appearance.light)
+                        HStack {
+                            Text("Appearance").accessibilityHidden(true)
+                            Spacer(minLength: Space.m)
+                            Picker("Appearance", selection: $preferences.appearance) {
+                                Text("The system's").tag(Appearance.system)
+                                Text("Dark").tag(Appearance.dark)
+                                Text("Light").tag(Appearance.light)
+                            }
+                            .pickerStyle(.radioGroup)
+                            .horizontalRadioGroupLayout()
+                            .labelsHidden()
                         }
-                        .pickerStyle(.radioGroup)
-                        .horizontalRadioGroupLayout()
-                        .padding(Space.xs)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Space.xs)
+                        .padding(.vertical, Space.s)
                     }
                     SettingsSection("Themes", footer: "Jaw draws the dark theme while the Mac is dark, and the light one while it's light.") {
                         HStack(spacing: Space.m) {
@@ -58,33 +64,43 @@ public struct AppearancePane: View {
                         }
                     }
                 }
-                .padding(Space.xl)
+                .padding(SettingsPane.margin)
                 .contentShape(Rectangle())
-                .simultaneousGesture(TapGesture().onEnded { clicked += 1 })
+                .simultaneousGesture(TapGesture().onEnded {
+                    preferences.arrowsFrom = nil
+                    clicked += 1
+                })
             }
             .background(ArrowKeys(clicked: clicked) { arrow in move(arrow, in: gallery, proxy) })
         }
         .frame(width: SettingsPane.appearance.size.width, height: SettingsPane.appearance.size.height)
     }
 
-    /// Makes `each` the slot the gallery chooses for, as a click on its tile does.
+    /// Makes `each` the slot the gallery chooses for, as a click on its tile does, which ends the
+    /// arrows' run.
     func pick(_ each: Slot) {
         preferences.choosing = each
         clicked += 1
     }
 
-    /// Fills the slots with `theme` as a click on its card does, and gives the gallery the keys again.
+    /// Fills the slots with `theme` as a click on its card does, from the slots as they are, which ends
+    /// the arrows' run, and gives the gallery the keys again.
     func choose(_ theme: Theme, only: Bool) {
         preferences.slots = preferences.slots.choosing(theme, for: slot, only: only)
         clicked += 1
     }
 
-    /// Chooses the card an arrow reaches, as the terminal previews a theme as it moves through its
-    /// list, and scrolls it into sight; says whether there was one.
+    /// Previews the card an arrow reaches from the slots the arrows started from, scrolls it into
+    /// sight and says for VoiceOver what's chosen, as nothing VoiceOver's cursor is on changes; says
+    /// whether there was a card.
     func move(_ arrow: Gallery.Arrow, in gallery: Gallery, _ proxy: ScrollViewProxy) -> Bool {
         guard let theme = gallery.moving(from: preferences.slots[slot], arrow) else { return false }
-        preferences.slots = preferences.slots.choosing(theme, for: slot)
+        preferences.preview(theme, for: slot)
         proxy.scrollTo(theme.id)
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested, userInfo: [
+            .announcement: Gallery.label(theme, for: slot, preferences.slots),
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
         return true
     }
 }
