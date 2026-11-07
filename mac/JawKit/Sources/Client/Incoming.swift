@@ -102,7 +102,13 @@ struct IncomingLine: Decodable {
                 case .reply(.layout): value = try .reply(id, .layout(c.decode(KeptLayout.self, forKey: .result)))
                 case .reply(.saved): value = try .reply(id, .saved(c.decode(Saved.self, forKey: .result)))
                 case .reply(.folder): value = try .reply(id, .folder(c.decode(FolderMade.self, forKey: .result).folder))
-                case .reply(.themes): value = try .reply(id, .themes(c.decode(ServedThemes.self, forKey: .result).themes))
+                case .reply(.themes):
+                    // Said in the Omarchy section, where the decoder's words would mean nothing.
+                    do {
+                        value = try .reply(id, .themes(c.decode(ServedThemes.self, forKey: .result).themes))
+                    } catch {
+                        value = .bad(id, "jawd's answer couldn't be read")
+                    }
                 }
             } catch {
                 value = .bad(id, "what jawd sent isn't jaw's protocol: \(error)")

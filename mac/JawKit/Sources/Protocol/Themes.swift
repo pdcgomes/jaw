@@ -20,7 +20,16 @@ public struct ServedTheme: Codable, Sendable, Hashable {
     }
 }
 
-/// `themes`' result.
+/// `themes`' result, read theme by theme as a window's rows are: a theme that isn't jaw's protocol, a
+/// mode this Mac doesn't know or a colour missing, is left out rather than losing the rest with it.
 struct ServedThemes: Decodable {
     let themes: [ServedTheme]
+
+    init(from decoder: any Decoder) throws {
+        themes = try decoder.container(keyedBy: Keys.self).decode(Lossy<ServedTheme>.self, forKey: .themes).rows
+    }
+
+    enum Keys: String, CodingKey {
+        case themes
+    }
 }

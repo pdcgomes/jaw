@@ -500,6 +500,33 @@ func pushed(_ line: String) -> Incoming {
     #expect(watched.why != nil)
 }
 
+@Test func `a theme that isn't the protocol leaves out only itself, and an answer that isn't says so in words of its own`() throws {
+    guard case var .object(line) = try JSONValue.parse(try fixture("themes.result.json")), case var .object(result) = line["result"],
+          case var .array(themes) = result["themes"], case var .object(dim)? = themes.first
+    else {
+        Issue.record("themes.result.json has no themes")
+        return
+    }
+    dim["id"] = .string("dim")
+    dim["mode"] = .string("dim")
+    themes.append(.object(dim))
+    result["themes"] = .array(themes)
+    line["result"] = .object(result)
+    let decoder = JSONDecoder()
+    decoder.userInfo[.want] = WantLookup { _ in .reply(.themes) }
+    guard case let .reply(_, .themes(read)) = IncomingLine.decode(try JSONEncoder().encode(JSONValue.object(line)), with: decoder) else {
+        Issue.record("the answer sank with its bad theme")
+        return
+    }
+    #expect(read.map(\.id) == ["catppuccin", "catppuccin-latte"], "a mode this Mac doesn't know leaves out only its theme")
+    line["result"] = .object(["themes": .string("every one")])
+    guard case let .bad(_, why) = IncomingLine.decode(try JSONEncoder().encode(JSONValue.object(line)), with: decoder) else {
+        Issue.record("an answer with no list of themes read as one")
+        return
+    }
+    #expect(why == "jawd's answer couldn't be read", "in a few words, where the Omarchy section shows them, not the decoder's")
+}
+
 @Test func `themes' answer decodes as jaw-proto serves Omarchy's themes, each with its mode and its 25 colours`() throws {
     guard case let .reply(_, .themes(themes)) = try incoming("themes.result.json", .reply(.themes)) else {
         Issue.record("not themes")
