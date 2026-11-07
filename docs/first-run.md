@@ -13,8 +13,8 @@ What happens the first time jaw runs on your account, and what to look at. Your 
 ```sh
 cd ~/src/jaw
 git pull
-make build          # target/engine/jaw-engine, target/debug/jawd and target/debug/jaw
-make hooks          # the pre-push audit check, if this checkout doesn't have it yet
+mise run build      # target/engine/jaw-engine, target/debug/jawd and target/debug/jaw
+mise run setup      # the pre-push audit check, if this checkout doesn't have it yet
 ```
 
 Then either start jawd in a terminal of its own, to watch its log as it upgrades:
@@ -38,11 +38,11 @@ For a release build, use `cargo build --release` and `target/release/…`; jawd 
 To run jaw from anywhere rather than from the checkout's `target/`:
 
 ```sh
-make install PREFIX=~/.local   # ~/.local/bin/jaw and jawd, ~/.local/libexec/jaw/jaw-engine
-make uninstall PREFIX=~/.local
+PREFIX=~/.local mise run install   # ~/.local/bin/jaw and jawd, ~/.local/libexec/jaw/jaw-engine
+PREFIX=~/.local mise run uninstall
 ```
 
-Without `PREFIX` it installs into `/usr/local`, which needs `make release` first, then `sudo make install`. The installed jaw starts the installed jawd when nothing answers, and that jawd runs the engine in `libexec/jaw/` beside its folder; installing sets nothing to start at login.
+Without `PREFIX` it installs into `/usr/local`, and asks for sudo to copy them there. The installed jaw starts the installed jawd when nothing answers, and that jawd runs the engine in `libexec/jaw/` beside its folder; installing sets nothing to start at login.
 
 - **One folder for both.** The installed jaw and the checkout's use the same folder and the same `jaw.db`, and only one jawd runs on it at a time. jaw says when the jawd answering is another build than its own ("jawd is … and jaw …: kill N, then start jaw again"), and so does `jaw status`.
 - **Install what you run, or newer.** An older jawd won't open a `jaw.db` a newer one has upgraded: it stops with "jaw.db is from a newer jawd". Install from the commit you run, or a later one.

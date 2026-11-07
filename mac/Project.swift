@@ -15,7 +15,7 @@ let base: SettingsDictionary = [
     "ARCHS": "arm64",
     "SWIFT_TREAT_WARNINGS_AS_ERRORS": "YES",
     "GCC_TREAT_WARNINGS_AS_ERRORS": "YES",
-    // Built here signed to run locally; `make mac` signs releases with the Developer ID.
+    // Built here signed to run locally; `mise run mac` signs releases with the Developer ID.
     "CODE_SIGN_STYLE": "Manual",
     "CODE_SIGN_IDENTITY": "-",
     "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
@@ -151,7 +151,7 @@ let project = Project(
                              .target(name: "JawUI")]),
     ],
     schemes: [
-        // Tuist tests JawHarnessTests in JawHarness's scheme; make mac-test runs them in their own.
+        // Tuist tests JawHarnessTests in JawHarness's scheme; mise run mac-test runs them in their own.
         .scheme(
             name: "JawHarnessTests",
             buildAction: .buildAction(targets: ["JawHarnessTests"]),

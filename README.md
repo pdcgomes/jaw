@@ -50,17 +50,36 @@ brew install pdcgomes/jaw/jaw
 
 Homebrew builds them with its own Go and Rust, puts `jaw` and `jawd` in its `bin/` and `jaw-engine` in the formula's `libexec/jaw/`, and installs ffmpeg with them. ffmpeg is recommended rather than needed: text, and everything you receive, work without it, and sending videos, GIFs and audio files says it's missing.
 
-From a checkout:
+From a checkout, with [mise](https://mise.jdx.dev):
 
 ```sh
-make install                  # jaw and jawd in /usr/local/bin, jaw-engine in /usr/local/libexec/jaw
-make install PREFIX=~/.local  # or under your home folder, without sudo
-make uninstall                # with the same PREFIX, takes them out again
+mise run install                  # jaw and jawd in /usr/local/bin, jaw-engine in /usr/local/libexec/jaw
+PREFIX=~/.local mise run install  # or under your home folder, without sudo
+mise run uninstall                # with the same PREFIX, takes them out again
 ```
 
-`make install` builds them first. Into a folder only root can write, run `make release` as yourself, then `sudo make install`, which builds nothing.
+`mise run install` builds them first, as you, and asks for sudo only to copy them into a folder you can't write. Without mise, the same tasks run as scripts, such as `mise/tasks/install`.
 
-The Mac app isn't in the tap yet. `make mac` builds it, with Xcode and [mise](https://mise.jdx.dev) for Tuist, into `mac/build/release/Jaw.app`, with jawd, jaw-engine and jaw inside it, each signed; [mac/README.md](mac/README.md) has the rest. It's younger than the terminal, and doesn't send photos and files, or play and record voice messages, yet.
+The Mac app isn't in the tap yet. `mise run mac` builds it, with Xcode and the Tuist mise installs, into `mac/build/release/Jaw.app`, with jawd, jaw-engine and jaw inside it, each signed; [mac/README.md](mac/README.md) has the rest. It's younger than the terminal, and doesn't send photos and files, or play and record voice messages, yet.
+
+### Working on jaw
+
+jaw's tasks run with mise from anywhere in a checkout, and `mise tasks` lists them. Each is a script in `mise/tasks/`, which runs without mise too.
+
+| Task | What it does |
+| --- | --- |
+| `mise run build` (`b`) | jaw-engine, then the Rust workspace, into `target/` |
+| `mise run test` (`t`) | Go's tests with `-race`, then the workspace's |
+| `mise run lint` (`l`) | `go vet`, gofmt, rustfmt, and clippy with warnings as errors |
+| `mise run fmt` | gofmt and rustfmt, writing |
+| `mise run install`, `uninstall` | release builds into `PREFIX`, `/usr/local` unless it's set, and out again |
+| `mise run perf` | the budgets below, as a table in `target/perf/` (`-- --quick` leaves out the slowest) |
+| `mise run proto`, `sync-protos`, `check-generated` | the engine's generated code and WhatsApp's protobufs, and the check that both are as committed |
+| `mise run check-audit`, `check-parity` | the data layer's audits, and the Mac's parity with the terminal |
+| `mise run mac`, `mac-test` | Jaw.app, signed, in `mac/build/release/`, and the Mac's tests |
+| `mise run setup` | the pre-push hook, once for a clone |
+| `mise run release` | a release's tarball and formula, and the commands that publish them |
+| `mise run prune-builds`, `clean` | the object files no binary names, from every worktree's `target/`; or this checkout's whole `target/` |
 
 ### How jawd runs
 
@@ -88,7 +107,7 @@ Everything stays on your Mac, in jaw's folder, `~/Library/Application Support/ja
 
 ## What it costs
 
-Measured by `make perf` on 5 November 2026, on a Mac Studio (Apple M1 Ultra, 20 cores, 128 GB, macOS 26.6.2) with no other work running but its own services, which kept it at a load average of 10 to 20, with release builds against `jawd demo`'s made-up account of a million messages in 3,000 chats, and jaw attached as it would be in a terminal. The flood of 2,000 messages a second and the backlog acked in groups come from the demo engine, which hands jawd 256 messages before their acks come back. jaw-engine waits for each ack, since whatsmeow handles one message at a time, so through it a real account's burst drains at the rate of the backlog acked one at a time, about 170 a second.
+Measured by `scripts/perf.py` on 5 November 2026, on a Mac Studio (Apple M1 Ultra, 20 cores, 128 GB, macOS 26.6.2) with no other work running but its own services, which kept it at a load average of 10 to 20, with release builds against `jawd demo`'s made-up account of a million messages in 3,000 chats, and jaw attached as it would be in a terminal. The flood of 2,000 messages a second and the backlog acked in groups come from the demo engine, which hands jawd 256 messages before their acks come back. jaw-engine waits for each ack, since whatsmeow handles one message at a time, so through it a real account's burst drains at the rate of the backlog acked one at a time, about 170 a second.
 
 | | Budget | Measured | Load |
 | --- | --- | --- | --- |
@@ -117,10 +136,10 @@ Where it falls short, and why:
   - about 31 a minute were media's settle, which every 5 s looked for previews and thumbnails made since its last round to flush to the drive, and found none; it now waits until previews or a thumbnail are made, and flushes them a few seconds later, as it did;
   - about 18 were the disk watchdog's look at the disk every 10 seconds, each time also from a blocking thread for its ballast; it now looks every 10 s only while the disk is short of room, the ballast is missing or the free space can't be read, and at once when the ballast is given up, and otherwise no later than the disk could come down to the 2 GB jaw keeps free, and 256 MB more, if filled at 2 GB a second, and within 10 minutes. So with less than about 22 GB free, where such a fill would get there within 10 s, it still looks every 10 s, about 18 wake-ups a minute more.
 
-  `make perf` doesn't count it as it stands. Its quiet minute waits for 15 s without a commit, which never come while the demo's people come and go every 5 s, which they do once an interface in front has had jawd follow them. Nor do they come in the first quarter hour, while jawd asks after the 5,000 people's about texts, 50 every 10 s. These figures are from `jawd demo --idle 120` on a made-up account whose people keep still, once their about texts were in, as the figures before the fix were: 50,000 messages in 300 chats with 5,000 people for the first two counts, and 5,000 in 50 chats with 200 people for the other two.
-- **Not measured.** jaw-engine's memory during a full history sync needs a linked account, and nothing here talks to WhatsApp. whatsmeow decodes each blob into Go structs, where an absent part is a nil pointer, and the engine encodes it again for the spool, so it should hold a few copies of one blob at a time, tens of MB for blobs like these, plus Go's garbage, which jawd bounds by starting it with `GOMEMLIMIT` at 160 MiB and `GOGC` at 50. Nor has the design's small Linux machine been measured; `make perf` is written to run there too, but hasn't yet.
+  `mise run perf` doesn't count it as it stands. Its quiet minute waits for 15 s without a commit, which never come while the demo's people come and go every 5 s, which they do once an interface in front has had jawd follow them. Nor do they come in the first quarter hour, while jawd asks after the 5,000 people's about texts, 50 every 10 s. These figures are from `jawd demo --idle 120` on a made-up account whose people keep still, once their about texts were in, as the figures before the fix were: 50,000 messages in 300 chats with 5,000 people for the first two counts, and 5,000 in 50 chats with 200 people for the other two.
+- **Not measured.** jaw-engine's memory during a full history sync needs a linked account, and nothing here talks to WhatsApp. whatsmeow decodes each blob into Go structs, where an absent part is a nil pointer, and the engine encodes it again for the spool, so it should hold a few copies of one blob at a time, tens of MB for blobs like these, plus Go's garbage, which jawd bounds by starting it with `GOMEMLIMIT` at 160 MiB and `GOGC` at 50. Nor has the design's small Linux machine been measured; `mise run perf` is written to run there too, but hasn't yet.
 
-`make perf` takes a quarter of an hour, and writes the full table, with how each number was taken, to `target/perf/`. The same account is there to try jaw without WhatsApp: `jawd demo` in one terminal, then `JAW_HOME=$TMPDIR/jaw-demo jaw` in another. Its history takes a minute and a half to arrive the first time, search fills in over the minute after, and `--flood 20` adds some life.
+`mise run perf` takes a quarter of an hour, and writes the full table, with how each number was taken, to `target/perf/`. The same account is there to try jaw without WhatsApp: `jawd demo` in one terminal, then `JAW_HOME=$TMPDIR/jaw-demo jaw` in another. Its history takes a minute and a half to arrive the first time, search fills in over the minute after, and `--flood 20` adds some life.
 
 ## What's next
 

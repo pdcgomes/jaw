@@ -161,7 +161,7 @@ These are rules; every builder follows them, the tests listed check them, and th
 - **FTS changes** are backfills into a new index, written to by both sets of triggers, then swapped in one schema step.
 - **What may be rebuilt.** Every table declares its class beside its `CREATE`: *derived from raw* (message rows, spans, FTS, reactions, tallies, links, vectors), rebuilt from raw as a backfill and a swap; *fetched from WhatsApp* (app-state effects, members, contacts, avatars, the LID map), rebuilt only by asking again with the engine connected; *jaw's own* (folders, favourites, frecency, drafts, the outbox, jaw's latest change to each setting under each index it named, still on its way (`app_state_awaiting`), scheduled messages and reminders, assistants' grants, their tokens and log, read positions jaw sets, interfaces' layouts and frontends' settings (`interface_state`, `settings`), quarantine, backfills, meta), never dropped or rebuilt, and copied as they are by every rebuild. A test checks no jaw-own table is ever dropped.
 - **session.db.** Before it says hello, so before `sqlstore.New`, the engine takes `session.lock`, an exclusive `flock` it holds until it exits, which lets it go however it exits; should another process hold it, the engine exits at once, saying so, and jawd reports that as a start that failed and tries again after its pause, so a restart waits for an engine that hasn't gone yet. If whatsmeow has an upgrade pending, the engine writes `session.db.before-whatsmeow-vN` with `VACUUM INTO`. A `session.db` this whatsmeow refuses reaches jawd as "update needed", not a crash loop.
-- **Tests:** frozen migrations and unique numbers; checked-in fixture databases made by every released version's jawd (`jawd fixture`, with edge cases: accents, NULLs, a 64 KB message, LID and phone JIDs for one person, pending amendments, folders, quarantine); an upgrade from every fixture checked by fingerprint, rows, foreign keys, FTS and triggers; a failure injected at every statement of every migration leaving the database as it was; the refusals; the compatibility window; each data step's cost on the million-message bench in `make perf`; a rebuild from raw compared with the original; plan snapshots; drain to empty, then one more.
+- **Tests:** frozen migrations and unique numbers; checked-in fixture databases made by every released version's jawd (`jawd fixture`, with edge cases: accents, NULLs, a 64 KB message, LID and phone JIDs for one person, pending amendments, folders, quarantine); an upgrade from every fixture checked by fingerprint, rows, foreign keys, FTS and triggers; a failure injected at every statement of every migration leaving the database as it was; the refusals; the compatibility window; each data step's cost on the million-message bench in `mise run perf`; a rebuild from raw compared with the original; plan snapshots; drain to empty, then one more.
 
 ### Sync
 
@@ -332,7 +332,7 @@ proto/                  engine.proto; whatsapp/, copied from whatsmeow by script
 protocol/               README.md, fixtures/, themes/ (Omarchy's 23, as Omarchy wrote them)
 docs/plans/             this design
 creatures/  scripts/
-Makefile                build, test, install, demo, perf, proto
+mise.toml  mise/tasks/  build, test, lint, install, perf, proto, mac, release
 ```
 
 ## Testing
@@ -343,7 +343,7 @@ Makefile                build, test, install, demo, perf, proto
 - **Assistants (M9):** an MCP client in the tests drives `jaw-mcp` against `jawd demo`: every tool, each grant's limits refused, a send confirmed, declined, and refused where the assistant's app can't ask, the caps, nothing read or shown online for an assistant, and the tokens and OAuth of the later stages; each stage has a security review before it lands.
 - **Interfaces:** fixtures, window models against a reference, anchoring, frames as text at several sizes, keys, and a headless flood test that fails when a frame goes over budget.
 - **End to end:** `jawd demo` serving a made-up account through the real socket, driven by `jaw snapshot --keys`.
-- **Load:** `jawd demo --flood` and `--catch-up` against a million-message database, and the engine's round trip on its own; `make perf` before each milestone closes.
+- **Load:** `jawd demo --flood` and `--catch-up` against a million-message database, and the engine's round trip on its own; `mise run perf` before each milestone closes.
 - **CI:** Linux on every push; macOS on main and by hand, since macOS minutes count ten times on private repositories.
 
 ## Milestones
@@ -355,7 +355,7 @@ Makefile                build, test, install, demo, perf, proto
 - **Presence and typing in chats,** on its own branch with its own audit, typing now and presence once M6 is on main: who's typing in every chat, groups included, and a one-to-one chat's online and last seen, in every interface (see "Presence and typing in chats").
 - **Chat actions from jaw,** now, on its own branch with its own audit: pinning, archiving, muting, marking read or unread and starring from any interface, as the phone does (see "Chat actions from jaw").
 - **M7 Scheduled messages and reminders,** on its own branch with its own audit: everything jaw sends, scheduled to send later, once or repeating, sent by jawd at its time and held for you past an hour late; reminders on messages, which notify and mark their chat unread so the phone shows it; and both interfaces' screens to see, edit and cancel them (see "Scheduled messages and reminders").
-- **M8 Ready to live with, the first release:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap, on the Go engine; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
+- **M8 Ready to live with, the first release:** full load runs, every failure state, a README with pictures, an install from a checkout and a Homebrew tap, on the Go engine; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
 - **M9 AI assistants over MCP,** after the first release, in three stages, each on its own branch with a security review: assistants on this Mac, then your own devices, then cloud assistants (see "After the first release: AI assistants over MCP").
 - **M10 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for the release after it.
 - **M11 Catching up and asking** (see "After the release: catching up and asking").
@@ -410,4 +410,4 @@ When many unread messages pile up, a catch-up feed says what's going on in each 
 - The engine link is a hop on every message: measured in M0, and gone if whatsapp-rust wins in M10.
 - whatsapp-rust is at 0.7, with breaking changes landing often: pinned to a commit, and the default only if M10 says so.
 - Sixel and iTerm2 resend image data when an image moves: list images stay small there.
-- macOS ties microphone permission to jawd's binary: `make install` signs it with a stable identity, so it isn't asked again after each build.
+- macOS ties microphone permission to jawd's binary: `mise run install` signs it with a stable identity, so it isn't asked again after each build.

@@ -1,8 +1,9 @@
 # What the terminal asks of jawd that the Mac doesn't yet, each with the step of the parity plan
-# (docs/plans/2026-10-27-jaw-mac-parity-plan.md) that brings it. `make check-parity` fails when the
-# terminal uses a request or push this list doesn't have, and when the Mac uses one it still holds,
-# so a step takes its rows out as it lands. A row can come before the terminal on main uses it, from
-# a branch it's being built on; one whose name main's protocol doesn't have yet says that branch.
+# (docs/plans/2026-10-27-jaw-mac-parity-plan.md) that brings it. `mise run check-parity` fails when
+# the terminal uses a request or push this list doesn't have, and when the Mac uses one it still
+# holds, so a step takes its rows out as it lands. A row can come before the terminal on main uses
+# it, from a branch it's being built on; one whose name main's protocol doesn't have yet says that
+# branch.
 
 [requests]
 "layout.set" = "1.1"

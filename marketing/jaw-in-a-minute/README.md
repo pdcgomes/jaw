@@ -21,7 +21,7 @@ The Mimic chomps each scene into the next, with the same chomp jaw draws.
 From this repository on 26 October 2026 (main at `9fe850b`); the docstring in `jaw.py` names the source of every claim and number.
 
 - The architecture, the palette and split panes: [the design](../../docs/plans/2026-10-16-jaw-design.md) and the palette itself (`crates/jaw/src/view/palette.rs`).
-- The numbers: [What it costs](../../README.md#what-it-costs). They were measured by `make perf` on 25 October 2026 on a Mac Studio (M1 Ultra) with release builds, against `jawd demo`'s made-up account of a million messages in 3,000 chats; the flood of 2,000 messages a second comes from the demo engine. The video shows the budgets jaw meets. "What it costs" also lists where it falls short: jawd's memory during a full history sync, acks while history goes in, and search indexing after it.
+- The numbers: [What it costs](../../README.md#what-it-costs). They were measured by `scripts/perf.py` on 25 October 2026 on a Mac Studio (M1 Ultra) with release builds, against `jawd demo`'s made-up account of a million messages in 3,000 chats; the flood of 2,000 messages a second comes from the demo engine. The video shows the budgets jaw meets. "What it costs" also lists where it falls short: jawd's memory during a full history sync, acks while history goes in, and search indexing after it.
 - The names and chats are `jaw demo`'s made-up account; the lines are the design's example screen, in English.
 - The Mimic is [`creatures/mimic.png`](../../creatures/mimic.png), read from there; jaw's screens are in its Tokyo Night colours (`crates/jaw/src/theme.rs`).
 

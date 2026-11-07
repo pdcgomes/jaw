@@ -1,11 +1,11 @@
 ---
-description: jaw's build folders fill the Mac's shared disk. When and how to run make prune-builds, and what it doesn't replace.
+description: jaw's build folders fill the Mac's shared disk. When and how to run mise run prune-builds, and what it doesn't replace.
 alwaysApply: true
 ---
 
 # Disk space
 
-Every project and agent on this Mac shares its disk, and on 27 October jaw's build folders took 321 GB of it. A macOS debug build keeps its debug info in object files beside the binary, and every incremental rebuild writes new ones without deleting the old: on 27 October the worktrees held 125 GB of objects no binary used, and gathered about 8 GB more an hour. `make prune-builds` deletes those from every worktree's `target/`, and nothing rebuilds after (`scripts/prune-builds.py` says how).
+Every project and agent on this Mac shares its disk, and on 27 October jaw's build folders took 321 GB of it. A macOS debug build keeps its debug info in object files beside the binary, and every incremental rebuild writes new ones without deleting the old: on 27 October the worktrees held 125 GB of objects no binary used, and gathered about 8 GB more an hour. `mise run prune-builds` deletes those from every worktree's `target/`, and nothing rebuilds after (`scripts/prune-builds.py` says how).
 
 ## When
 
@@ -15,7 +15,7 @@ Every project and agent on this Mac shares its disk, and on 27 October jaw's bui
 
 ## How
 
-- `make prune-builds`, from any checkout that has it (origin/main since ae37609): it covers every worktree, whichever one it runs in. `python3 scripts/prune-builds.py --dry-run` only counts.
+- `mise run prune-builds` (`make prune-builds` in a checkout from before the move to mise, or `python3 scripts/prune-builds.py` in any since ae37609): it covers every worktree, whichever one it runs in. `python3 scripts/prune-builds.py --dry-run` only counts.
 - Nothing needs stopping or waiting for: it leaves a worktree alone while cargo, rustc or the linker runs there, and objects touched in the last hour, for the next run. Two runs at once are safe.
 - The main checkout's `target/` is included, safely: the owner's jawd and jaw keep every object they name.
 - A build folder outside the worktrees, such as an audit's under `/tmp/jaw-audits/`, is pruned only when named: `python3 scripts/prune-builds.py /tmp/jaw-audits/<topic>/jaw/target`. Audits' gathered under 0.3 GB each on 27 October, so it's worth it only in a long audit that rebuilds a lot.

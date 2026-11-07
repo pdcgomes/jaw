@@ -19,7 +19,7 @@ Sources, in this repository on 26 Oct 2026 (main at 9fe850b):
   crates/jaw/src/view/palette.rs and the design's "Finding anything" and "The terminal interface".
 - Split panes (one chat a pane, split across or down, a key to each pane, drafts kept per chat, the
   layout kept in jawd for a desktop app): the design's "Later". Not built: tagged EXPLORING.
-- Every number: README.md "What it costs", measured by make perf on 25 Oct 2026 on a Mac Studio
+- Every number: README.md "What it costs", measured by scripts/perf.py on 25 Oct 2026 on a Mac Studio
   (M1 Ultra), release builds, jawd demo's made-up account of a million messages in 3,000 chats, the
   2,000-a-second flood from the demo engine: a keypress drawn 0.40 ms p99 (budget 16 ms); search
   15 ms p99 (50 ms); a 100-message page 2.0 ms p99 on the socket (5 ms); a message on its way to

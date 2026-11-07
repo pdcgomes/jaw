@@ -53,7 +53,7 @@ The first request on a connection. Anything else first gets error 6.
 {"id":1,"method":"hello","params":{"protocol":2,"client":"jaw","version":"0.1.0","focus":true,"since":81200}}
 ```
 
-- `protocol`: the version the client speaks. jawd serves one version and refuses others with error 6, saying which is older; jaw then says to run `make install` again.
+- `protocol`: the version the client speaks. jawd serves one version and refuses others with error 6, saying which is older; jaw then says to install it again with `mise run install`.
 - `client`: the interface's name, `jaw` for the terminal. jawd keeps each interface's layout (see "Layouts") and settings (see "Settings") under the name it gives, so its connections share them and another interface keeps its own.
 - `focus`: whether the interface is in front. jawd tells WhatsApp you're online only while some interface has focus (see `focus` below).
 - `since`: the last `seq` this client saw, if it's reconnecting. Its watches, sent again, then return only what changed, but for chat lists and the folder tree, which come whole (see Reconnecting).
