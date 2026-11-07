@@ -1,5 +1,5 @@
 """Deletes the object files that debug builds leave in Cargo's target folders once no binary names
-them (`make prune-builds`).
+them (`mise run prune-builds`).
 
     prune-builds.py [--dry-run] [--min-age MINUTES] [TARGET...]
 

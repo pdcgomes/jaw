@@ -162,7 +162,7 @@ fn jawd_beside(jaw: &Path) -> Result<PathBuf> {
         .into_iter()
         .chain([real.with_file_name("jawd")])
         .find(|jawd| jawd.is_file())
-        .with_context(|| format!("jawd isn't beside jaw in {folder}; make build puts them together"))
+        .with_context(|| format!("jawd isn't beside jaw in {folder}; mise run build puts them together"))
 }
 
 fn domain() -> String {

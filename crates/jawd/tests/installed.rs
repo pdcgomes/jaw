@@ -1,4 +1,4 @@
-//! jawd as `make install` and Homebrew lay it out: run through a link in a shared bin/ to the jawd
+//! jawd as `mise run install` and Homebrew lay it out: run through a link in a shared bin/ to the jawd
 //! in its own prefix, with nothing saying where its engine is, it starts the one in libexec/jaw/
 //! beside its real folder.
 

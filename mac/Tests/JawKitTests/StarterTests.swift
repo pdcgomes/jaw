@@ -188,7 +188,7 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     #expect(starting == .starting, "on a folder of its own with no session.db, a branch's starts its jawd")
     var empty = Starter(facts(jawd: nil))
     let (steps, shown) = empty.launched(answers: false, now: t0)
-    #expect(steps.isEmpty && shown == .failed("there's no jawd inside this Jaw: make mac puts one in its Contents/Helpers"),
+    #expect(steps.isEmpty && shown == .failed("there's no jawd inside this Jaw: mise run mac puts one in its Contents/Helpers"),
             "with nothing to take its place, an earlier agent isn't unregistered")
 }
 
@@ -210,7 +210,7 @@ let t0 = Date(timeIntervalSince1970: 1_800_000_000)
     }
     var nothing = Starter(facts(debug: true, demo: true, own: false, jawd: nil))
     let (_, missing) = nothing.launched(answers: false, now: t0)
-    #expect(missing == .failed("there's no jawd to run: make build builds it"))
+    #expect(missing == .failed("there's no jawd to run: mise run build builds it"))
 }
 
 @Test func `the terminal's agent is named with what removes it, on jaw's own folder alone, and nothing is unregistered beside it`() {

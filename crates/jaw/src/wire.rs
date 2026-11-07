@@ -189,7 +189,7 @@ fn library(asked: u64, v: &Value, whole: bool) -> Update {
     Update::Library { asked, window }
 }
 
-/// Where jawd is: `JAWD` if set, beside jaw, as `make install`, Homebrew and cargo put them, or on
+/// Where jawd is: `JAWD` if set, beside jaw, as `mise run install`, Homebrew and cargo put them, or on
 /// the PATH.
 pub fn jawd_binary() -> PathBuf {
     if let Some(jawd) = std::env::var_os("JAWD") {
@@ -220,7 +220,7 @@ fn start_jawd(home: &Path) -> Result<Starting, String> {
         .stderr(out)
         .process_group(0)
         .spawn()
-        .map_err(|e| format!("can't start jawd: {e}; make build builds it"))?;
+        .map_err(|e| format!("can't start jawd: {e}; mise run build builds it"))?;
     Ok(Starting { child, since: Instant::now(), log })
 }
 

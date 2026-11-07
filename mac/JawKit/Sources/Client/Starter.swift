@@ -191,12 +191,12 @@ public struct Starter: Sendable {
         if here.demo, account {
             return "--demo runs a made-up account, so not on jaw's own folder or another account's: give it a folder of its own with --home"
         }
-        if here.demo { return here.jawd == nil ? "there's no jawd to run: make build builds it" : nil }
+        if here.demo { return here.jawd == nil ? "there's no jawd to run: mise run build builds it" : nil }
         if here.debug {
             return "nothing answers on \(socket), and a build from source starts only --demo's jawd: start one there with jaw, or open Jaw with --demo"
         }
         if account, !here.build.startsOnAccounts { return here.build.refusal }
-        if here.jawd == nil { return "there's no jawd inside this Jaw: make mac puts one in its Contents/Helpers" }
+        if here.jawd == nil { return "there's no jawd inside this Jaw: mise run mac puts one in its Contents/Helpers" }
         return nil
     }
 

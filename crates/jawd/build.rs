@@ -1,5 +1,5 @@
 //! jawd's Info.plist, embedded in its binary on macOS (`__TEXT,__info_plist`), so macOS asks for the
-//! microphone in jaw's words however jawd was built: by `make install`, Homebrew or `make mac`. The
+//! microphone in jaw's words however jawd was built: by `mise run install`, Homebrew or `mise run mac`. The
 //! binary alone takes it, not its tests.
 
 fn main() {

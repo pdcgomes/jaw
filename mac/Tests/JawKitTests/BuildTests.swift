@@ -15,5 +15,5 @@ import Testing
         + "start one with jaw in a terminal, or open a Jaw built from origin/main")
     #expect(Build(info: [:]) == Build(from: nil, at: nil))
     #expect(Build(info: ["JawBuiltFrom": true]).from == nil)
-    #expect(Build(info: [:]).refusal.hasPrefix("this Jaw doesn't say what it was built from, as make mac's builds do, so it doesn't start jawd"))
+    #expect(Build(info: [:]).refusal.hasPrefix("this Jaw doesn't say what it was built from, as mise run mac's builds do, so it doesn't start jawd"))
 }

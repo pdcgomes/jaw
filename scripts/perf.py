@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Every budget in the design's Budgets table, measured on release builds on this machine, as one
-table (`make perf`).
+table (`mise run perf`).
 
     perf.py [--quick] [--small]
 
@@ -241,7 +241,7 @@ def numbers(pattern: str, text: str) -> list[float]:
 def main() -> int:
     for binary in (JAWD, JAW):
         if not binary.exists():
-            print(f"perf: {binary} isn't built; make perf builds it", file=sys.stderr)
+            print(f"perf: {binary} isn't built; mise run perf builds it", file=sys.stderr)
             return 1
     when = time.strftime("%Y-%m-%d-%H%M")
     out = ROOT / "target/perf"

@@ -206,7 +206,7 @@ impl Report {
         lines.join("\n")
     }
 
-    /// The report as `make perf` reads it, times in milliseconds.
+    /// The report as `mise run perf` reads it, times in milliseconds.
     pub fn json(&self) -> serde_json::Value {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let summary = |sorted: &[Duration]| {
@@ -445,7 +445,7 @@ mod tests {
     /// The design's budget for a keypress drawn while 2,000 messages a second arrive. Other
     /// processes can only make a press slower, so each key of the script, pressed at least
     /// MIN_PRESSES times, is held to it at its fastest: that's the work the key takes, which a spin
-    /// or a sleep in its path puts over on every press. The p99 is `make perf`'s, on release builds.
+    /// or a sleep in its path puts over on every press. The p99 is `mise run perf`'s, on release builds.
     const KEYPRESS: Duration = Duration::from_millis(16);
     const MIN_PRESSES: usize = 5;
 

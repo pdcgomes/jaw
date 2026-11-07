@@ -6,7 +6,7 @@
 //! pour in (`--flood`); a backlog waiting after time offline arrives as the account connects
 //! (`--catch-up`); or nothing happens at all (`--idle`). Each phase measures what applies with an
 //! interface of its own on the socket (`probe`) and the kernel's count of what the process costs
-//! (`usage`), says it, and writes it to `--report` as JSON for `make perf`.
+//! (`usage`), says it, and writes it to `--report` as JSON for `mise run perf`.
 
 mod account;
 mod probe;
@@ -430,7 +430,7 @@ fn load_average() -> f64 {
     loads[0]
 }
 
-/// Timings as `make perf` reads them: how many, and the 50th and 99th percentiles and the most,
+/// Timings as `mise run perf` reads them: how many, and the 50th and 99th percentiles and the most,
 /// in milliseconds.
 fn summary(timings: &[Duration]) -> Value {
     let mut sorted = timings.to_vec();

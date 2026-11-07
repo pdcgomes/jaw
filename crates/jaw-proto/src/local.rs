@@ -30,7 +30,7 @@ pub fn socket(home: &Path) -> PathBuf {
 
 /// The first of `paths`, each relative to the folder of the program running, that's a file: from
 /// where the program really is, once links such as Homebrew's bin/ are followed, then from where
-/// it was started. It's how jaw finds jawd and jawd its engine, as `make install`, cargo and Jaw.app's
+/// it was started. It's how jaw finds jawd and jawd its engine, as `mise run install`, cargo and Jaw.app's
 /// Contents/Helpers/ lay them out.
 pub fn beside(paths: &[&str]) -> Option<PathBuf> {
     beside_program(&std::env::current_exe().ok()?, paths)
