@@ -1442,9 +1442,9 @@ final class PillButton: NSButton {
     var roles: Roles? {
         didSet {
             layer?.backgroundColor = roles?.accent.cgColor
-            contentTintColor = roles.map { $0.isDark ? $0.ground.nsColor : .white }
+            contentTintColor = roles?.onFill.nsColor
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .foregroundColor: roles.map { $0.isDark ? $0.ground.nsColor : NSColor.white } ?? .white,
+                .foregroundColor: roles?.onFill.nsColor ?? .white,
                 .font: TextStyle.callout.emphasised,
             ])
         }
@@ -1453,7 +1453,7 @@ final class PillButton: NSButton {
     override var title: String {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
-                .foregroundColor: roles.map { $0.isDark ? $0.ground.nsColor : NSColor.white } ?? .white,
+                .foregroundColor: roles?.onFill.nsColor ?? .white,
                 .font: TextStyle.callout.emphasised,
             ])
         }

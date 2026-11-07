@@ -105,7 +105,7 @@ public final class IconButton: NSControl {
             roles.selection.nsColor.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: Radius.small, yRadius: Radius.small).fill()
         }
-        let colour = filled ? (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor : (hovering ? Tone.primary : tone).color(roles).nsColor
+        let colour = filled ? roles.onFill.nsColor : (hovering ? Tone.primary : tone).color(roles).nsColor
         var x = Space.m
         if let image = symbol.isEmpty ? nil : NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
             .withSymbolConfiguration(configuration.applying(.init(hierarchicalColor: colour)))

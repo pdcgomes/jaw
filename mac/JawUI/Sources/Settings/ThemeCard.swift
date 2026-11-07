@@ -46,7 +46,7 @@ public struct ThemeChat: View {
                 HStack(spacing: 0) {
                     Text("Rui: Sunday at 9?").foregroundStyle(roles.secondary.color)
                     Spacer(minLength: Space.xs)
-                    Text("2").bold().foregroundStyle((roles.isDark ? roles.ground : RGBA(0xFFFFFF)).color)
+                    Text("2").bold().foregroundStyle(roles.onFill.color)
                         .padding(.horizontal, Space.xs)
                         .background(Capsule().fill(roles.accent.color))
                         .fixedSize()

@@ -512,8 +512,7 @@ extension MessageLayout.Builder {
         parts.append(.fill(circle, roles.accent.cgColor, 16))
         // An audio file of yours on its way: × in its circle to stop it, how far it's got for its length.
         let going = m.kind == .audio ? sending(item: nil) : nil
-        symbol(going != nil ? "xmark" : m.kind == .voice ? "play.fill" : "music.note", 12, roles.isDark ? roles.ground : RGBA(0xFFFFFF),
-               centredIn: circle)
+        symbol(going != nil ? "xmark" : m.kind == .voice ? "play.fill" : "music.note", 12, roles.onFill, centredIn: circle)
         if going != nil { regions.append((circle, .stop(item: nil))) }
         let seconds = m.media?.seconds ?? m.voice?.seconds
         let length = line(going?.words ?? seconds.map(Format.length) ?? "", fonts.time, roles.secondary)
@@ -619,8 +618,7 @@ extension MessageLayout.Builder {
             regions.append((CGRect(x: r.minX, y: top - 4, width: r.width, height: optionHeight), .vote(option.name)))
             let tick = CGRect(x: r.minX, y: top, width: 16, height: lineHeight(fonts.body))
             if option.mine {
-                let onAccent = roles.isDark ? roles.ground : RGBA(0xFFFFFF)
-                symbol(several ? "checkmark.square.fill" : "checkmark.circle.fill", 14, onAccent, on: roles.accent, centredIn: tick)
+                symbol(several ? "checkmark.square.fill" : "checkmark.circle.fill", 14, roles.onFill, on: roles.accent, centredIn: tick)
             } else {
                 symbol(several ? "square" : "circle", 14, roles.faint(on: cardGround), centredIn: tick)
             }

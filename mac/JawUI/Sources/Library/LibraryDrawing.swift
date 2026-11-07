@@ -336,7 +336,7 @@ enum LibraryDrawing {
     static func voice(_ item: LibraryRow, icon: CGRect, x: CGFloat, right: CGFloat, size: CGSize, _ c: Context, into d: inout LibraryDrawn) {
         let r = c.roles
         d.under.append(.fill(icon, r.accent.cgColor, icon.width / 2))
-        symbol("play.fill", 11, r.isDark ? r.ground : RGBA(0xFFFFFF), centredIn: icon.offsetBy(dx: 1, dy: 0), into: &d.under)
+        symbol("play.fill", 11, r.onFill, centredIn: icon.offsetBy(dx: 1, dy: 0), into: &d.under)
         let small = font(.caption), time = font(.caption)
         let mid = size.height / 2
         let tail = line(who(item, c) + " · " + when(item, c), small, r.secondary)

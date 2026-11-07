@@ -203,7 +203,37 @@ let heldSenders: [String: Int] = [
     #expect(drawn.count == 69 && held.count == 69 && Set(drawn) == Set(held), "the catalog's halves are the mappings' held")
     #expect(Catalog.jaw.dark == Catalog.tokyoNight.held() && Catalog.jaw.light == Catalog.tokyoNightDay.held(),
             "and so is the family the slots fall back on and the harness and the pictures draw in")
-    let counts = drawn.map { r in Contrast.ratio((r.isDark ? r.ground : RGBA(0xFFFFFF)).hex, r.accent.hex) }
+    let counts = drawn.map { r in Contrast.ratio(r.onFill.hex, r.accent.hex) }
     #expect(counts.allSatisfy { $0 >= 3 } && abs((counts.min() ?? 0) - 3.4245) < 0.0001,
             "the count on its badge, in the accent as written, at 3.42:1 at the least, in Rosé Pine")
+}
+
+/// The system's accents as AppKit draws them on macOS 27.2, light then dark: each colour System
+/// Settings offers, Graphite as the system's grey, and the system's blue beside the default accent;
+/// and orange, yellow and green as AppKit drew them before macOS 26.
+let systemAccents: [SystemAccent] = ([
+    (0x0088FF, 0x0091FF), (0xCB30E0, 0xDB34F2), (0xFF2D55, 0xFF375F), (0xFF383C, 0xFF4245), (0xFF8D28, 0xFF9230),
+    (0xFFCC00, 0xFFD600), (0x34C759, 0x30D158), (0x8E8E93, 0x98989D), (0xF7821B, 0xF7821B), (0xFFC600, 0xFFC600),
+    (0x62BA46, 0x62BA46),
+] as [(UInt32, UInt32)]).map { SystemAccent(dark: RGBA($0.1), light: RGBA($0.0)) }
+
+@Test func `every word and mark drawn on a fill of a theme's own colours reads at 3:1, in every half and in Neutral under each of the system's accents`() throws {
+    let themes = Catalog.themes(omarchy: try servedThemes(), accent: .blue)
+    var halves = themes.flatMap { theme in Slot.allCases.compactMap { slot in theme.roles(slot).map { ("\(theme.id) \(slot)", $0) } } }
+    for accent in [SystemAccent.blue] + systemAccents {
+        for slot in Slot.allCases {
+            halves.append(("Neutral \(slot) under \(String(format: "%06X", slot.isDark ? accent.dark.hex : accent.light.hex))",
+                           try #require(Catalog.neutral(accent).roles(slot))))
+        }
+    }
+    #expect(halves.count == 69 + 24)
+    for (name, r) in halves {
+        let fills = [("the accent: the unread count, the discs' ▶, ♪ and ×, a poll's ✓ and the \"new ↓\" pill", r.accent),
+                     ("a filled button under the pointer", r.accent.mixed(with: r.text, 0.15)),
+                     ("a muted chat's badge", r.tertiary), ("the @ badge", r.mention)]
+        for (what, fill) in fills {
+            let ratio = Contrast.ratio(r.onFill.hex, fill.hex)
+            #expect(ratio >= 3, "\(name): on \(what) at \(ratio)")
+        }
+    }
 }

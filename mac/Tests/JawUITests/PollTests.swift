@@ -158,7 +158,7 @@ func share(of colour: RGBA, in image: CGImage) -> Double {
         for dark in [true, false] {
             let s = spec(look, dark: dark)
             let roles = s.style.roles
-            let onAccent = roles.isDark ? roles.ground : RGBA(0xFFFFFF)
+            let onAccent = roles.onFill
             for (id, yours, other) in [("P1", "Saturday", "Sunday"), ("P5", "Cabo da Roca, on the slabs above the lighthouse", "Peninha, if the wind has dropped")] {
                 let drawn = ticks(laid(samplePoll(id), s))
                 let mine = try #require(drawn[yours]), theirs = try #require(drawn[other])

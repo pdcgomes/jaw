@@ -112,6 +112,16 @@ public extension Roles {
         colour.opacity(0.16)
     }
 
+    /// What JawUI draws a word or a mark in on a fill of the theme's own colours: on the accent's, the
+    /// unread count, the ▶, ♪ and × on a voice note's or an audio file's disc, a poll's chosen ✓, a
+    /// filled button's symbol and the "new ↓" pill; a muted chat's count on the dim text and the @ on
+    /// the mention colour. The ground in dark and white in light, which read at 3:1 or more on each in
+    /// every theme: the hold keeps the dim text and mentions so, Redlamp's bands Neutral's accent under
+    /// any of the system's, and the tests pin the rest.
+    var onFill: RGBA {
+        isDark ? ground : RGBA(0xFFFFFF)
+    }
+
     /// A base's colour, the band as it's drawn on the window's ground.
     subscript(_ base: Base) -> RGBA {
         switch base {
