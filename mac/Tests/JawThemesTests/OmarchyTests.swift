@@ -50,6 +50,17 @@ func reads(_ r: Roles, _ name: String) {
     #expect(gruvbox["orange"] != gruvbox["yellow"] && gruvbox["brown"] == "#70432e", "a theme's own orange and brown are kept")
     #expect(Omarchy.file("mode = \"dim\"\n") == nil, "a mode that isn't dark or light")
     #expect(Omarchy.file("mode = \"dark\"\naccent \"#ffffff\"\n") == nil, "a line that isn't key = value")
+    let file = try String(contentsOf: themesFolder.appending(path: "gruvbox.toml"), encoding: .utf8)
+    #expect(Omarchy.file(file.replacingOccurrences(of: "accent = \"#7daea3\"", with: "accent = \"teal\"")) == nil, "a colour that isn't hex")
+    #expect(Omarchy.file(file.replacingOccurrences(of: "mode = \"dark\"", with: "")) == nil, "a file with no mode")
+    #expect(Omarchy.file(file.replacingOccurrences(of: "brown = \"#70432e\"", with: ""))?.colours["brown"] == "#71442e",
+            "a brown left out comes from the theme's own orange, not its yellow")
+}
+
+@Test func `mix saturates past either end of its line as theme.rs's cast does, rather than trapping`() {
+    #expect(Contrast.mix(0x204060, 0xFFFFFF, -1) == 0x000000, "below 0 a channel is 0, as Rust's `as u32` makes a negative")
+    #expect(Contrast.mix(0x204060, 0xFFFFFF, 2) == 0xFFFFFF, "above 255 it's 255, as theme.rs's min(255) keeps it")
+    #expect(Contrast.mix(0x204060, 0xFFFFFF, .nan) == 0x000000, "and NaN is 0, as Rust's cast makes it")
 }
 
 @Test func `the port lands on theme.rs's own Tokyo Night, grey by grey and colour by colour`() throws {
@@ -134,7 +145,8 @@ let surfaceMoves: [String: [String]] = [
             #expect(abs(Contrast.ratio(now.hex, t.surface) - 3) <= 0.05, "\(theme.id): a sender lands at \(Contrast.ratio(now.hex, t.surface))")
         }
         #expect(moved.sorted() == (surfaceMoves[theme.id] ?? []).sorted(), "\(theme.id)")
-        #expect(r.accent.hex == t.accent && r.ground.hex == t.bg && r.tertiary.hex == t.comment, "\(theme.id): the rest as the terminal has it")
+        #expect([r.ground, r.surface, r.selection, r.text, r.secondary, r.tertiary, r.separator, r.accent].map(\.hex)
+            == [t.bg, t.surface, t.selection, t.fg, t.muted, t.comment, t.gutter, t.accent], "\(theme.id): the rest as the terminal has it")
         #expect(r.accentText == r.accent, "\(theme.id): the accent drawn as text, as written until the hold")
     }
 }

@@ -19,11 +19,13 @@ public enum Contrast {
         return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
     }
 
-    /// `a` moved `t` of the way to `b`, channel by channel.
+    /// `a` moved `t` of the way to `b`, channel by channel; past either end of the line a channel stops at
+    /// 0 or 255, and a `t` that isn't a number gives 0, as Rust's cast and `min(255)` have it.
     public static func mix(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32 {
         func channel(_ shift: UInt32) -> UInt32 {
             let (x, y) = (Double((a >> shift) & 0xFF), Double((b >> shift) & 0xFF))
-            return min(UInt32((x + (y - x) * t).rounded()), 255) << shift
+            let v = (x + (y - x) * t).rounded()
+            return (v.isNaN ? 0 : UInt32(min(max(v, 0), 255))) << shift
         }
         return channel(16) | channel(8) | channel(0)
     }

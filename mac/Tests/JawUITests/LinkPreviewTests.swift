@@ -211,4 +211,11 @@ func thumbnail(_ path: String, in root: String, jpeg: Bool = true) -> CGImage? {
     #expect(history.parts.contains { part in
         if case let .fill(rect, colour, _) = part { rect.width == 3 && colour == roles.link.cgColor } else { false }
     }, "a link's card with no thumbnail marks its edge in the link colour")
+    let shared = try #require(Samples.library.first { $0.id == "LL0~0" })
+    let row = LibraryDrawing.row(shared, size: CGSize(width: 600, height: 56), selected: false, drawingContext(Style(roles: roles)))
+    let mark = try #require(Symbols.image("link", 13, roles.link)).0.dataProvider?.data as Data?
+    #expect(mark != nil && row.under.contains { if case let .image(image, _) = $0 { image.dataProvider?.data as Data? == mark } else { false } },
+            "the library's link row marks it in the link colour")
+    #expect(row.under.contains { if case let .line(l, _) = $0 { runColours(l).first == roles.link.cgColor } else { false } },
+            "and says its host in it")
 }
