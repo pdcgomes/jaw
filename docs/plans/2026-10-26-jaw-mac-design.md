@@ -6,7 +6,7 @@
 
 jaw for the Mac (`jaw.app`) is a native macOS client for jaw: another interface on jawd's socket, on exactly the terminal's architecture. jawd keeps every message and prepares everything an interface shows: names, formatting, quotes, reaction and receipt totals, poll tallies, previews at 256 and 768 pixels, search, drafts, folders, presence, voice playback and recording, notifications. The app draws what jawd's windows hold and asks jawd for everything else, as `jaw` does.
 
-It shows every kind of message inline, albums included, and has the command palette, split panels, the library and everything else the terminal does, in Redlamp's themes, with the Mimic where the brand lives. It never makes you wait: your chats 250 ms after launch, a chat open 30 ms after the key, the glyph you typed in the next frame, photos scrolling at 120 Hz, and nothing running when nothing changes.
+It shows every kind of message inline, albums included, and has the command palette, split panels, the library and everything else the terminal does, in its own Tokyo Night, Omarchy's themes or Redlamp's, with the Mimic where the brand lives. It never makes you wait: your chats 250 ms after launch, a chat open 30 ms after the key, the glyph you typed in the next frame, photos scrolling at 120 Hz, and nothing running when nothing changes.
 
 jaw's design lists "a desktop app on the same socket" under Later. This is it.
 
@@ -27,7 +27,7 @@ The owner's answers are marked "Owner, 26 Oct" or "Owner, 27 Oct"; the others ar
 - **One split layout per interface, each able to open the other's** (Owner, 26 Oct): a 160-column terminal and a 27-inch window want different panes, and opening the other's covers moving between them.
 - **The library opens in a pane, like a chat** (Owner, 26 Oct), so it sits beside the chat it came from, with the keys and the layout panes already have.
 - **Mac keys, with the terminal's where they don't clash** (Owner, 26 Oct): ⌘K opens the palette and Ctrl-K does too; ⌥↑ and ⌥↓ move between chats, as in the terminal; ⌘1 to ⌘9 go to favourites, since ⌥ and a digit type a character on a Mac.
-- **Redlamp's themes copied into jaw, with a check that keeps them in step** (Owner, 26 Oct). `RedlampDesign` is a Tuist framework that depends on Redlamp's engine API and is mostly a photo editor's controls; jaw needs only its ten-colour theme families, and `scripts/sync-themes` keeps the copy diffable, as `scripts/sync-protos` keeps whatsmeow's protobufs.
+- **Redlamp's themes copied into jaw, with a check that keeps them in step** (Owner, 26 Oct), **and Omarchy's from jawd beside them, a theme for dark and one for light** (Owner, 6 Nov). `RedlampDesign` is a Tuist framework that depends on Redlamp's engine API and is mostly a photo editor's controls; jaw needs only its ten-colour theme families, which their owner relicensed for jaw under its MIT licence, and `scripts/sync-themes` keeps the copy diffable, as `scripts/sync-protos` keeps whatsmeow's protobufs. "Themes" has the slots and the gallery.
 - **jaw's Tokyo Night by default, following the system's light and dark** (Owner, 26 Oct): it looks like jaw from the first launch and still respects a light Mac.
 - **MapKit's maps for locations, with a setting to turn them off** (Owner, 26 Oct): a map reads at a glance, but MapKit asks Apple for its tiles.
 - **Homebrew's ffmpeg for sending video, GIFs and audio** (Owner, 26 Oct), as jawd uses today, the app saying when it's missing: it's on the owner's Mac already, and the choice can change before a build goes to anyone else.
@@ -178,7 +178,7 @@ The prototype has no window, so as not to put one on the owner's screen at a loa
 ### Decision
 
 - **AppKit:** the window and its split views; the chat list (`NSTableView`, fixed 56-point rows); the conversation (`NSTableView`, one column, heights from the layout cache, cells that draw pre-laid text and ready bitmaps); the sidebar (`NSOutlineView`, as Redlamp's); the library's grid (`NSCollectionView` with prefetching); the box (an `NSTextView` on TextKit 2).
-- **SwiftUI,** hosted in AppKit: the palette (in a panel of its own), settings, sheets (message info, chat info, forwarding), the linking screen, empty states, the viewer's chrome, the status line. SwiftUI never sits inside a list's cell.
+- **SwiftUI,** hosted in AppKit: the palette (in a panel of its own), settings (in a window of its own, its panes the toolbar's tabs), sheets (message info, chat info, forwarding), the linking screen, empty states, the viewer's chrome, the status line. SwiftUI never sits inside a list's cell.
 
 ### Threads and the frame
 
@@ -356,15 +356,23 @@ As jawd's M7 serves them (proposal P9), and as [the scheduled messages and remin
 
 ## Themes
 
+Settings › Appearance holds a theme for dark and one for light, each chosen from a gallery of Jaw's Tokyo Night, Omarchy's 23 from jawd and Redlamp's 22 families, each drawn as a small chat in its colours ([the Settings and themes design](2026-11-06-jaw-mac-settings-and-themes-design.md), settled with the owner on 6 November).
+
 ### Redlamp's catalog
 
-- **Redlamp keeps themes as families,** each a matched dark and light pair, so a choice survives an appearance change. A family is either authored directly or ten colours (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, and `primaryRoles`, which keeps a brand colour to the places it's allowed), mapped to tokens. Its catalog is Neutral, Redlamp, and twenty ported from omoi-station: Kanagawa, Tokyo Night, Moonlight, Catppuccin, Rosé Pine, Nord, Everforest, Gruvbox, Dracula, Solarized, One Dark, Monokai, Ocean, Sakura, Copper, Vinyl Noir, Neon Dusk, Burnt Tape, Phantom Frequency and Velvet Static. Around them: a tint from 0 (the theme's tones in grey) to 1, native controls in the theme's accent or the system's, the panels' translucency (solid under Reduce Transparency), and the palette in a theme of its own.
+- **Redlamp keeps themes as families,** each a matched dark and light pair, so a choice survives an appearance change. A family is either authored directly or ten colours (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, and `primaryRoles`, which keeps a brand colour to the places it's allowed), mapped to tokens. Its catalog is Neutral, Redlamp, and twenty ported from omoi-station: Kanagawa, Tokyo Night, Moonlight, Catppuccin, Rosé Pine, Nord, Everforest, Gruvbox, Dracula, Solarized, One Dark, Monokai, Ocean, Sakura, Copper, Vinyl Noir, Neon Dusk, Burnt Tape, Phantom Frequency and Velvet Static. Around them: a tint from 0 (the theme's tones in grey) to 1, native controls in the theme's accent or the system's, the panels' translucency (solid under Reduce Transparency), and the palette in a theme of its own, which come in Mac-M5 (Owner, 6 Nov).
 - **Its tokens are a photo editor's** (labels, tracks, thumbs, wells, an edited dot), so jaw maps the ten colours to a chat's roles itself, below.
-- **Copied, not linked** (Owner, 26 Oct). `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 300 lines: `RGBA` with its HSL parser and mixing, `ThemePalette`, `ThemeFamily`, `PrimaryRoles` and the catalog's data, in the same slot order. `scripts/sync-themes` compares jaw's copy with `ThemeCatalog.swift` in `~/src/darkroom` and says what differs, as `scripts/sync-protos` does for whatsmeow. Redlamp's files are under the MPL 2.0; the copied ones keep their notice, or the owner, who holds both, relicenses them for jaw.
+- **Copied, not linked** (Owner, 26 Oct), **under jaw's licence** (Owner, 6 Nov). `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 200 lines in `JawThemes/Sources/RedlampCatalog.swift`: `ThemePalette`, `PrimaryRoles`, the HSL parser, the families' ten colours in Redlamp's slot order, the Redlamp family's two palettes and the brand's nine colours they're made of. Its owner relicensed Redlamp's catalog for jaw under jaw's MIT licence ("I own redlamp, MIT is fine"), so the copy carries jaw's licence with a line saying whose it is, and there's no `docs/licenses/redlamp.txt`. `scripts/sync-themes` copies it from a checkout of Redlamp at a pinned commit with `git show`, never touching the checkout, and with `--check` says what differs, the families' IDs and names in their order among it, and what Redlamp's main has changed since, Neutral's tokens included. It's run by hand when Redlamp's catalog moves: CI has no checkout of Redlamp and doesn't run it, and run where there's none, it says so and checks nothing.
+- **Held readable** (Owner, 6 Nov): mapped by the table below, then held as Omarchy's are, every colour at 3:1 on the ground and the surface, secondary text too, the dim text at 2.5 to 4.5:1, and the selection and your bubbles moved toward their ground until text reads at 4.5:1 on them, readable over exact: 37 of the 42 halves move a little, a photo editor's faint labels most. Neutral is Redlamp's standard greys in the system's colours, its accent, orange, green and red, read in both appearances and again when they change. The Redlamp family keeps its red to its accent: its light half's mentions take the brand's filament, darkened to read on paper, and its senders' eight hues keep 30° or more from the red. Under a grey accent, as Graphite's is, Neutral's senders take the system's blue's hue, so a group's are still eight colours (Owner, 6 Nov).
+
+### Omarchy's themes, from jawd
+
+- **Asked after each hello** with `themes`, never before the first frame; jawd answers at once, and its answer holds, through a drop too, until the next hello's replaces it. Each theme in it is read on its own, so one the Mac can't read leaves out only itself. The slots' Omarchy themes are remembered with their colours (`themeDarkColours`, `themeLightColours`), so the first frame is drawn in them before jawd answers, and a theme jawd no longer serves is drawn as Tokyo Night in its slot, the choice kept.
+- **Mapped as the terminal maps them:** `theme.rs`'s `Roles::of`, ported to Swift with the same keys, bands and straight line toward the ground or the text, so the Mac lands on the terminal's colours, then held at 3:1 on the surface the Mac draws its list and bubbles on, which moves 9 of the 23 a little (Owner, 6 Nov). The Settings and themes design's table has each role's key.
 
 ### jaw's own theme
 
-- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Its light half is Tokyo Night Day, Tokyo Night's own light palette, taken from its source when the family is added. Redlamp's Tokyo Night stays beside it as it is, a lighter take.
+- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Held as every theme is (below), it draws its secondary and dim text a step lighter, `#7e87af` and `#66709a`, and Tokyo Night Day's blue as text and links, its red, its mention and its dim text a shade deeper. Its light half is Tokyo Night Day, Tokyo Night's own light palette. Omarchy's Tokyo Night and Redlamp's, a lighter take, are in their own sections of the gallery.
 
 ### The roles
 
@@ -376,18 +384,22 @@ Every colour the app draws is asked for by what it's for, as `theme.rs` asks, ne
 | The sidebar, the list, their bubbles | surface `#24283b` | `card` |
 | Text | fg `#c0caf5` | `foreground` |
 | Secondary text: previews, times | muted `#737aa2` | `muted` |
-| Quieter text, ticks not yet read | comment `#565f89` | `muted` at 62%, Redlamp's tertiary |
+| Quieter text, ticks not yet read (in the secondary text's colour everywhere but on the window's ground and the surface) | comment `#565f89` | `muted` at 62%, Redlamp's tertiary |
 | Separators | gutter `#3b4261` | `border` |
-| Focus, selection, links, read ticks, unread counts | blue `#7aa2f7`, selection `#283457` | `primary`, or `neutral` where `primaryRoles` keeps it out |
-| Your bubbles | blue at 18% over the ground | `primary` at 18% over `background` (12% in light) |
-| Mentions, the "new" marker | orange `#ff9e64` | `accent` |
+| Focus, selection, unread counts | blue `#7aa2f7`, selection `#283457` | `primary`, or `neutral` where `primaryRoles` keeps it out |
+| The accent drawn as text: an unread chat's time, Draft:, a mention of someone else, Show more, You in a reply | blue `#7aa2f7` | as the accent |
+| Links, read ticks | blue `#7aa2f7` | as the accent |
+| Your bubbles | blue at 18% over the ground | `primary` at 18% over `background` (12% in light), `neutral` where `primaryRoles` keeps it out |
+| Mentions, the "new" marker | orange `#ff9e64` | `accent`, the brand's filament in the Redlamp family's light half |
 | Online, typing | green `#9ece6a` | `success` |
 | Failed, destructive | red `#f7768e` | `destructive` |
-| Group senders | red, yellow, blue, purple, cyan, green, orange, teal | eight hues 45° apart from `primary`'s, each lightened or darkened until it reads at 4.5:1 on their bubble |
+| Group senders | red, yellow, blue, purple, cyan, green, orange, teal | eight hues 45° apart from `primary`'s, 37.5° apart away from it in the Redlamp family, each lightened or darkened until it reads at 4.5:1 on their bubble |
 
-- **Tint, appearance and translucency** as Redlamp's: the tint pulls every role toward the grey of its own lightness; appearance is dark, light or the system's; the sidebar's glass shows through by the translucency setting, solid under Reduce Transparency. Increase Contrast draws borders and secondary text a step stronger.
+- **Held where they're drawn** (Owner, 6 Nov; on the tints, 7 Nov): every theme's roles, of every source, then go through one hold, which moves each colour drawn as text or as a mark toward the text until it reads at 3:1 on every ground it's drawn on, the window's, the surface, a selected row, your bubbles and a selected message's band, and the tints laid over them, a card's and a quote's well, the accent's tint behind its symbols, the box's chip and a mention of you on its own tint; a selected row's online at 4.5:1; while the accent's fills, the grounds, the text and the borders keep the theme's colours, and the count and the marks drawn on the accent's fills, in the ground's colour in dark and white in light, read at 3:1 or more on them in every theme. The accent drawn as text is a role of its own, and the dim text is held on the window's ground and the surface and drawn in the secondary text's colour everywhere else, so it stays the quietest (the Settings and themes design's "Every theme, held where it's drawn").
+- **The slots** (Owner, 6 Nov): a theme for dark and one for light, kept in the app's preferences as `themeDark` and `themeLight` (`jaw`, `omarchy:<id>` or `redlamp:<id>`), both Jaw's Tokyo Night at first, the single `theme` key read into both once. A theme with both halves fills both; one of Omarchy's, which have one mode each, fills the slot of its mode; ⌥-click fills only the slot chosen for. Jaw draws the dark slot's theme while the Mac is dark, and the light one's while it's light.
+- **Tint, appearance and translucency** as Redlamp's, in Mac-M5: the tint pulls every role toward the grey of its own lightness; appearance is dark, light or the system's, as built; the sidebar's glass shows through by the translucency setting, solid under Reduce Transparency. Increase Contrast draws borders and secondary text a step stronger.
 - **Switching a theme is live:** the roles are read as views draw, and every window redraws on the change, with no relaunch.
-- **The Settings' Appearance pane** shows each family as a small chat drawn in its roles (a list row, their bubble, yours, a mention, a sender's name), as Redlamp's gallery shows each theme as a small panel.
+- **The Settings' Appearance pane** has the appearance, the two slots as tiles, each its theme's card at half size, and the gallery: Jaw's, Omarchy's and Redlamp's sections of cards three across, each a small chat in the half the slot would take (an unread row, their bubble with a mention of you, yours with its ticks in the link colour), as Redlamp's gallery shows each theme as a small panel. The arrows move through the cards, previewing each as a click on it would fill the slots as they were at the first arrow, so coming back to where they started puts everything back, and a click on the theme already chosen for the slot shown changes nothing (Owner, 7 Nov); while jawd's themes aren't in, Omarchy's section says why.
 
 ## Animation
 
@@ -449,7 +461,7 @@ Nothing animates when nothing happens: no idle breathing, no shimmer but the hea
 
 - **VoiceOver:** each message is one element read as its sender, text or kind, time and state ("Ana, did you get the photos from Sunday?, 13:58, 2 hearts"); chat rows read their unread and mentions; actions are offered as the element's actions, so the hover buttons have keyboard and VoiceOver equivalents.
 - **Every action has a key,** and the palette lists them.
-- **Reduce Motion, Reduce Transparency and Increase Contrast** as "Themes" and "Animation" say; text sizes with ⌘+ and ⌘−; group senders' colours checked at 4.5:1.
+- **Reduce Motion, Reduce Transparency and Increase Contrast** as "Themes" and "Animation" say; text sizes with ⌘+ and ⌘−; group senders' colours at 3:1 or more wherever they're drawn, in every theme, as "Themes" holds them, and checked at 4.5:1 in every theme in Mac-M5's accessibility step, with Increase Contrast.
 
 ## Protocol additions
 
@@ -485,7 +497,7 @@ Nothing else is needed: several open chats are several `messages.watch` windows,
 mac/
   Project.swift             Tuist, as Redlamp: Swift 6, macOS 26, warnings as errors
   JawKit/                   the client: connection, rows, window models, keys and asking again, focus
-  JawThemes/                Redlamp's families (copied), jaw's own, the roles
+  JawThemes/                the roles, jaw's own, Omarchy's mapping, Redlamp's families (copied), the slots
   JawUI/                    AppKit: chat list, conversation, cells, layout cache, pictures, the box, library grid, sidebar
   JawApp/                   the app: windows, panes, palette, viewer, settings, linking, states, agent, notifications
   JawHarness/               the harness: an app for building and reviewing the interface from fixtures (2026-10-27-jaw-mac-harness-design.md)
@@ -498,7 +510,7 @@ scripts/sync-themes         jaw's copy of Redlamp's catalog against darkroom's
 - **The protocol:** every fixture decodes, and every request JawKit writes equals its fixture.
 - **Window models:** jaw-client's tests, ported: a reference model under shuffled and repeated updates; anchors; the hold; what arrived since a move.
 - **Live, on `jawd demo`** in a temporary folder, never the owner's: watching, paging at depth, sending with keys, a flood of 2,000 a second, jawd killed mid-stream and the windows checked against a fresh watch.
-- **Screens:** the harness, an app for building and reviewing the interface in isolation, as [its design](2026-10-27-jaw-mac-harness-design.md) has it, draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in both looks, in jaw's theme light and dark and two of Redlamp's, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
+- **Screens:** the harness, an app for building and reviewing the interface in isolation, as [its design](2026-10-27-jaw-mac-harness-design.md) has it, draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in both looks, in any of the themes, Jaw's, Omarchy's or Redlamp's, light and dark, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
 - **The bench:** `jaw-mac bench` times launch, opens, keys in a flood, scrolling with photos, memory and idle wake-ups against `jawd demo`, as `jaw bench` does, and `mise run perf-mac` writes its table.
 - **CI:** macOS runners on main and by hand, as jaw's design keeps them, since macOS minutes count ten times.
 
@@ -512,7 +524,7 @@ The order and each milestone's steps, done-when and budgets are in [the Mac plan
 | Mac-M2 | **Every inline kind:** photos, albums, stickers, GIFs, videos, video messages, voice, documents, links, locations, contacts, polls; the viewer; the library | jawd's M3 media in, M2's link previews, M5 voice |
 | Mac-M3 | **The palette, whole:** every kind and action, its modes, search in a chat, sending media and voice, scheduled messages and reminders | jawd's M4 media out, M5 recording, M7 scheduled messages and reminders (P9) |
 | Mac-M4 | **Split panels:** panes, focus mode, the glance, folders and the roster | jawd's M6 folders, P1 (being built) |
-| Mac-M5 | **Polish, and it's jaw:** Redlamp's themes, the animations, the Mimic, linking, notifications, accessibility, a signed build | P2, P3, P5 |
+| Mac-M5 | **Polish, and it's jaw:** the themes' tint and translucency, the animations, the Mimic, linking, notifications, accessibility, a signed build | P2, P3, P5 |
 
 ## The owner's answers
 

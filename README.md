@@ -155,4 +155,4 @@ jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow uno
 
 ## License
 
-[MIT](LICENSE). Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote them, MIT-licensed ([docs/licenses/omarchy.txt](docs/licenses/omarchy.txt)); Ctrl-, or `jaw settings` picks one.
+[MIT](LICENSE). Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote them, MIT-licensed ([docs/licenses/omarchy.txt](docs/licenses/omarchy.txt)); Ctrl-, or `jaw settings` picks one. Jaw.app has Redlamp's theme families beside them, under jaw's MIT, as their owner relicensed them for jaw.
